@@ -187,8 +187,40 @@ function renderTicketModal() {
 
 function closeAndReload() { closeModal(); loadState(); }
 
+// Build a <select> for model/effort/permissions scoped to a harness type, with the
+// current value always present and a custom escape hatch for models.
+function harnessOptions(kind, type, current, defaultLabel) {
+  const reg = S.data.registry[type];
+  let items = [];
+  if (reg) {
+    if (kind === 'model') items = reg.models.map((m) => ({ v: m.id, l: m.label }));
+    if (kind === 'effort') items = reg.efforts.map((e) => ({ v: e, l: e }));
+    if (kind === 'permissions') items = reg.permissions.map((p) => ({ v: p, l: p }));
+  }
+  if (current && !items.some((i) => i.v === current)) items.push({ v: current, l: `${current} (custom)` });
+  const opts = [`<option value="">${esc(defaultLabel)}</option>`]
+    .concat(items.map((i) => `<option value="${esc(i.v)}" ${i.v === current ? 'selected' : ''}>${esc(i.l)}</option>`));
+  if (kind === 'model') opts.push(`<option value="__custom">custom…</option>`);
+  return opts.join('');
+}
+
+function handleCustomModel(sel) {
+  if (sel.value !== '__custom') return true;
+  const v = prompt('Model id (free text — anything the CLI accepts):');
+  if (v?.trim()) {
+    const o = document.createElement('option');
+    o.value = o.textContent = v.trim();
+    sel.appendChild(o);
+    sel.value = v.trim();
+    return true;
+  }
+  sel.value = '';
+  return false;
+}
+
 function renderOverview(body, t) {
-  const reg = S.data.registry;
+  if (S.ovDraft?.id !== t.id) S.ovDraft = { id: t.id, ov: structuredClone(t.overrides || {}) };
+  const draft = S.ovDraft.ov;
   const agentCols = cols().filter((c) => c.role === 'agent');
   body.innerHTML = `
     <div class="kv">
@@ -199,35 +231,43 @@ function renderOverview(body, t) {
     </div>
     <label class="f">DESCRIPTION</label>
     <textarea id="f-desc">${esc(t.description)}</textarea>
-    <label class="f">PER-COLUMN HARNESS OVERRIDES (blank = column default)</label>
-    <div class="overrides-grid">
+    <label class="f">PER-COLUMN HARNESS OVERRIDES ("default" = column config)</label>
+    <div class="overrides-wrap"><div class="overrides-grid">
       <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div><div class="h">PERMS</div>
       ${agentCols.map((c) => {
-        const o = t.overrides?.[c.id] || {};
+        const o = draft[c.id] || {};
+        const effType = o.type || c.harness.type;
         return `<div>${esc(c.name)}</div>
-          <div><select data-ov="${c.id}:type"><option value="">default (${esc(c.harness.type)})</option><option value="claude" ${o.type === 'claude' ? 'selected' : ''}>claude</option><option value="codex" ${o.type === 'codex' ? 'selected' : ''}>codex</option></select></div>
-          <div><input data-ov="${c.id}:model" list="dl-models" placeholder="${esc(c.harness.model || '')}" value="${esc(o.model || '')}"></div>
-          <div><input data-ov="${c.id}:effort" list="dl-efforts" placeholder="${esc(c.harness.effort || '')}" value="${esc(o.effort || '')}"></div>
-          <div><input data-ov="${c.id}:permissions" list="dl-perms" placeholder="${esc(c.harness.permissions || '')}" value="${esc(o.permissions || '')}"></div>`;
+          <div><select data-ov="${c.id}:type">
+            <option value="">default (${esc(c.harness.type)})</option>
+            <option value="claude" ${o.type === 'claude' ? 'selected' : ''}>claude</option>
+            <option value="codex" ${o.type === 'codex' ? 'selected' : ''}>codex</option>
+          </select></div>
+          <div><select data-ov="${c.id}:model">${harnessOptions('model', effType, o.model || '', `default (${c.harness.model || '—'})`)}</select></div>
+          <div><select data-ov="${c.id}:effort">${harnessOptions('effort', effType, o.effort || '', `default (${c.harness.effort || '—'})`)}</select></div>
+          <div><select data-ov="${c.id}:permissions">${harnessOptions('permissions', effType, o.permissions || '', `default (${c.harness.permissions || '—'})`)}</select></div>`;
       }).join('')}
-    </div>
-    <datalist id="dl-models">${[...reg.claude.models, ...reg.codex.models].map((m) => `<option value="${m.id}">${esc(m.label)}</option>`).join('')}</datalist>
-    <datalist id="dl-efforts">${[...new Set([...reg.claude.efforts, ...reg.codex.efforts])].map((e) => `<option value="${e}">`).join('')}</datalist>
-    <datalist id="dl-perms">${[...reg.claude.permissions, ...reg.codex.permissions].map((p) => `<option value="${p}">`).join('')}</datalist>
-    <div class="hint">model / effort / perms accept free text — new models work before the registry knows them.</div>
+    </div></div>
+    <div class="hint">claude efforts go up to max; codex up to xhigh. "custom…" under model takes any id the CLI accepts.</div>
     <div style="margin-top:14px"><button class="btn" id="btn-save-ticket">[ SAVE CHANGES ]</button></div>`;
 
+  for (const sel of body.querySelectorAll('[data-ov]')) {
+    sel.onchange = () => {
+      if (sel.dataset.ov.endsWith(':model') && !handleCustomModel(sel)) return;
+      const [colId, key] = sel.dataset.ov.split(':');
+      const v = sel.value.trim();
+      if (v) (draft[colId] ||= {})[key] = v;
+      else if (draft[colId]) { delete draft[colId][key]; if (!Object.keys(draft[colId]).length) delete draft[colId]; }
+      // switching harness type changes which models/efforts/perms apply
+      if (key === 'type') renderOverview(body, t);
+    };
+  }
+
   $('#btn-save-ticket').onclick = async () => {
-    const overrides = {};
-    for (const el of body.querySelectorAll('[data-ov]')) {
-      const [colId, key] = el.dataset.ov.split(':');
-      const v = el.value.trim();
-      if (v) { (overrides[colId] ||= {})[key] = v; }
-    }
     await api(`/api/tickets/${t.id}`, 'PATCH', {
       workspace: $('#f-ws').value.trim(),
       description: $('#f-desc').value,
-      overrides,
+      overrides: draft,
     }).catch(alertErr);
   };
 }
@@ -278,36 +318,58 @@ function appendTranscriptLine(ev) {
 }
 
 /* ---- column config modal ---- */
-function renderColumnModal() {
+function renderColumnModal(draftOverride) {
   const c = S.data.board.columns.find((x) => x.id === S.modal.id);
   if (!c) return closeModal();
-  const reg = S.data.registry;
+  const h = draftOverride || c.harness;
+  const type = h.type || 'human';
   shell(`PHASE CONFIG /// ${esc(c.name)}`, `
     <div class="panel-body">
-      <label class="f">NAME</label><input id="c-name" value="${esc(c.name)}">
+      <label class="f">NAME</label><input id="c-name" value="${esc(draftOverride?._name ?? c.name)}">
       <label class="f">ROLE</label>
-      <select id="c-role">${['intake', 'agent', 'human-gate', 'terminal'].map((r) => `<option ${r === c.role ? 'selected' : ''}>${r}</option>`).join('')}</select>
+      <select id="c-role">${['intake', 'agent', 'human-gate', 'terminal'].map((r) => `<option ${r === (draftOverride?._role ?? c.role) ? 'selected' : ''}>${r}</option>`).join('')}</select>
       <label class="f">HARNESS</label>
-      <select id="c-type">${['human', 'claude', 'codex'].map((r) => `<option ${r === (c.harness.type || 'human') ? 'selected' : ''}>${r}</option>`).join('')}</select>
-      <label class="f">MODEL</label><input id="c-model" list="dl-c-models" value="${esc(c.harness.model || '')}">
-      <datalist id="dl-c-models">${[...reg.claude.models, ...reg.codex.models].map((m) => `<option value="${m.id}">${esc(m.label)}</option>`).join('')}</datalist>
-      <label class="f">EFFORT (claude: low/medium/high/xhigh/max — codex: low/medium/high/xhigh)</label>
-      <input id="c-effort" value="${esc(c.harness.effort || '')}">
-      <label class="f">PERMISSIONS (claude: auto/acceptEdits/manual/bypassPermissions — codex: read-only/workspace-write/danger-full-access)</label>
-      <input id="c-perms" value="${esc(c.harness.permissions || '')}">
+      <select id="c-type">${['human', 'claude', 'codex'].map((r) => `<option ${r === type ? 'selected' : ''}>${r}</option>`).join('')}</select>
+      <label class="f">MODEL</label>
+      <select id="c-model" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('model', type, h.model || '', '—')}</select>
+      <label class="f">EFFORT</label>
+      <select id="c-effort" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', type, h.effort || '', '— (CLI default)')}</select>
+      <label class="f">PERMISSIONS</label>
+      <select id="c-perms" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('permissions', type, h.permissions || '', '— (harness default)')}</select>
       <label class="f">ALLOWED TOOLS (claude only, e.g. "Bash(git *) Read Glob")</label>
-      <input id="c-tools" value="${esc(c.harness.allowedTools || '')}">
+      <input id="c-tools" value="${esc(h.allowedTools || '')}">
       <label class="f">CHROME EXTENSION (claude only)</label>
-      <select id="c-chrome"><option value="">off</option><option value="1" ${c.harness.chrome ? 'selected' : ''}>on</option></select>
+      <select id="c-chrome"><option value="">off</option><option value="1" ${h.chrome ? 'selected' : ''}>on</option></select>
       <label class="f">AUTO-RUN WHEN A TICKET ARRIVES</label>
-      <select id="c-auto"><option value="">off</option><option value="1" ${c.autoRun ? 'selected' : ''}>on</option></select>
+      <select id="c-auto"><option value="">off</option><option value="1" ${(draftOverride?._autoRun ?? c.autoRun) ? 'selected' : ''}>on</option></select>
       <label class="f">PHASE PROMPT</label>
-      <textarea id="c-prompt" style="min-height:110px">${esc(c.phasePrompt)}</textarea>
+      <textarea id="c-prompt" style="min-height:110px">${esc(draftOverride?._prompt ?? c.phasePrompt)}</textarea>
       <label class="f">EXIT CRITERIA</label>
-      <textarea id="c-exit">${esc(c.exitCriteria)}</textarea>
+      <textarea id="c-exit">${esc(draftOverride?._exit ?? c.exitCriteria)}</textarea>
     </div>`,
     `<button class="btn btn-danger" id="c-del">[ DELETE PHASE ]</button>
      <button class="btn btn-accent" id="c-save">[ SAVE ]</button>`);
+
+  const collectDraft = () => ({
+    type: $('#c-type').value,
+    model: $('#c-model').value === '__custom' ? '' : $('#c-model').value,
+    effort: $('#c-effort').value,
+    permissions: $('#c-perms').value,
+    allowedTools: $('#c-tools').value.trim(),
+    chrome: Boolean($('#c-chrome').value),
+    _name: $('#c-name').value,
+    _role: $('#c-role').value,
+    _autoRun: Boolean($('#c-auto').value),
+    _prompt: $('#c-prompt').value,
+    _exit: $('#c-exit').value,
+  });
+  // switching harness re-renders with the matching model/effort/permission lists
+  $('#c-type').onchange = () => {
+    const d = collectDraft();
+    d.model = ''; d.effort = ''; d.permissions = '';
+    renderColumnModal(d);
+  };
+  $('#c-model').onchange = () => handleCustomModel($('#c-model'));
 
   $('#c-save').onclick = () => api(`/api/columns/${c.id}`, 'PATCH', {
     name: $('#c-name').value.trim(),

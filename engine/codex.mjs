@@ -10,19 +10,21 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
   if (resume) args.push('resume', sessionId);
 
   args.push('--json', '-o', lastMsgFile, '--skip-git-repo-check');
-  // codex keeps .git read-only in workspace-write mode by default, which blocks the
-  // "commit your work" contract of Build-style phases.
-  args.push('-c', 'sandbox_workspace_write.allow_git_writes=true');
   if (harness.model) args.push('-m', harness.model);
   if (harness.effort) args.push('-c', `model_reasoning_effort="${harness.effort}"`);
 
   const sandbox = harness.permissions || 'workspace-write';
+  // .git is kept read-only inside workspace-write unless listed as a writable root,
+  // which would block the "commit your work" contract of Build-style phases.
+  const gitDir = path.join(workspace, '.git');
+  const roots = JSON.stringify(resume ? [dataDir, gitDir] : [gitDir]);
   if (resume) {
     // `exec resume` has no --sandbox/-C/--add-dir flags; config overrides cover it.
     args.push('-c', `sandbox_mode="${sandbox}"`);
-    args.push('-c', `sandbox_workspace_write.writable_roots=["${dataDir}"]`);
+    args.push('-c', `sandbox_workspace_write.writable_roots=${roots}`);
   } else {
     args.push('--sandbox', sandbox, '-C', workspace, '--add-dir', dataDir);
+    args.push('-c', `sandbox_workspace_write.writable_roots=${roots}`);
   }
   args.push(prompt);
   return { cmd: 'codex', args, newSessionId: null, lastMsgFile };

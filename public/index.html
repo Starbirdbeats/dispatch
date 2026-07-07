@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DISPATCH /// AGENT OS</title>
+<link rel="stylesheet" href="dispatch.css">
+</head>
+<body>
+<div id="scanlines" aria-hidden="true"></div>
+
+<header id="topbar">
+  <div class="brand">DISPATCH<span class="rev">/// AGENT OS · REV 0.1</span></div>
+  <div id="health" class="health"></div>
+  <div id="queueinfo" class="queueinfo"></div>
+  <div class="actions">
+    <button id="btn-settings" class="btn">[ SETTINGS ]</button>
+    <button id="btn-new" class="btn btn-accent">[ + TICKET ]</button>
+  </div>
+</header>
+
+<main id="board" aria-label="kanban board"></main>
+
+<div id="modal-root"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

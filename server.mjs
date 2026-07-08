@@ -199,9 +199,21 @@ app.post('/api/tickets', (req, res) => {
   if (!att.ok) return res.status(att.status).json({ error: att.error });
   const t = store.createTicket({ title: title.trim(), description, workspace, columnId, overrides, scheduledAt, attachments: att.files });
   broadcast({ type: 'state-changed' });
+
   const col = store.column(t.columnId);
-  if (col?.autoRun && col.role === 'agent') runner.enqueue(t.id, { by: 'human' });
-  res.json(t);
+  const cap = store.board.settings.maxConcurrent || 2;
+  const freeSlot = runner.snapshot().running.length < cap;
+  let started = null;
+  if (col?.role === 'agent' && col.autoRun) {
+    runner.enqueue(t.id, { by: 'human' });
+    started = col.name;
+  } else if (col?.role === 'intake' && !t.scheduledAt && freeSlot) {
+    // A free run slot and no scheduled time → don't make the human wait for the 5-min sweep;
+    // dispatch into the pipeline now. If at capacity, leave it for the sweep as before.
+    const next = store.nextAgentColumn(col.id);
+    if (next) { runner.moveTicket(t.id, next.id, { by: 'human', autoRun: true }); started = next.name; }
+  }
+  res.json({ ...t, started });
 });
 
 app.patch('/api/tickets/:id', (req, res) => {

@@ -764,7 +764,7 @@ function renderNewModal() {
       <label class="f">ATTACHMENTS (listed in the dossier for the agents to read — max ${MAX_ATTACH_MB}MB each)</label>
       ${dropzoneHTML('n-att-drop', 'n-att-input', 'n-att-browse')}
       <div class="att-list" id="n-att-list"></div>
-      <div class="hint">unscheduled backlog tickets auto-start every ${S.data.board.settings.autoDispatchEveryMin || 5} min. a scheduled ticket waits for its timestamp.</div>
+      <div class="hint">unscheduled backlog tickets start immediately if a run slot is free, otherwise on the next sweep (every ${S.data.board.settings.autoDispatchEveryMin || 5} min). a scheduled ticket waits for its timestamp.</div>
     </div>`,
     `<button class="btn btn-accent" id="n-create">[ CREATE ]</button>`);
   wireDropzone('n-att-drop', 'n-att-input', 'n-att-browse', async (files) => {
@@ -779,7 +779,7 @@ function renderNewModal() {
     columnId: $('#n-col').value,
     scheduledAt: $('#n-sched').value || null,
     attachments: (S.newAttachments || []).map(({ name, type, size, dataB64 }) => ({ name, type, size, dataB64 })),
-  }).then(() => { S.newAttachments = []; toast('TICKET CREATED'); closeAndReload(); }).catch(alertErr);
+  }).then((r) => { S.newAttachments = []; toast(r.started ? `CREATED — STARTED → ${r.started.toUpperCase()}` : 'TICKET CREATED'); closeAndReload(); }).catch(alertErr);
 }
 
 // Staged (not-yet-uploaded) files for the New Ticket modal — held in memory until CREATE.

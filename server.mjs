@@ -65,6 +65,20 @@ function autoDispatchTick() {
 }
 setInterval(() => { try { autoDispatchTick(); } catch (e) { console.error('auto-dispatch:', e); } }, TICK_MS);
 
+// Resume runs that a restart killed mid-flight. Harness sessions persist on disk,
+// so the re-run resumes with full context instead of starting over.
+for (const t of store.tickets.values()) {
+  if (!t.interrupted) continue;
+  delete t.interrupted;
+  const col = store.column(t.columnId);
+  if (col?.role === 'agent') {
+    store.appendActivity(t.id, { kind: 'system', by: 'engine', text: 'run was interrupted by a server restart — resuming' });
+    runner.enqueue(t.id, { by: 'engine' });
+  } else {
+    store.saveTicket(t.id);
+  }
+}
+
 // ---- state ----
 app.get('/api/state', (_req, res) => {
   res.json({

@@ -87,7 +87,11 @@ export class Store {
       const t = readJSON(path.join(TICKETS_DIR, id, 'ticket.json'));
       if (!t) continue;
       // Orphaned runs from a previous server process: no child exists anymore.
-      if (t.status === 'running' || t.status === 'queued') t.status = 'idle';
+      // Flag them so the server can resume the run after boot (sessions survive on disk).
+      if (t.status === 'running' || t.status === 'queued') {
+        t.status = 'idle';
+        t.interrupted = true;
+      }
       delete t.currentRun;
       this.tickets.set(t.id, t);
     }

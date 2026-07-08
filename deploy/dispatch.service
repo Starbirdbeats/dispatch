@@ -7,7 +7,7 @@ ExecStart=/usr/bin/env node /home/Starbird/git/dispatch/server.mjs
 WorkingDirectory=/home/Starbird/git/dispatch
 Restart=on-failure
 RestartSec=5
-KillMode=mixed
+KillMode=process
 Environment=DISPATCH_PORT=4400
 Environment=PATH=/home/Starbird/.npm-global/bin:/home/Starbird/.local/bin:/usr/local/bin:/usr/bin:/bin
 

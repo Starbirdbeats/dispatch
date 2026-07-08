@@ -89,6 +89,7 @@ body {
 .health .ok { color: var(--fg); }
 .health .bad { color: var(--red); }
 .queueinfo b { color: var(--fg); }
+.paused-flag { color: var(--red); font-weight: 800; letter-spacing: 0.1em; animation: pulse 1.6s steps(2) infinite; }
 
 /* ---------- buttons / inputs ---------- */
 .btn {

@@ -55,9 +55,12 @@ const runner = new Runner(store, broadcast);
 // (default 5 min): start the pipeline for any unscheduled ticket sitting in an intake column.
 const TICK_MS = 60_000;
 let nextSweepAt = Date.now() + 5 * 60_000; // grace period after boot before the first sweep
+// maxConcurrent === 0 is the engine pause switch: nothing new starts, and the auto-schedulers
+// go quiet so the queue/log don't churn while paused.
+const isPaused = () => (store.board.settings.maxConcurrent ?? 2) <= 0;
 function autoDispatchTick() {
   const s = store.board.settings;
-  if (s.autoDispatch === false) return;
+  if (s.autoDispatch === false || isPaused()) return;
   const now = Date.now();
   const sweep = now >= nextSweepAt;
   if (sweep) nextSweepAt = now + (s.autoDispatchEveryMin || 5) * 60_000;
@@ -102,6 +105,7 @@ function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { retu
 
 function stallWatchdogTick(now) {
   const s = store.board.settings;
+  if (isPaused()) return; // engine paused — don't resume anything
   const stallMs = (s.stallAfterMin ?? 10) * 60_000;
   if (stallMs <= 0) return; // 0 disables the watchdog
   const snap = runner.snapshot();
@@ -144,6 +148,7 @@ function stallWatchdogTick(now) {
 // is idle — if a run is in progress, the wake waits and fires the moment it frees up.
 const WAKE_DELAY_MS = 60_000;
 function processPendingWakes(now) {
+  if (isPaused()) return; // hold wakes until the engine resumes
   for (const t of store.tickets.values()) {
     const pw = t.pendingWake;
     if (!pw || now < pw.at) continue;
@@ -201,7 +206,7 @@ app.post('/api/tickets', (req, res) => {
   broadcast({ type: 'state-changed' });
 
   const col = store.column(t.columnId);
-  const cap = store.board.settings.maxConcurrent || 2;
+  const cap = store.board.settings.maxConcurrent ?? 2; // 0 = paused → no free slot
   const freeSlot = runner.snapshot().running.length < cap;
   let started = null;
   if (col?.role === 'agent' && col.autoRun) {
@@ -423,6 +428,7 @@ app.delete('/api/columns/:id', (req, res) => {
 app.patch('/api/settings', (req, res) => {
   Object.assign(store.board.settings, req.body);
   store.saveBoard();
+  runner.pump(); // raising the cap (or un-pausing) should drain any queued work immediately
   broadcast({ type: 'state-changed' });
   res.json(store.board.settings);
 });

@@ -252,7 +252,16 @@ function renderTopbar() {
     `<span class="${h.claude?.ok ? 'ok' : 'bad'}">CLAUDE ${h.claude?.ok ? (h.claude.version || 'OK') : 'OFFLINE'}</span>` +
     ` &nbsp;///&nbsp; <span class="${h.codex?.ok ? 'ok' : 'bad'}">CODEX ${h.codex?.ok ? (h.codex.version || 'OK') : 'OFFLINE'}</span>`;
   const r = S.data.runs;
-  $('#queueinfo').innerHTML = `RUNNING <b>${r.running.length}</b> / QUEUED <b>${r.queued.length}</b> / CAP <b>${S.data.board.settings.maxConcurrent}</b>`;
+  const cap = S.data.board.settings.maxConcurrent ?? 2;
+  const paused = cap <= 0;
+  $('#queueinfo').innerHTML = paused
+    ? `<span class="paused-flag">⏸ PAUSED</span> / RUNNING <b>${r.running.length}</b> / QUEUED <b>${r.queued.length}</b>`
+    : `RUNNING <b>${r.running.length}</b> / QUEUED <b>${r.queued.length}</b> / CAP <b>${cap}</b>`;
+  const pauseBtn = $('#btn-pause');
+  if (pauseBtn) {
+    pauseBtn.textContent = paused ? '[ ▶ RESUME ]' : '[ ⏸ PAUSE ]';
+    pauseBtn.classList.toggle('btn-accent', paused);
+  }
   const archived = S.data.tickets.filter((t) => t.archived).length;
   $('#btn-archive').textContent = archived ? `[ ARCHIVE ${String(archived).padStart(2, '0')} ]` : '[ ARCHIVE ]';
 }
@@ -848,7 +857,8 @@ function renderSettingsModal() {
       <hr class="sep">
 
       <div class="section-head">ENGINE</div>
-      <label class="f">MAX CONCURRENT RUNS</label><input id="s-cap" type="number" min="1" max="8" value="${s.maxConcurrent}">
+      <label class="f">MAX CONCURRENT RUNS <output>${(s.maxConcurrent ?? 2) <= 0 ? 'paused' : ''}</output></label><input id="s-cap" type="number" min="0" max="8" value="${s.maxConcurrent ?? 2}">
+      <div class="hint" style="margin-top:4px">0 = pause the engine (nothing new runs; queued work waits until you raise it).</div>
       <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
       <label class="f">DEFAULT WORKSPACE</label><input id="s-ws" value="${esc(s.defaultWorkspace)}">
       <label class="f">STALL WATCHDOG (MINUTES — resume orphaned tickets after this dwell; 0 = off)</label>
@@ -900,7 +910,7 @@ function renderSettingsModal() {
       return api(`/api/columns/${c.id}`, 'PATCH', { harness });
     }).filter(Boolean));
     await api('/api/settings', 'PATCH', {
-      maxConcurrent: Number($('#s-cap').value) || 2,
+      maxConcurrent: Number.isFinite(+$('#s-cap').value) ? Math.max(0, Math.min(8, +$('#s-cap').value)) : 2,
       runTimeoutMin: Number($('#s-to').value) || 30,
       defaultWorkspace: $('#s-ws').value.trim(),
       autoDispatch: Boolean($('#s-auto').value),
@@ -940,6 +950,15 @@ setInterval(() => {
 $('#btn-new').onclick = () => { S.newAttachments = []; S.modal = { type: 'new' }; renderModal(); };
 $('#btn-settings').onclick = () => { S.modal = { type: 'settings' }; renderModal(); };
 $('#btn-archive').onclick = () => { S.modal = { type: 'archive' }; renderModal(); };
+$('#btn-pause').onclick = () => {
+  const cap = S.data.board.settings.maxConcurrent ?? 2;
+  let next;
+  if (cap > 0) { localStorage.setItem('dispatch.prevCap', String(cap)); next = 0; }   // pause
+  else { next = Number(localStorage.getItem('dispatch.prevCap')) || 2; }               // resume
+  api('/api/settings', 'PATCH', { maxConcurrent: next })
+    .then(() => toast(next === 0 ? 'ENGINE PAUSED — nothing new will run' : `ENGINE RESUMED — cap ${next}`))
+    .catch(alertErr);
+};
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
 savePrefs(loadPrefs()); // apply saved theme / font / UI scale before first paint

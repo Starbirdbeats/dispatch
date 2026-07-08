@@ -191,8 +191,11 @@ export class Runner {
     this.store.saveQueue(this.queue);
   }
 
+  pump() { this._pump(); } // public: call after raising the cap so queued work drains
+
   _pump() {
-    const cap = this.store.board.settings.maxConcurrent || 2;
+    // ?? not || : maxConcurrent === 0 is a real value meaning "paused — start nothing".
+    const cap = this.store.board.settings.maxConcurrent ?? 2;
     while (this.running.size < cap && this.queue.length) {
       const job = this.queue.shift();
       this._saveQueue();

@@ -13,6 +13,7 @@ import { REGISTRY, loadCodexDefaults, probe } from './registry.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
 
+const BOOT_ID = crypto.randomUUID(); // stale open tabs self-reload when this changes
 const store = new Store();
 loadCodexDefaults();
 let health = { claude: { ok: false }, codex: { ok: false } };
@@ -76,6 +77,7 @@ app.get('/api/state', (_req, res) => {
       autoDispatch: store.board.settings.autoDispatch !== false,
       nextSweepAt,
     },
+    serverBoot: BOOT_ID,
   });
 });
 

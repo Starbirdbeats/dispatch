@@ -23,6 +23,9 @@ async function api(path, method = 'GET', body) {
 
 async function loadState() {
   S.data = await api('/api/state');
+  // Server restarted (new code deployed): pick up fresh JS/CSS instead of running stale app code.
+  if (S.serverBoot && S.serverBoot !== S.data.serverBoot) return location.reload();
+  S.serverBoot = S.data.serverBoot;
   render();
 }
 

@@ -122,7 +122,21 @@ function cardEl(t, c) {
 
 /* ---------- modals ---------- */
 function closeModal() { S.modal = null; $('#modal-root').innerHTML = ''; }
-function alertErr(e) { alert(`ERROR: ${e.message}`); }
+
+let toastTimer = null;
+function toast(text, isError = false) {
+  let el = $('#toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.className = isError ? 'err show' : 'show';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
+function alertErr(e) { toast(`ERROR: ${e.message}`, true); }
 
 function shell(title, bodyHTML, footHTML = '') {
   $('#modal-root').innerHTML = `
@@ -165,7 +179,7 @@ function renderTicketModal() {
      <div class="panel-body" id="tab-body"></div>`,
     `<select id="move-to" style="width:auto">${cols().map((c) => `<option value="${c.id}" ${c.id === t.columnId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
      <button class="btn" id="btn-move">[ MOVE ]</button>
-     <button class="btn" id="btn-run" ${running ? 'disabled' : ''}>[ RUN NOW ]</button>
+     <button class="btn" id="btn-run" ${running ? 'disabled' : ''}>[ ${effective(t, cols().find((c) => c.id === t.columnId) || {}).type === 'human' ? 'START PIPELINE' : 'RUN NOW'} ]</button>
      <button class="btn btn-danger" id="btn-stop" ${running || S.data.runs.queued.includes(t.id) ? '' : 'disabled'}>[ STOP ]</button>
      <button class="btn btn-danger" id="btn-del">[ DELETE ]</button>`
   );
@@ -173,9 +187,12 @@ function renderTicketModal() {
   for (const b of document.querySelectorAll('[data-tab]')) {
     b.onclick = () => { S.modal.tab = b.dataset.tab; renderTicketModal(); };
   }
-  $('#btn-move').onclick = () => api(`/api/tickets/${t.id}/move`, 'POST', { columnId: $('#move-to').value }).then(closeAndReload).catch(alertErr);
-  $('#btn-run').onclick = () => api(`/api/tickets/${t.id}/run`, 'POST', {}).catch(alertErr);
-  $('#btn-stop').onclick = () => api(`/api/tickets/${t.id}/stop`, 'POST', {}).catch(alertErr);
+  $('#btn-move').onclick = () => api(`/api/tickets/${t.id}/move`, 'POST', { columnId: $('#move-to').value }).then(() => { toast('MOVED'); closeAndReload(); }).catch(alertErr);
+  $('#btn-run').onclick = () => api(`/api/tickets/${t.id}/run`, 'POST', {}).then((r) => {
+    if (r.queued) toast(r.startedPhase ? `PIPELINE STARTED → ${r.startedPhase}` : 'RUN QUEUED');
+    else toast(`NOT QUEUED: ${r.reason || 'unknown'}`, true);
+  }).catch(alertErr);
+  $('#btn-stop').onclick = () => api(`/api/tickets/${t.id}/stop`, 'POST', {}).then(() => toast('STOP SIGNAL SENT')).catch(alertErr);
   $('#btn-del').onclick = () => { if (confirm('Delete ticket + dossier + transcripts?')) api(`/api/tickets/${t.id}`, 'DELETE').then(closeModal).catch(alertErr); };
 
   const body = $('#tab-body');
@@ -268,7 +285,7 @@ function renderOverview(body, t) {
       workspace: $('#f-ws').value.trim(),
       description: $('#f-desc').value,
       overrides: draft,
-    }).catch(alertErr);
+    }).then(() => toast('TICKET SAVED')).catch(alertErr);
   };
 }
 
@@ -289,7 +306,7 @@ function renderActivity(body, t) {
     const text = $('#f-comment').value.trim();
     if (!text) return;
     S.commentDraft = '';
-    await api(`/api/tickets/${t.id}/comment`, 'POST', { text }).catch(alertErr);
+    await api(`/api/tickets/${t.id}/comment`, 'POST', { text }).then(() => toast('COMMENT POSTED')).catch(alertErr);
   };
 }
 
@@ -385,7 +402,7 @@ function renderColumnModal(draftOverride) {
       allowedTools: $('#c-tools').value.trim(),
       chrome: Boolean($('#c-chrome').value),
     },
-  }).then(closeAndReload).catch(alertErr);
+  }).then(() => { toast('PHASE SAVED'); closeAndReload(); }).catch(alertErr);
   $('#c-del').onclick = () => { if (confirm('Delete this phase?')) api(`/api/columns/${c.id}`, 'DELETE').then(closeAndReload).catch(alertErr); };
 }
 
@@ -407,7 +424,7 @@ function renderNewModal() {
     description: $('#n-desc').value,
     workspace: $('#n-ws').value.trim(),
     columnId: $('#n-col').value,
-  }).then(closeAndReload).catch(alertErr);
+  }).then(() => { toast('TICKET CREATED'); closeAndReload(); }).catch(alertErr);
 }
 
 /* ---- settings modal ---- */
@@ -425,7 +442,7 @@ function renderSettingsModal() {
     maxConcurrent: Number($('#s-cap').value) || 2,
     runTimeoutMin: Number($('#s-to').value) || 30,
     defaultWorkspace: $('#s-ws').value.trim(),
-  }).then(closeAndReload).catch(alertErr);
+  }).then(() => { toast('SETTINGS SAVED'); closeAndReload(); }).catch(alertErr);
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
 }
 

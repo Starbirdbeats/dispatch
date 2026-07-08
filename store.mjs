@@ -106,6 +106,11 @@ export class Store {
     const i = sorted.findIndex((c) => c.id === id);
     return i >= 0 && i < sorted.length - 1 ? sorted[i + 1] : null;
   }
+  nextAgentColumn(id) {
+    const sorted = [...this.board.columns].sort((a, b) => a.order - b.order);
+    const from = sorted.findIndex((c) => c.id === id);
+    return sorted.find((c, i) => i > from && c.role === 'agent') || null;
+  }
 
   createTicket({ title, description, workspace, columnId, overrides }) {
     const id = `t-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;

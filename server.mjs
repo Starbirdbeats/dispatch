@@ -92,8 +92,19 @@ app.post('/api/tickets/:id/comment', (req, res) => {
 });
 
 app.post('/api/tickets/:id/run', (req, res) => {
-  const ok = runner.enqueue(req.params.id, { by: 'human' });
-  res.json({ queued: ok });
+  const t = store.tickets.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  const col = store.column(t.columnId);
+  const h = store.effectiveHarness(t, col);
+  // RUN from a human column means "start the pipeline": advance to the next agent phase.
+  if (h.type === 'human') {
+    const next = store.nextAgentColumn(col.id);
+    if (!next) return res.json({ queued: false, reason: `no agent phase after ${col.name}` });
+    runner.moveTicket(t.id, next.id, { by: 'human', autoRun: true });
+    return res.json({ queued: true, startedPhase: next.name });
+  }
+  const ok = runner.enqueue(t.id, { by: 'human' });
+  res.json({ queued: ok, reason: ok ? null : 'already queued or running' });
 });
 
 app.post('/api/tickets/:id/stop', (req, res) => {

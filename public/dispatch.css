@@ -185,6 +185,16 @@ label.f { display: block; margin: 12px 0 4px; font-size: 10px; text-transform: u
 .overrides-wrap { overflow-x: auto; }
 .overrides-wrap .overrides-grid { min-width: 640px; }
 
+/* ---------- toast ---------- */
+#toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px);
+  background: var(--bg-2); color: var(--fg); border: 1px solid var(--fg-dim);
+  padding: 10px 18px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+  z-index: 1001; opacity: 0; pointer-events: none; transition: opacity .12s steps(2), transform .12s steps(2);
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#toast.err { border-color: var(--red); color: var(--red); }
+
 /* ---------- mobile ---------- */
 @media (max-width: 760px) {
   body { overflow: auto; }

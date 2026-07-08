@@ -76,7 +76,53 @@ function autoDispatchTick() {
   // Even a no-op sweep advances nextSweepAt — push it so client countdowns reset.
   if (sweep) broadcast({ type: 'state-changed' });
 }
-setInterval(() => { try { autoDispatchTick(); } catch (e) { console.error('auto-dispatch:', e); } }, TICK_MS);
+// ---- stall watchdog ----
+// Every tick, inspect agent columns that HAVE tickets and resume orphaned work — tickets
+// that sat idle/errored past the dwell threshold with no live run behind them.
+// Never intervenes while an agent is actually working (engine entry or live pid = hands off).
+function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
+
+function stallWatchdogTick(now) {
+  const s = store.board.settings;
+  const stallMs = (s.stallAfterMin ?? 10) * 60_000;
+  if (stallMs <= 0) return; // 0 disables the watchdog
+  const snap = runner.snapshot();
+  const busy = new Set([...snap.running, ...snap.queued]);
+
+  for (const col of store.board.columns) {
+    if (col.role !== 'agent' || !col.autoRun) continue; // manual columns stay manual
+    const tickets = [...store.tickets.values()].filter((t) => t.columnId === col.id);
+    if (!tickets.length) continue; // empty column: skip inspection entirely
+
+    for (const t of tickets) {
+      if (busy.has(t.id)) continue;                                 // engine is on it
+      if (t.activeRun?.pid && pidAlive(t.activeRun.pid)) continue;  // agent process genuinely alive
+      if (t.status === 'awaiting-human') continue;                  // deliberately parked for Marcello
+      if (t.retryAt) continue;                                      // rate-limit retry already scheduled
+      const since = Date.parse(t.enteredColumnAt || t.lastRunEndedAt || t.createdAt);
+      if (!Number.isFinite(since) || now - since < stallMs) continue;
+      if (t.status === 'error') {
+        if ((t.watchdogRetries || 0) >= 2) continue;                // hard failure: leave it visible
+        t.watchdogRetries = (t.watchdogRetries || 0) + 1;
+      }
+      const dwellMin = Math.round((now - since) / 60_000);
+      store.appendActivity(t.id, {
+        kind: 'system', by: 'engine',
+        text: `stall watchdog: ${t.status} in ${col.name} for ${dwellMin} min with no live run — resuming`,
+      });
+      t.status = 'idle';
+      // dwell clock restarts so the watchdog doesn't hammer the same ticket every tick
+      t.enteredColumnAt = new Date(now).toISOString();
+      store.saveTicket(t.id);
+      runner.enqueue(t.id, { by: 'engine' });
+    }
+  }
+}
+
+setInterval(() => {
+  try { autoDispatchTick(); } catch (e) { console.error('auto-dispatch:', e); }
+  try { stallWatchdogTick(Date.now()); } catch (e) { console.error('stall-watchdog:', e); }
+}, TICK_MS);
 
 runner.recover();
 

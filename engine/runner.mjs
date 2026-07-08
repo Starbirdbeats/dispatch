@@ -164,6 +164,8 @@ export class Runner {
     }
 
     ticket.columnId = columnId;
+    ticket.enteredColumnAt = new Date().toISOString();
+    delete ticket.watchdogRetries; // fresh phase, fresh watchdog budget
     if (by === 'human') ticket.bounces = 0;
     if (ticket.status !== 'running') ticket.status = 'idle';
     this.store.appendActivity(ticketId, { kind: 'move', by, text: `${from?.name || '?'} → ${column.name}` });

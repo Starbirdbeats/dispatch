@@ -449,6 +449,8 @@ function renderSettingsModal() {
       <label class="f">MAX CONCURRENT RUNS</label><input id="s-cap" type="number" min="1" max="8" value="${s.maxConcurrent}">
       <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
       <label class="f">DEFAULT WORKSPACE</label><input id="s-ws" value="${esc(s.defaultWorkspace)}">
+      <label class="f">STALL WATCHDOG (MINUTES — resume orphaned tickets after this dwell; 0 = off)</label>
+      <input id="s-stall" type="number" min="0" value="${s.stallAfterMin ?? 10}">
       <label class="f">AUTO-DISPATCH BACKLOG</label>
       <select id="s-auto"><option value="">off</option><option value="1" ${s.autoDispatch !== false ? 'selected' : ''}>on</option></select>
       <label class="f">SWEEP INTERVAL (MINUTES)</label><input id="s-every" type="number" min="1" value="${s.autoDispatchEveryMin || 5}">
@@ -461,6 +463,7 @@ function renderSettingsModal() {
     defaultWorkspace: $('#s-ws').value.trim(),
     autoDispatch: Boolean($('#s-auto').value),
     autoDispatchEveryMin: Number($('#s-every').value) || 5,
+    stallAfterMin: Number($('#s-stall').value),
   }).then(() => { toast('SETTINGS SAVED'); closeAndReload(); }).catch(alertErr);
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
 }

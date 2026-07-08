@@ -16,6 +16,7 @@ const DEFAULT_BOARD = {
     defaultWorkspace: path.join(os.homedir(), 'git'),
     autoDispatch: true,          // sweep intake columns and start pipelines automatically
     autoDispatchEveryMin: 5,
+    stallAfterMin: 10,           // stall watchdog: resume orphaned tickets after this dwell; 0 = off
   },
   columns: [
     {
@@ -136,6 +137,7 @@ export class Store {
       workspace: workspace || this.board.settings.defaultWorkspace,
       columnId: columnId || this.board.columns.find((c) => c.role === 'intake')?.id || this.board.columns[0].id,
       createdAt: new Date().toISOString(),
+      enteredColumnAt: new Date().toISOString(),
       overrides: overrides || {},
       scheduledAt: scheduledAt || null,
       sessions: { claude: null, codex: null },

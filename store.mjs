@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 export const DATA_DIR = process.env.DISPATCH_DATA || path.join(os.homedir(), 'dispatch-data');
 const TICKETS_DIR = path.join(DATA_DIR, 'tickets');
 const BOARD_FILE = path.join(DATA_DIR, 'board.json');
+const QUEUE_FILE = path.join(DATA_DIR, 'queue.json');
 
 const DEFAULT_BOARD = {
   settings: {
@@ -86,22 +87,32 @@ export class Store {
     for (const id of fs.readdirSync(TICKETS_DIR)) {
       const t = readJSON(path.join(TICKETS_DIR, id, 'ticket.json'));
       if (!t) continue;
-      // Orphaned runs from a previous server process: no child exists anymore.
-      // Flag them so the server can resume the run after boot (sessions survive on disk).
-      if (t.status === 'running' || t.status === 'queued') {
+      // Legacy leftovers without an activeRun predate detached journals; the
+      // runner will resume them after boot. Active runs are recovered separately.
+      if (!t.activeRun && (t.status === 'running' || t.status === 'queued')) {
         t.status = 'idle';
         t.interrupted = true;
       }
-      delete t.currentRun;
+      if (!t.activeRun) delete t.currentRun;
       this.tickets.set(t.id, t);
     }
   }
 
   saveBoard() { atomicWrite(BOARD_FILE, JSON.stringify(this.board, null, 2)); }
+  saveQueue(queue) { atomicWrite(QUEUE_FILE, JSON.stringify(queue, null, 2)); }
+  loadQueue() {
+    const q = readJSON(QUEUE_FILE, []);
+    return Array.isArray(q) ? q.filter((j) => j?.ticketId && j?.columnId) : [];
+  }
 
   ticketDir(id) { return path.join(TICKETS_DIR, id); }
   dossierPath(id) { return path.join(this.ticketDir(id), 'DOSSIER.md'); }
   transcriptsDir(id) { return path.join(this.ticketDir(id), 'transcripts'); }
+  runDir(id, runId) {
+    const dir = path.join(this.ticketDir(id), 'runs', runId);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
 
   column(id) { return this.board.columns.find((c) => c.id === id); }
   columnByName(name) {

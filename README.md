@@ -16,6 +16,14 @@ journalctl --user -u dispatch -f    # logs
 
 UI: `http://starbird:4400` (Tailscale) or `http://localhost:4400`.
 
+Deploy the service unit after code review:
+
+```bash
+cp deploy/dispatch.service ~/.config/systemd/user/dispatch.service
+systemctl --user daemon-reload
+systemctl --user restart dispatch
+```
+
 ## How it works
 
 - **Columns = phases.** Each has a harness (`claude` / `codex` / `human`), model, effort, permissions, a phase prompt, and an auto-run toggle. Configure via the `CFG >>` button on any column.

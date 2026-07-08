@@ -302,6 +302,39 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 .commentbox { display: flex; gap: 8px; margin-top: 12px; }
 .commentbox textarea { min-height: 44px; flex: 1; }
 
+/* ---- diagnosis badge on cards ---- */
+.badge { font-size: 9px; letter-spacing: 0.08em; padding: 1px 5px; border: 1px solid var(--line); white-space: nowrap; }
+.badge.tone-live { color: var(--green); border-color: var(--green); }
+.badge.tone-ok { color: var(--fg-dim); }
+.badge.tone-warn { color: #e0a030; border-color: #e0a030; }
+.badge.tone-stuck { color: var(--bg); background: var(--red); border-color: var(--red); font-weight: 700; }
+
+/* ---- diagnosis banner in ticket modal ---- */
+.diag { padding: 10px 16px; border-bottom: 1px solid var(--line); border-left: 3px solid var(--fg-faint); }
+.diag.tone-live { border-left-color: var(--green); }
+.diag.tone-ok { border-left-color: var(--fg-dim); }
+.diag.tone-warn { border-left-color: #e0a030; }
+.diag.tone-stuck { border-left-color: var(--red); background: color-mix(in srgb, var(--red) 10%, var(--bg)); }
+.diag-main { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.diag-label { font-size: 11px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+.diag.tone-live .diag-label { color: var(--green); }
+.diag.tone-warn .diag-label { color: #e0a030; }
+.diag.tone-stuck .diag-label { color: var(--red); }
+.diag-head { font-size: 12px; color: var(--fg); }
+.diag-detail { margin-top: 5px; font-size: 11px; color: var(--fg-dim); line-height: 1.5; }
+.diag-acts { margin-top: 9px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.diag-acts .btn { font-size: 10px; padding: 5px 9px; }
+.diag-hint { font-size: 9px; color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.08em; }
+
+/* ---- comment wake countdown + harness picker ---- */
+.wake-count { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; padding: 8px 10px; border: 1px solid #e0a030; }
+.wake-t { font-size: 15px; font-weight: 800; color: #e0a030; font-variant-numeric: tabular-nums; }
+.wake-who { font-size: 10px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.08em; flex: 1; }
+.wake-count .btn { font-size: 10px; padding: 5px 9px; }
+.wake-harness { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.wake-harness .wake-lbl { font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-faint); white-space: nowrap; }
+.wake-harness select { font-size: 11px; padding: 4px 6px; }
+
 .hint { color: var(--fg-faint); font-size: 10px; margin-top: 8px; text-transform: uppercase; letter-spacing: 0.08em; }
 .warn { color: var(--red); }
 

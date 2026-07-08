@@ -117,6 +117,7 @@ function stallWatchdogTick(now) {
       if (t.activeRun?.pid && pidAlive(t.activeRun.pid)) continue;  // agent process genuinely alive
       if (t.status === 'awaiting-human') continue;                  // deliberately parked for Marcello
       if (t.retryAt) continue;                                      // rate-limit retry already scheduled
+      if (t.pendingWake) continue;                                  // a comment wake is already counting down
       const since = Date.parse(t.enteredColumnAt || t.lastRunEndedAt || t.createdAt);
       if (!Number.isFinite(since) || now - since < stallMs) continue;
       if (t.status === 'error') {
@@ -137,10 +138,34 @@ function stallWatchdogTick(now) {
   }
 }
 
+// ---- comment-wake processor ----
+// A comment on a parked ticket schedules a wake ~60s out (grace window to keep typing / cancel).
+// Runs on a fast cadence so the countdown the UI shows is accurate. Fires only when the ticket
+// is idle — if a run is in progress, the wake waits and fires the moment it frees up.
+const WAKE_DELAY_MS = 60_000;
+function processPendingWakes(now) {
+  for (const t of store.tickets.values()) {
+    const pw = t.pendingWake;
+    if (!pw || now < pw.at) continue;
+    if (t.activeRun || runner.snapshot().running.includes(t.id) || runner.snapshot().queued.includes(t.id)) continue;
+    const col = store.column(t.columnId);
+    if (!col || col.role !== 'agent') { delete t.pendingWake; store.saveTicket(t.id); continue; }
+    if (pw.harness) t.oneShotHarness = pw.harness; // one-shot: steer who picks it up
+    delete t.pendingWake;
+    t.status = 'idle';
+    store.appendActivity(t.id, { kind: 'system', by: 'engine', text: 'comment wake fired — starting run' });
+    runner.enqueue(t.id, { by: 'human' });
+  }
+}
+
 setInterval(() => {
   try { autoDispatchTick(); } catch (e) { console.error('auto-dispatch:', e); }
   try { stallWatchdogTick(Date.now()); } catch (e) { console.error('stall-watchdog:', e); }
 }, TICK_MS);
+
+setInterval(() => {
+  try { processPendingWakes(Date.now()); } catch (e) { console.error('pending-wake:', e); }
+}, 5_000);
 
 runner.recover();
 
@@ -232,16 +257,45 @@ app.post('/api/tickets/:id/unarchive', (req, res) => {
 app.post('/api/tickets/:id/comment', (req, res) => {
   const t = store.tickets.get(req.params.id);
   if (!t) return res.status(404).json({ error: 'not found' });
-  store.appendActivity(t.id, { kind: 'comment', by: 'human', text: String(req.body.text || '').trim() });
-  // A human comment on a parked ticket is an answer — wake the agent to act on it.
+  const text = String(req.body.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'empty comment' });
+  store.appendActivity(t.id, { kind: 'comment', by: 'human', text });
+
+  // A comment on a parked ticket is an answer. Schedule a wake ~60s out (visible countdown,
+  // cancellable) rather than firing instantly, and let the human pick which harness picks it up.
   const col = store.column(t.columnId);
-  const h = store.effectiveHarness(t, col);
-  let woke = false;
-  if (col?.role === 'agent' && h.type !== 'human' && ['idle', 'awaiting-human', 'error'].includes(t.status)) {
-    woke = runner.enqueue(t.id, { by: 'engine' });
+  const running = t.status === 'running' || t.activeRun || runner.snapshot().running.includes(t.id) || runner.snapshot().queued.includes(t.id);
+  let scheduled = false;
+  if (col?.role === 'agent' && !running) {
+    const wh = normalizeHarnessOverride(req.body.wakeHarness);
+    t.pendingWake = { at: Date.now() + WAKE_DELAY_MS, harness: wh, by: 'human' };
+    store.saveTicket(t.id);
+    scheduled = true;
   }
   broadcast({ type: 'state-changed' });
-  res.json({ ...t, woke });
+  res.json({ scheduled, running: Boolean(running), wakeAt: t.pendingWake?.at || null });
+});
+
+// pull only the harness fields we allow to be overridden from the comment composer
+function normalizeHarnessOverride(h) {
+  if (!h || typeof h !== 'object') return null;
+  const out = {};
+  for (const k of ['type', 'model', 'effort']) if (h[k]) out[k] = String(h[k]);
+  return Object.keys(out).length ? out : null;
+}
+
+app.post('/api/tickets/:id/wake-now', (req, res) => {
+  const t = store.tickets.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  if (t.pendingWake) { t.pendingWake.at = 0; store.saveTicket(t.id); broadcast({ type: 'state-changed' }); }
+  res.json({ ok: Boolean(t.pendingWake) });
+});
+
+app.post('/api/tickets/:id/cancel-wake', (req, res) => {
+  const t = store.tickets.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  if (t.pendingWake) { delete t.pendingWake; store.saveTicket(t.id); broadcast({ type: 'state-changed' }); }
+  res.json({ ok: true });
 });
 
 app.post('/api/tickets/:id/run', (req, res) => {

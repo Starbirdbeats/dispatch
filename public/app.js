@@ -144,6 +144,58 @@ const archivedTickets = () => S.data.tickets.filter((t) => t.archived)
 const harnessLabel = (h) => h.type === 'human' ? 'HUMAN' : `${h.type} · ${h.model || 'default'} · ${h.effort || 'default'}`;
 const effective = (t, c) => ({ ...c.harness, ...(t.overrides?.[c.id] || {}) });
 
+/* Diagnose a ticket into a plain-language state the UI can act on.
+   tone drives colour: live/ok = calm, warn = amber (self-recovering), stuck = red (needs you). */
+function diagnose(t, c) {
+  const running = S.data.runs.running.includes(t.id);
+  const queued = S.data.runs.queued.includes(t.id);
+  const sr = t.stuckReason;
+  if (running) {
+    const started = t.currentRun?.startedAt ? Date.parse(t.currentRun.startedAt) : null;
+    return { kind: 'running', tone: 'live', label: 'RUNNING', stuck: false,
+      headline: `${t.currentRun?.harness || 'agent'} is working in ${c.name}`,
+      detail: started ? `Live for ${fmtDur(Date.now() - started)}. Watch the Transcript tab.` : 'Live. Watch the Transcript tab.',
+      startedAt: started };
+  }
+  if (queued) return { kind: 'queued', tone: 'ok', label: 'QUEUED', stuck: false, headline: 'Waiting for a run slot', detail: 'Another run is using the concurrency slot; this starts next.' };
+  if (t.pendingWake) return { kind: 'pending-wake', tone: 'ok', label: 'PICKUP SCHEDULED', stuck: false, headline: 'An agent will pick up your comment shortly', detail: 'Counting down in the comment box below.', wakeAt: t.pendingWake.at };
+  if (t.retryAt) return { kind: 'rate-limit', tone: 'warn', label: 'AUTO-RETRY', stuck: false, headline: 'Rate-limited — will retry automatically', detail: sr?.detail || `Retry scheduled for ${new Date(t.retryAt).toLocaleString()}.`, retryAt: t.retryAt };
+
+  if (t.status === 'awaiting-human') return { kind: sr?.kind || 'awaiting-human', tone: 'stuck', label: 'NEEDS YOU', stuck: true,
+    headline: STUCK_HEADLINES[sr?.kind] || 'Parked — needs a human decision',
+    detail: sr?.detail || 'The engine stopped here and is waiting for you.' };
+  if (t.status === 'error') return { kind: sr?.kind || 'error', tone: 'stuck', label: 'ERROR', stuck: true,
+    headline: STUCK_HEADLINES[sr?.kind] || 'The last run failed',
+    detail: sr?.detail || 'The run ended with an error.' };
+
+  if (c.role === 'agent' && t.status === 'idle') {
+    if (sr?.kind === 'hold') return { kind: 'hold', tone: 'warn', label: 'HELD', stuck: false,
+      headline: 'Agent held — did work but not done', detail: `${sr.detail} It will retry automatically.` };
+    const stallMin = S.data.board?.settings?.stallAfterMin ?? 10;
+    return { kind: 'idle-agent', tone: 'warn', label: 'IDLE', stuck: false,
+      headline: `Idle in ${c.name}`,
+      detail: stallMin > 0 ? `No live run. The watchdog will resume it within ${stallMin} min, or you can run it now.` : 'No live run and the watchdog is off — run it manually.' };
+  }
+  if (c.role === 'intake') return { kind: 'backlog', tone: 'ok', label: 'BACKLOG', stuck: false, headline: 'Waiting in intake', detail: 'Auto-dispatch will start the pipeline, or hit START PIPELINE.' };
+  return { kind: 'done', tone: 'ok', label: 'DONE', stuck: false, headline: 'Complete', detail: t.humanTest ? 'See the human-test steps in Overview.' : '' };
+}
+const STUCK_HEADLINES = {
+  'hold-limit': 'Stuck: the phase keeps finishing without advancing',
+  'no-control-block': 'Stuck: the agent didn’t say what to do next',
+  'bounce-limit': 'Stuck: the phases keep bouncing it back and forth',
+  'no-next-column': 'Stuck: nowhere to advance to',
+  'flag-human': 'The agent asked for your input',
+  'timeout': 'The run timed out',
+  'run-failed': 'The run crashed',
+};
+function fmtDur(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
 /* ---------- attachments ---------- */
 const MAX_ATTACH_MB = 16;
 const fmtBytes = (n) => !Number.isFinite(n) ? ''
@@ -188,6 +240,9 @@ function render() {
     // Live-refresh only the non-form tabs; overview holds user edits.
     if (['activity', 'dossier'].includes(S.modal.tab)) renderModal();
     else updateTicketModalHead();
+    // the diagnosis banner is informational — safe to refresh on every state change
+    const lt = S.data.tickets.find((x) => x.id === S.modal.id);
+    if (lt && $('#diag-banner')) renderDiagBanner(lt);
   }
 }
 
@@ -244,9 +299,11 @@ function cardEl(t, c) {
   el.className = `card status-${status}`;
   el.draggable = true;
   const last = [...t.activity].reverse().find((a) => a.kind !== 'run');
+  const dx = diagnose(t, c);
   el.innerHTML = `
     <div class="t"><span class="led ${status}"></span><span class="title">${esc(t.title)}</span>${c.role === 'terminal' ? `<button class="arch" title="Archive ticket">[ ARCH ]</button>` : ''}</div>
-    <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span><span>${t.scheduledAt ? `SCHED ${esc(t.scheduledAt.replace('T', ' '))} · ` : ''}${esc(status)}</span></div>
+    <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span><span class="badge tone-${dx.tone}">${dx.tone === 'stuck' ? '⚠ ' : ''}${esc(dx.label)}</span></div>
+    ${t.scheduledAt ? `<div class="last">SCHED ${esc(t.scheduledAt.replace('T', ' '))}</div>` : ''}
     ${last ? `<div class="last">&gt; ${esc(last.text)}</div>` : ''}`;
   el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/ticket', t.id); el.classList.add('dragging'); });
   el.addEventListener('dragend', () => el.classList.remove('dragging'));
@@ -316,6 +373,7 @@ function renderTicketModal() {
   shell(
     `${esc(t.title)} <span id="ticket-status" style="color:var(--fg-faint);font-size:10px"> ${esc(t.status.toUpperCase())}</span>`,
     `<div class="tabs">${tabs.map((x) => `<button data-tab="${x}" class="${x === tab ? 'active' : ''}">${x}</button>`).join('')}</div>
+     <div id="diag-banner"></div>
      <div class="panel-body" id="tab-body"></div>`,
     `<select id="move-to" style="width:auto">${cols().map((c) => `<option value="${c.id}" ${c.id === t.columnId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
      <button class="btn" id="btn-move">[ MOVE ]</button>
@@ -335,6 +393,8 @@ function renderTicketModal() {
   $('#btn-stop').onclick = () => api(`/api/tickets/${t.id}/stop`, 'POST', {}).then(() => toast('STOP SIGNAL SENT')).catch(alertErr);
   $('#btn-del').onclick = () => { if (confirm('Delete ticket + dossier + transcripts?')) api(`/api/tickets/${t.id}`, 'DELETE').then(closeModal).catch(alertErr); };
 
+  renderDiagBanner(t);
+
   const body = $('#tab-body');
   if (tab === 'overview') renderOverview(body, t);
   if (tab === 'activity') renderActivity(body, t);
@@ -349,6 +409,46 @@ function renderTicketModal() {
 }
 
 function closeAndReload() { closeModal(); loadState(); }
+
+// Diagnosis banner at the top of the ticket modal: state + how it got there + unstick options.
+function renderDiagBanner(t) {
+  const el = $('#diag-banner');
+  if (!el) return;
+  const c = cols().find((x) => x.id === t.columnId) || {};
+  const dx = diagnose(t, c);
+  const prevAgent = [...cols()].reverse().find((x) => x.role === 'agent' && x.order < (c.order ?? 0));
+  const nextCol = cols().find((x) => x.order > (c.order ?? -1));
+
+  // action buttons only where they make sense
+  const acts = [];
+  if (dx.stuck || dx.kind === 'hold' || dx.kind === 'idle-agent') {
+    acts.push(`<button class="btn" data-dx="run">[ ${dx.stuck ? 'RETRY THIS PHASE' : 'RUN NOW'} ]</button>`);
+    if (nextCol) acts.push(`<button class="btn" data-dx="advance" data-col="${nextCol.id}">[ FORCE → ${esc(nextCol.name.toUpperCase())} ]</button>`);
+    if (prevAgent) acts.push(`<button class="btn" data-dx="advance" data-col="${prevAgent.id}">[ ↩ ${esc(prevAgent.name.toUpperCase())} ]</button>`);
+  }
+  const liveClock = dx.kind === 'running' && dx.startedAt ? ` <span data-liveclock="${dx.startedAt}">${fmtDur(Date.now() - dx.startedAt)}</span>` : '';
+  const countdown = dx.wakeAt ? ` <span data-wakeclock="${dx.wakeAt}"></span>` : (dx.retryAt ? ` <span data-retryclock="${dx.retryAt}"></span>` : '');
+
+  el.className = `diag tone-${dx.tone}`;
+  el.innerHTML = `
+    <div class="diag-main">
+      <span class="diag-label">${dx.tone === 'stuck' ? '⚠ ' : ''}${esc(dx.label)}${liveClock}${countdown}</span>
+      <span class="diag-head">${esc(dx.headline)}</span>
+    </div>
+    ${dx.detail ? `<div class="diag-detail">${esc(dx.detail)}</div>` : ''}
+    ${acts.length ? `<div class="diag-acts">${acts.join('')}${dx.stuck ? `<span class="diag-hint">or answer in the comment box below — that also wakes an agent</span>` : ''}</div>` : ''}`;
+
+  for (const b of el.querySelectorAll('[data-dx]')) {
+    b.onclick = () => {
+      const kind = b.dataset.dx;
+      if (kind === 'run') {
+        api(`/api/tickets/${t.id}/run`, 'POST', {}).then((r) => toast(r.queued ? 'RUN QUEUED' : `NOT QUEUED: ${r.reason || '?'}`, !r.queued)).catch(alertErr);
+      } else if (kind === 'advance') {
+        api(`/api/tickets/${t.id}/move`, 'POST', { columnId: b.dataset.col }).then(() => { toast('MOVED'); }).catch(alertErr);
+      }
+    };
+  }
+}
 
 // Build a <select> for model/effort/permissions scoped to a harness type, with the
 // current value always present and a custom escape hatch for models.
@@ -481,6 +581,13 @@ async function uploadTicketFiles(t, fileList) {
 }
 
 function renderActivity(body, t) {
+  const c = cols().find((x) => x.id === t.columnId) || {};
+  const running = S.data.runs.running.includes(t.id) || S.data.runs.queued.includes(t.id);
+  const canWake = c.role === 'agent' && !running;
+  // harness the pickup will use: current one-shot > column default; dropdowns let you steer it
+  const base = { ...effective(t, c), ...(t.oneShotHarness || {}) };
+  const hType = base.type === 'human' ? 'claude' : (base.type || 'claude');
+
   body.innerHTML = `
     <div class="activity">${[...t.activity].reverse().map((a) => `
       <div class="item kind-${a.kind}">
@@ -488,17 +595,58 @@ function renderActivity(body, t) {
         <div class="txt">${esc(a.text)}</div>
       </div>`).join('') || '<div class="item"><div class="txt">no activity yet</div></div>'}
     </div>
+
+    <div id="wake-panel"></div>
+
     <div class="commentbox">
-      <textarea id="f-comment" placeholder="comment — the next agent run will see this">${esc(S.commentDraft)}</textarea>
+      <textarea id="f-comment" placeholder="${canWake ? 'comment — an agent will pick this up in ~60s' : 'comment — the current run will see this on its next turn'}">${esc(S.commentDraft)}</textarea>
       <button class="btn" id="btn-comment">[ POST ]</button>
-    </div>`;
+    </div>
+    ${canWake ? `<div class="wake-harness">
+      <span class="wake-lbl">picked up by</span>
+      <select id="cw-type">${['claude', 'codex'].map((x) => `<option ${x === hType ? 'selected' : ''}>${x}</option>`).join('')}</select>
+      <select id="cw-model">${harnessOptions('model', hType, base.model || '', 'default')}</select>
+      <select id="cw-effort">${harnessOptions('effort', hType, base.effort || '', 'default')}</select>
+    </div>` : ''}`;
+
   $('#f-comment').oninput = (e) => { S.commentDraft = e.target.value; };
+  if (canWake) {
+    $('#cw-type').onchange = () => renderActivity(body, S.data.tickets.find((x) => x.id === t.id) || t);
+    $('#cw-model').onchange = () => handleCustomModel($('#cw-model'));
+  }
   $('#btn-comment').onclick = async () => {
     const text = $('#f-comment').value.trim();
     if (!text) return;
+    const wakeHarness = canWake ? {
+      type: $('#cw-type').value,
+      model: $('#cw-model').value === '__custom' ? '' : $('#cw-model').value,
+      effort: $('#cw-effort').value,
+    } : null;
     S.commentDraft = '';
-    await api(`/api/tickets/${t.id}/comment`, 'POST', { text }).then((r) => toast(r.woke ? 'COMMENT POSTED — AGENT WAKING' : 'COMMENT POSTED')).catch(alertErr);
+    await api(`/api/tickets/${t.id}/comment`, 'POST', { text, wakeHarness })
+      .then((r) => toast(r.scheduled ? 'COMMENT POSTED — AGENT PICKUP SCHEDULED' : (r.running ? 'COMMENT POSTED — CURRENT RUN WILL SEE IT' : 'COMMENT POSTED')))
+      .catch(alertErr);
   };
+
+  renderWakePanel(t);
+}
+
+// The countdown + pick-now/cancel controls shown when a comment wake is pending.
+function renderWakePanel(t) {
+  const el = $('#wake-panel');
+  if (!el) return;
+  const live = S.data.tickets.find((x) => x.id === t.id) || t;
+  if (!live.pendingWake) { el.innerHTML = ''; return; }
+  const h = live.pendingWake.harness;
+  el.innerHTML = `
+    <div class="wake-count">
+      <span class="wake-t" data-wakeclock="${live.pendingWake.at}">T-0:60</span>
+      <span class="wake-who">→ ${esc(h ? `${h.type || 'default'} · ${h.model || 'default'} · ${h.effort || 'default'}` : 'column default')} picks up your comment</span>
+      <button class="btn" id="wake-now">[ PICK UP NOW ]</button>
+      <button class="btn btn-danger" id="wake-cancel">[ CANCEL ]</button>
+    </div>`;
+  $('#wake-now').onclick = () => api(`/api/tickets/${t.id}/wake-now`, 'POST', {}).then(() => toast('PICKING UP NOW')).catch(alertErr);
+  $('#wake-cancel').onclick = () => api(`/api/tickets/${t.id}/cancel-wake`, 'POST', {}).then(() => toast('WAKE CANCELLED')).catch(alertErr);
 }
 
 function renderTranscript(body, t) {
@@ -763,19 +911,29 @@ function renderSettingsModal() {
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
 }
 
-/* ---------- sweep countdown (1s tick, no full re-render) ---------- */
+/* ---------- 1s clocks: sweep countdown, wake countdown, retry countdown, live-run elapsed ---------- */
+function fmtCountdown(ms) {
+  if (ms <= 0) return 'now';
+  const m = Math.floor(ms / 60000), s = Math.floor((ms % 60000) / 1000);
+  return `T-${m}:${String(s).padStart(2, '0')}`;
+}
 setInterval(() => {
-  const at = S.data?.scheduler?.nextSweepAt;
-  const els = document.querySelectorAll('[data-sweep]');
-  if (!at || !els.length) return;
-  const ms = at - Date.now();
-  let label;
-  if (ms <= 0) label = 'DUE — next tick';
-  else {
-    const m = Math.floor(ms / 60000), s = Math.floor((ms % 60000) / 1000);
-    label = `T-${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  const now = Date.now();
+  const sweepAt = S.data?.scheduler?.nextSweepAt;
+  for (const el of document.querySelectorAll('[data-sweep]')) {
+    el.textContent = sweepAt ? (sweepAt - now <= 0 ? 'DUE — next tick' : fmtCountdown(sweepAt - now)) : 'T-—:——';
   }
-  for (const el of els) el.textContent = label;
+  for (const el of document.querySelectorAll('[data-wakeclock]')) {
+    const ms = Number(el.dataset.wakeclock) - now;
+    el.textContent = ms <= 0 ? 'starting…' : fmtCountdown(ms);
+  }
+  for (const el of document.querySelectorAll('[data-retryclock]')) {
+    const ms = Number(el.dataset.retryclock) - now;
+    el.textContent = ms <= 0 ? 'retrying…' : `retry in ${fmtCountdown(ms)}`;
+  }
+  for (const el of document.querySelectorAll('[data-liveclock]')) {
+    el.textContent = fmtDur(now - Number(el.dataset.liveclock));
+  }
 }, 1000);
 
 /* ---------- boot ---------- */

@@ -10,6 +10,7 @@ import { composePrompt, parseControlBlock } from './contract.mjs';
 
 const ADAPTERS = { claude, codex };
 const MAX_BOUNCES = 3;
+const MAX_HOLDS = 3; // a phase that holds this many times without advancing is parked for a human
 const POLL_MS = 1000;
 const KILL_GRACE_MS = 5000;
 
@@ -110,12 +111,18 @@ export class Runner {
     this._pump();
   }
 
+  // Effective harness for the next run, honouring a one-shot override (e.g. chosen in the
+  // comment composer to steer who picks the ticket up next).
+  harnessFor(ticket, column) {
+    return { ...this.store.effectiveHarness(ticket, column), ...(ticket.oneShotHarness || {}) };
+  }
+
   enqueue(ticketId, { by = 'engine' } = {}) {
     const ticket = this.store.tickets.get(ticketId);
     if (!ticket) return false;
     const column = this.store.column(ticket.columnId);
     if (!column) return false;
-    const harness = this.store.effectiveHarness(ticket, column);
+    const harness = this.harnessFor(ticket, column);
     if (harness.type === 'human') return false;
     if (ticket.activeRun || this.running.has(ticketId) || this.queue.some((j) => j.ticketId === ticketId)) return false;
 
@@ -166,6 +173,9 @@ export class Runner {
     ticket.columnId = columnId;
     ticket.enteredColumnAt = new Date().toISOString();
     delete ticket.watchdogRetries; // fresh phase, fresh watchdog budget
+    delete ticket.holds;           // hold counter is per column visit
+    delete ticket.stuckReason;     // whatever stuck it is left behind
+    delete ticket.pendingWake;
     if (by === 'human') ticket.bounces = 0;
     if (ticket.status !== 'running') ticket.status = 'idle';
     this.store.appendActivity(ticketId, { kind: 'move', by, text: `${from?.name || '?'} → ${column.name}` });
@@ -209,7 +219,8 @@ export class Runner {
     if (ticket.activeRun) { this._attach(ticketId); return; }
     const column = store.column(ticket.columnId);
     if (!column) throw new Error(`column missing: ${ticket.columnId}`);
-    const harness = store.effectiveHarness(ticket, column);
+    const harness = this.harnessFor(ticket, column);
+    if (ticket.oneShotHarness) { delete ticket.oneShotHarness; store.saveTicket(ticketId); }
     const adapter = ADAPTERS[harness.type];
     if (!adapter) throw new Error(`unknown harness ${harness.type}`);
     if (!fs.existsSync(ticket.workspace)) throw new Error(`workspace missing: ${ticket.workspace}`);
@@ -271,6 +282,8 @@ export class Runner {
     }, null, 2));
 
     ticket.status = 'running';
+    delete ticket.stuckReason;   // fresh run — clear whatever stuck the last attempt
+    delete ticket.pendingWake;   // this run IS the wake
     ticket.currentRun = { column: column.name, harness: harness.type, model: harness.model, startedAt, transcriptFile };
     ticket.activeRun = activeRun;
     store.saveTicket(ticketId);
@@ -441,17 +454,21 @@ export class Runner {
 
     if (intent === 'stopped') {
       ticket.status = 'idle';
+      ticket.stuckReason = { kind: 'stopped', at: nowIso(), detail: 'You stopped this run. It will sit idle until you run it again or move it.' };
       this.store.appendActivity(ticketId, { kind: 'system', by: 'human', text: 'run stopped' });
     } else if (intent === 'timeout') {
       ticket.status = 'error';
+      ticket.stuckReason = { kind: 'timeout', at: nowIso(), detail: `The run exceeded the ${this.store.board.settings.runTimeoutMin || 30} min timeout and was killed. If the phase legitimately needs longer, raise the timeout in Settings before retrying.` };
       this.store.appendActivity(ticketId, { kind: 'system', by: 'engine', text: `run timed out after ${this.store.board.settings.runTimeoutMin || 30} min` });
     } else if (state.rateLimitedUntil && !parseControlBlock(finalText)) {
       // Subscription window exhausted mid-run: park with a retry time; the scheduler resumes it.
       ticket.status = 'error';
       ticket.retryAt = state.rateLimitedUntil + 2 * 60_000;
+      ticket.stuckReason = { kind: 'rate-limit', at: nowIso(), detail: `${harnessType}'s subscription window was exhausted mid-run. Auto-retry is scheduled for ${new Date(ticket.retryAt).toLocaleString()} — no action needed.` };
       this.store.appendActivity(ticketId, { kind: 'system', by: 'engine', text: `${harnessType} rate limit hit — auto-retry scheduled for ${new Date(ticket.retryAt).toLocaleString()}` });
     } else if (!Number.isFinite(code) || code !== 0) {
       ticket.status = 'error';
+      ticket.stuckReason = { kind: 'run-failed', at: nowIso(), detail: `The ${harnessType} process exited with code ${Number.isFinite(code) ? code : '?'}. stderr: ${tailFile(path.join(runDir, 'stderr.log')).slice(-400) || '(empty)'}` };
       this.store.appendActivity(ticketId, { kind: 'system', by: 'engine', text: `run failed (exit ${Number.isFinite(code) ? code : '?'}): ${tailFile(path.join(runDir, 'stderr.log')) || 'no stderr'}` });
     } else {
       this._applyControl(ticket, this.store.column(ar.columnId || ticket.columnId), { type: harnessType, model: ar.model, effort: ar.effort }, parseControlBlock(finalText), finalText);
@@ -580,6 +597,7 @@ export class Runner {
     }
     if (!control) {
       ticket.status = 'awaiting-human';
+      ticket.stuckReason = { kind: 'no-control-block', at: nowIso(), detail: `The agent's run ended without the required control block, so the engine couldn't tell what to do next. Final output tail: ${String(finalText).slice(-500)}` };
       store.appendActivity(ticket.id, {
         kind: 'system', by: 'engine',
         text: `run finished but no valid control block found — needs a human look. Final output tail: ${String(finalText).slice(-600)}`,
@@ -593,7 +611,11 @@ export class Runner {
     switch (control.action) {
       case 'advance': {
         const target = control.target_column ? store.columnByName(control.target_column) : store.nextColumn(column.id);
-        if (!target) { ticket.status = 'awaiting-human'; break; }
+        if (!target) {
+          ticket.status = 'awaiting-human';
+          ticket.stuckReason = { kind: 'no-next-column', at: nowIso(), detail: `The agent wanted to advance${control.target_column ? ` to "${control.target_column}"` : ''} but there is no such next column.` };
+          break;
+        }
         ticket.status = 'idle';
         this.moveTicket(ticket.id, target.id, { by: harness.type });
         break;
@@ -603,6 +625,7 @@ export class Runner {
         ticket.bounces = (ticket.bounces || 0) + 1;
         if (!target || ticket.bounces > MAX_BOUNCES) {
           ticket.status = 'awaiting-human';
+          ticket.stuckReason = { kind: 'bounce-limit', at: nowIso(), detail: !target ? `The agent tried to bounce to "${control.target_column}", which doesn't exist.` : `This ticket has bounced ${ticket.bounces} times (limit ${MAX_BOUNCES}) — the phases are disagreeing and it needs your call.` };
           store.appendActivity(ticket.id, { kind: 'system', by: 'engine', text: !target ? `bounce target "${control.target_column}" not found` : `bounce limit (${MAX_BOUNCES}) hit — needs a human decision` });
           break;
         }
@@ -612,11 +635,23 @@ export class Runner {
       }
       case 'flag_human':
         ticket.status = 'awaiting-human';
+        ticket.stuckReason = { kind: 'flag-human', at: nowIso(), detail: control.comment || 'The agent flagged that it needs a human decision to continue.' };
         break;
       case 'hold':
-      default:
-        ticket.status = 'idle';
+      default: {
+        // "hold" = did work, phase not complete. Bounded so a phase that can never satisfy its
+        // exit criteria (e.g. a deploy that won't come up) parks for a human instead of looping.
+        ticket.holds = (ticket.holds || 0) + 1;
+        if (ticket.holds >= MAX_HOLDS) {
+          ticket.status = 'awaiting-human';
+          ticket.stuckReason = { kind: 'hold-limit', at: nowIso(), detail: `${harness.type} finished ${ticket.holds} runs in "${column.name}" without advancing — it keeps doing work but can't meet the exit criteria. Last note: ${control.comment || '(none)'}` };
+          store.appendActivity(ticket.id, { kind: 'system', by: 'engine', text: `held ${ticket.holds}× in ${column.name} without advancing — parked for a human decision` });
+        } else {
+          ticket.status = 'idle';
+          ticket.stuckReason = { kind: 'hold', at: nowIso(), detail: `${harness.type} did work but held (attempt ${ticket.holds}/${MAX_HOLDS}) — phase not yet complete. Note: ${control.comment || '(none)'}` };
+        }
         break;
+      }
     }
   }
 }

@@ -48,10 +48,48 @@ function connectWS() {
 
 /* ---------- helpers ---------- */
 const cols = () => [...S.data.board.columns].sort((a, b) => a.order - b.order);
-const ticketsIn = (colId) => S.data.tickets.filter((t) => t.columnId === colId)
+const ticketsIn = (colId) => S.data.tickets.filter((t) => t.columnId === colId && !t.archived)
   .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+const archivedTickets = () => S.data.tickets.filter((t) => t.archived)
+  .sort((a, b) => ((a.archivedAt || '') < (b.archivedAt || '') ? 1 : -1)); // newest first
 const harnessLabel = (h) => h.type === 'human' ? 'HUMAN' : `${h.type} · ${h.model || 'default'} · ${h.effort || 'default'}`;
 const effective = (t, c) => ({ ...c.harness, ...(t.overrides?.[c.id] || {}) });
+
+/* ---------- attachments ---------- */
+const MAX_ATTACH_MB = 16;
+const fmtBytes = (n) => !Number.isFinite(n) ? ''
+  : n < 1024 ? `${n} B`
+  : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB`
+  : `${(n / 1024 / 1024).toFixed(1)} MB`;
+// Read a File into raw base64 (strip the "data:...;base64," prefix the API doesn't want).
+const fileToB64 = (file) => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(',')[1] || '');
+  r.onerror = () => reject(new Error('read failed'));
+  r.readAsDataURL(file);
+});
+// Turn a FileList into upload records, skipping anything over the cap (with a toast).
+async function readUploads(fileList) {
+  const out = [];
+  for (const file of [...fileList]) {
+    if (file.size > MAX_ATTACH_MB * 1024 * 1024) { toast(`${file.name} > ${MAX_ATTACH_MB}MB — skipped`, true); continue; }
+    try { out.push({ name: file.name, type: file.type, size: file.size, dataB64: await fileToB64(file) }); }
+    catch { toast(`failed to read ${file.name}`, true); }
+  }
+  return out;
+}
+// Wire a drop-zone + hidden input + browse button to a handler. Ids are caller-supplied.
+function wireDropzone(dropId, inputId, browseId, onFiles) {
+  const drop = $(`#${dropId}`), input = $(`#${inputId}`);
+  if (!drop || !input) return;
+  $(`#${browseId}`).onclick = () => input.click();
+  input.onchange = () => { onFiles(input.files); input.value = ''; };
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); onFiles(e.dataTransfer.files); };
+}
+const dropzoneHTML = (dropId, inputId, browseId) =>
+  `<div class="att-drop" id="${dropId}"><span>DROP FILES OR</span><button type="button" class="btn" id="${browseId}">[ BROWSE ]</button><input type="file" id="${inputId}" multiple hidden></div>`;
 
 /* ---------- render ---------- */
 function render() {
@@ -71,6 +109,8 @@ function renderTopbar() {
     ` &nbsp;///&nbsp; <span class="${h.codex?.ok ? 'ok' : 'bad'}">CODEX ${h.codex?.ok ? (h.codex.version || 'OK') : 'OFFLINE'}</span>`;
   const r = S.data.runs;
   $('#queueinfo').innerHTML = `RUNNING <b>${r.running.length}</b> / QUEUED <b>${r.queued.length}</b> / CAP <b>${S.data.board.settings.maxConcurrent}</b>`;
+  const archived = S.data.tickets.filter((t) => t.archived).length;
+  $('#btn-archive').textContent = archived ? `[ ARCHIVE ${String(archived).padStart(2, '0')} ]` : '[ ARCHIVE ]';
 }
 
 function renderBoard() {
@@ -116,11 +156,16 @@ function cardEl(t, c) {
   el.draggable = true;
   const last = [...t.activity].reverse().find((a) => a.kind !== 'run');
   el.innerHTML = `
-    <div class="t"><span class="led ${status}"></span><span class="title">${esc(t.title)}</span></div>
+    <div class="t"><span class="led ${status}"></span><span class="title">${esc(t.title)}</span>${c.role === 'terminal' ? `<button class="arch" title="Archive ticket">[ ARCH ]</button>` : ''}</div>
     <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span><span>${t.scheduledAt ? `SCHED ${esc(t.scheduledAt.replace('T', ' '))} · ` : ''}${esc(status)}</span></div>
     ${last ? `<div class="last">&gt; ${esc(last.text)}</div>` : ''}`;
   el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/ticket', t.id); el.classList.add('dragging'); });
   el.addEventListener('dragend', () => el.classList.remove('dragging'));
+  const archBtn = $('.arch', el);
+  if (archBtn) archBtn.onclick = (e) => {
+    e.stopPropagation(); // don't open the ticket modal
+    api(`/api/tickets/${t.id}/archive`, 'POST', {}).then(() => toast('ARCHIVED')).catch(alertErr);
+  };
   el.onclick = () => { S.modal = { type: 'ticket', id: t.id, tab: 'overview' }; renderModal(); };
   return el;
 }
@@ -162,6 +207,7 @@ function renderModal() {
   if (S.modal.type === 'column') renderColumnModal();
   if (S.modal.type === 'new') renderNewModal();
   if (S.modal.type === 'settings') renderSettingsModal();
+  if (S.modal.type === 'archive') renderArchiveModal();
 }
 
 function updateTicketModalHead() {
@@ -254,6 +300,9 @@ function renderOverview(body, t) {
     </div>
     <label class="f">DESCRIPTION</label>
     <textarea id="f-desc">${esc(t.description)}</textarea>
+    <label class="f">ATTACHMENTS (referenced in the dossier for the agents — max ${MAX_ATTACH_MB}MB each)</label>
+    ${dropzoneHTML('ov-att-drop', 'ov-att-input', 'ov-att-browse')}
+    <div class="att-list" id="ov-att-list"></div>
     <label class="f">PER-COLUMN HARNESS OVERRIDES ("default" = column config)</label>
     <div class="overrides-wrap"><div class="overrides-grid">
       <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div><div class="h">PERMS</div>
@@ -294,6 +343,46 @@ function renderOverview(body, t) {
       overrides: draft,
     }).then(() => toast('TICKET SAVED')).catch(alertErr);
   };
+
+  // Attachments upload/remove independently of SAVE CHANGES so draft edits above are never lost.
+  wireDropzone('ov-att-drop', 'ov-att-input', 'ov-att-browse', (files) => uploadTicketFiles(t, files));
+  renderTicketAttachments(t);
+}
+
+// Persisted attachments on an existing ticket: view (inline), download (?dl=1), remove.
+function renderTicketAttachments(t) {
+  const box = $('#ov-att-list');
+  if (!box) return;
+  const atts = (S.data.tickets.find((x) => x.id === t.id) || t).attachments || [];
+  box.innerHTML = atts.length ? atts.map((a) => `
+    <div class="att-item">
+      <a class="att-name" href="/api/tickets/${t.id}/attachments/${a.id}" target="_blank" rel="noopener">${esc(a.name)}</a>
+      <span class="att-size">${fmtBytes(a.size)}</span>
+      <a class="att-dl" href="/api/tickets/${t.id}/attachments/${a.id}?dl=1" title="Download">[ &darr; ]</a>
+      <button type="button" class="att-x" data-rm="${a.id}" title="Remove">[ x ]</button>
+    </div>`).join('') : '<div class="att-empty">no files attached</div>';
+  for (const b of box.querySelectorAll('[data-rm]')) {
+    b.onclick = () => {
+      if (!confirm('Remove this attachment?')) return;
+      api(`/api/tickets/${t.id}/attachments/${b.dataset.rm}`, 'DELETE').then(() => {
+        const cur = S.data.tickets.find((x) => x.id === t.id);
+        if (cur) cur.attachments = (cur.attachments || []).filter((a) => a.id !== b.dataset.rm);
+        renderTicketAttachments(t);
+        toast('ATTACHMENT REMOVED');
+      }).catch(alertErr);
+    };
+  }
+}
+
+async function uploadTicketFiles(t, fileList) {
+  const files = await readUploads(fileList);
+  if (!files.length) return;
+  await api(`/api/tickets/${t.id}/attachments`, 'POST', { attachments: files }).then((r) => {
+    const cur = S.data.tickets.find((x) => x.id === t.id);
+    if (cur) cur.attachments = r.attachments;
+    renderTicketAttachments(t);
+    toast(`ATTACHED ${files.length} FILE${files.length > 1 ? 'S' : ''}`);
+  }).catch(alertErr);
 }
 
 function renderActivity(body, t) {
@@ -429,16 +518,71 @@ function renderNewModal() {
       <select id="n-col">${cols().map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
       <label class="f">SCHEDULE FOR (optional — leave blank for the next backlog sweep)</label>
       <input id="n-sched" type="datetime-local">
+      <label class="f">ATTACHMENTS (listed in the dossier for the agents to read — max ${MAX_ATTACH_MB}MB each)</label>
+      ${dropzoneHTML('n-att-drop', 'n-att-input', 'n-att-browse')}
+      <div class="att-list" id="n-att-list"></div>
       <div class="hint">unscheduled backlog tickets auto-start every ${S.data.board.settings.autoDispatchEveryMin || 5} min. a scheduled ticket waits for its timestamp.</div>
     </div>`,
     `<button class="btn btn-accent" id="n-create">[ CREATE ]</button>`);
+  wireDropzone('n-att-drop', 'n-att-input', 'n-att-browse', async (files) => {
+    S.newAttachments = (S.newAttachments || []).concat(await readUploads(files));
+    renderStagedAttachments();
+  });
+  renderStagedAttachments();
   $('#n-create').onclick = () => api('/api/tickets', 'POST', {
     title: $('#n-title').value,
     description: $('#n-desc').value,
     workspace: $('#n-ws').value.trim(),
     columnId: $('#n-col').value,
     scheduledAt: $('#n-sched').value || null,
-  }).then(() => { toast('TICKET CREATED'); closeAndReload(); }).catch(alertErr);
+    attachments: (S.newAttachments || []).map(({ name, type, size, dataB64 }) => ({ name, type, size, dataB64 })),
+  }).then(() => { S.newAttachments = []; toast('TICKET CREATED'); closeAndReload(); }).catch(alertErr);
+}
+
+// Staged (not-yet-uploaded) files for the New Ticket modal — held in memory until CREATE.
+function renderStagedAttachments() {
+  const box = $('#n-att-list');
+  if (!box) return;
+  const atts = S.newAttachments || [];
+  box.innerHTML = atts.map((a, i) => `
+    <div class="att-item">
+      <span class="att-name">${esc(a.name)}</span>
+      <span class="att-size">${fmtBytes(a.size)}</span>
+      <button type="button" class="att-x" data-rm="${i}" title="Remove">[ x ]</button>
+    </div>`).join('');
+  for (const b of box.querySelectorAll('[data-rm]')) {
+    b.onclick = () => { S.newAttachments.splice(Number(b.dataset.rm), 1); renderStagedAttachments(); };
+  }
+}
+
+/* ---- archive modal ---- */
+function renderArchiveModal() {
+  const items = archivedTickets();
+  const rows = items.map((t) => `
+    <div class="arch-item" data-open="${t.id}">
+      <div class="arch-main">
+        <div class="arch-title">${esc(t.title)}</div>
+        <div class="arch-meta"><span>${esc(t.workspace.split('/').pop())}</span>${t.archivedAt ? `<span>ARCHIVED ${esc(t.archivedAt.replace('T', ' ').slice(0, 16))}</span>` : ''}</div>
+      </div>
+      <button class="btn arch-restore" data-restore="${t.id}">[ RESTORE ]</button>
+    </div>`).join('');
+  shell(
+    `ARCHIVE <span style="color:var(--fg-faint);font-size:10px">${String(items.length).padStart(2, '0')} TICKETS</span>`,
+    `<div class="panel-body">${items.length
+      ? `<div class="arch-list">${rows}</div>`
+      : '<div class="arch-empty">ARCHIVE EMPTY — archive a done ticket and it lands here</div>'}</div>`
+  );
+  for (const el of document.querySelectorAll('[data-open]')) {
+    el.onclick = () => { S.modal = { type: 'ticket', id: el.dataset.open, tab: 'overview' }; renderModal(); };
+  }
+  for (const el of document.querySelectorAll('[data-restore]')) {
+    el.onclick = (e) => {
+      e.stopPropagation(); // don't open the ticket modal underneath
+      api(`/api/tickets/${el.dataset.restore}/unarchive`, 'POST', {})
+        .then(() => { toast('RESTORED'); loadState().then(() => { if (S.modal?.type === 'archive') renderArchiveModal(); }); })
+        .catch(alertErr);
+    };
+  }
 }
 
 /* ---- settings modal ---- */
@@ -515,8 +659,9 @@ setInterval(() => {
 }, 1000);
 
 /* ---------- boot ---------- */
-$('#btn-new').onclick = () => { S.modal = { type: 'new' }; renderModal(); };
+$('#btn-new').onclick = () => { S.newAttachments = []; S.modal = { type: 'new' }; renderModal(); };
 $('#btn-settings').onclick = () => { S.modal = { type: 'settings' }; renderModal(); };
+$('#btn-archive').onclick = () => { S.modal = { type: 'archive' }; renderModal(); };
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
 loadState().then(connectWS).catch((e) => { document.body.innerHTML = `<pre style="color:#ff2a2a;padding:20px">DISPATCH FAILED TO LOAD: ${esc(e.message)}</pre>`; });

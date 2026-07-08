@@ -114,6 +114,11 @@ label.f { display: block; margin: 12px 0 4px; font-size: 10px; text-transform: u
 .card.dragging { opacity: 0.4; }
 .card .t { display: flex; gap: 8px; align-items: flex-start; }
 .card .t .title { font-size: 12px; font-weight: 700; flex: 1; word-break: break-word; }
+.card .t .arch {
+  flex: 0 0 auto; margin-top: 1px; padding: 0; border: none; background: none; cursor: pointer;
+  font-family: var(--mono); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--fg-faint);
+}
+.card .t .arch:hover { color: var(--red); }
 .card .meta { margin-top: 7px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint); display: flex; justify-content: space-between; gap: 6px; }
 .card .last { margin-top: 5px; font-size: 10px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card.status-error { border-color: var(--red); }
@@ -168,6 +173,36 @@ label.f { display: block; margin: 12px 0 4px; font-size: 10px; text-transform: u
 .activity .item .txt { font-size: 11px; color: var(--fg-dim); white-space: pre-wrap; word-break: break-word; }
 .activity .item.kind-handoff .txt { color: var(--fg); }
 
+/* ---------- archive list ---------- */
+.arch-list { display: flex; flex-direction: column; gap: 1px; background: var(--line); border: 1px solid var(--line); }
+.arch-item { background: var(--bg); padding: 10px 12px; display: flex; align-items: center; gap: 12px; cursor: pointer; }
+.arch-item:hover { background: var(--bg-1); }
+.arch-main { flex: 1; min-width: 0; }
+.arch-title { font-size: 12px; font-weight: 700; word-break: break-word; }
+.arch-meta { margin-top: 5px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint); display: flex; gap: 12px; flex-wrap: wrap; }
+.arch-restore { flex: 0 0 auto; }
+.arch-empty { color: var(--fg-faint); text-transform: uppercase; letter-spacing: 0.1em; font-size: 11px; text-align: center; padding: 44px 12px; }
+
+/* ---------- attachments ---------- */
+.att-drop {
+  border: 1px dashed var(--line); background: var(--bg-1); color: var(--fg-dim);
+  padding: 12px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.att-drop.over { border-color: var(--fg-dim); background: var(--bg-2); color: var(--fg); }
+.att-drop .btn { padding: 4px 8px; }
+.att-list { display: flex; flex-direction: column; gap: 1px; background: var(--line); border: 1px solid var(--line); margin-top: 8px; }
+.att-list:empty { display: none; }
+.att-item { background: var(--bg); padding: 7px 10px; display: flex; align-items: center; gap: 10px; font-size: 11px; }
+.att-name { flex: 1; min-width: 0; color: var(--fg); text-decoration: none; word-break: break-all; }
+a.att-name:hover { color: var(--red); text-decoration: underline; }
+.att-size { color: var(--fg-faint); font-size: 9px; white-space: nowrap; }
+.att-dl { color: var(--fg-dim); text-decoration: none; font-size: 10px; letter-spacing: 0.05em; }
+.att-dl:hover { color: var(--fg); }
+.att-x { border: none; background: none; color: var(--fg-faint); cursor: pointer; font-family: var(--mono); font-size: 10px; padding: 0; }
+.att-x:hover { color: var(--red); }
+.att-empty { color: var(--fg-faint); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; padding: 6px 2px; }
+
 .transcript { border: 1px solid var(--line); background: var(--bg-1); padding: 10px; height: 52vh; overflow-y: auto; font-size: 11px; line-height: 1.5; }
 .transcript .ln { white-space: pre-wrap; word-break: break-word; margin-bottom: 3px; }
 .transcript .ln .tag { color: var(--fg-faint); font-size: 9px; text-transform: uppercase; margin-right: 8px; }
@@ -212,7 +247,7 @@ label.f { display: block; margin: 12px 0 4px; font-size: 10px; text-transform: u
   .brand .rev { display: none; }
   .health { grid-column: 1 / -1; order: 3; border-top: 1px solid var(--line); font-size: 9px; flex-wrap: wrap; gap: 6px; }
   #topbar .queueinfo { display: none; }  /* #topbar > * would out-specify a bare class */
-  .actions { justify-content: flex-end; }
+  .actions { justify-content: flex-end; flex-wrap: wrap; }
   .btn { padding: 9px 10px; white-space: nowrap; }   /* bigger tap targets, no label wrap */
 
   /* one column per screen, swipe between phases */

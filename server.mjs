@@ -20,8 +20,26 @@ let health = { claude: { ok: false }, codex: { ok: false } };
 probe().then((h) => { health = h; broadcast({ type: 'state-changed' }); });
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+// Attachments ride in as base64 on the ticket JSON, so the body limit must clear the
+// per-file cap plus base64's ~33% inflation and room for a few files at once.
+const MAX_ATTACH_MB = 16;
+app.use(express.json({ limit: '48mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Validate an incoming attachment list ([{name, type, dataB64}]). Returns {ok, files?, error?, status?}.
+function checkAttachments(list) {
+  if (list == null) return { ok: true, files: [] };
+  if (!Array.isArray(list)) return { ok: false, status: 400, error: 'attachments must be an array' };
+  for (const f of list) {
+    if (!f || typeof f.name !== 'string' || typeof f.dataB64 !== 'string') {
+      return { ok: false, status: 400, error: 'each attachment needs a name and dataB64' };
+    }
+    if (Buffer.byteLength(f.dataB64, 'base64') > MAX_ATTACH_MB * 1024 * 1024) {
+      return { ok: false, status: 413, error: `${f.name} exceeds the ${MAX_ATTACH_MB}MB limit` };
+    }
+  }
+  return { ok: true, files: list };
+}
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -150,9 +168,11 @@ app.post('/api/probe', async (_req, res) => {
 
 // ---- tickets ----
 app.post('/api/tickets', (req, res) => {
-  const { title, description, workspace, columnId, overrides, scheduledAt } = req.body;
+  const { title, description, workspace, columnId, overrides, scheduledAt, attachments } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: 'title required' });
-  const t = store.createTicket({ title: title.trim(), description, workspace, columnId, overrides, scheduledAt });
+  const att = checkAttachments(attachments);
+  if (!att.ok) return res.status(att.status).json({ error: att.error });
+  const t = store.createTicket({ title: title.trim(), description, workspace, columnId, overrides, scheduledAt, attachments: att.files });
   broadcast({ type: 'state-changed' });
   const col = store.column(t.columnId);
   if (col?.autoRun && col.role === 'agent') runner.enqueue(t.id, { by: 'human' });
@@ -180,6 +200,32 @@ app.delete('/api/tickets/:id', (req, res) => {
 app.post('/api/tickets/:id/move', (req, res) => {
   const t = runner.moveTicket(req.params.id, req.body.columnId, { by: 'human', autoRun: req.body.autoRun ?? null });
   if (!t) return res.status(404).json({ error: 'not found' });
+  // Moving a ticket puts it back in play — it must not stay hidden in the archive.
+  if (t.archived) { delete t.archived; delete t.archivedAt; store.saveTicket(t.id); }
+  res.json(t);
+});
+
+// Archive is a soft flag: the ticket keeps its column, dossier, and transcripts but drops
+// off the board. Only completed work (terminal column) can be archived.
+app.post('/api/tickets/:id/archive', (req, res) => {
+  const t = store.tickets.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  const col = store.column(t.columnId);
+  if (col?.role !== 'terminal') return res.status(400).json({ error: 'only completed (terminal) tickets can be archived' });
+  t.archived = true;
+  t.archivedAt = new Date().toISOString();
+  store.appendActivity(t.id, { kind: 'system', by: 'human', text: 'archived' });
+  broadcast({ type: 'state-changed' });
+  res.json(t);
+});
+
+app.post('/api/tickets/:id/unarchive', (req, res) => {
+  const t = store.tickets.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  delete t.archived;
+  delete t.archivedAt;
+  store.appendActivity(t.id, { kind: 'system', by: 'human', text: 'restored from archive' });
+  broadcast({ type: 'state-changed' });
   res.json(t);
 });
 
@@ -234,6 +280,38 @@ app.get('/api/tickets/:id/transcript', (req, res) => {
   } catch {
     res.json({ files: [], lines: [] });
   }
+});
+
+// ---- attachments ----
+app.post('/api/tickets/:id/attachments', (req, res) => {
+  const t = store.tickets.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  const list = Array.isArray(req.body) ? req.body
+    : Array.isArray(req.body.attachments) ? req.body.attachments : [req.body];
+  const att = checkAttachments(list);
+  if (!att.ok) return res.status(att.status).json({ error: att.error });
+  const added = att.files.map((f) => store.addAttachment(t.id, f)).filter(Boolean);
+  store.appendActivity(t.id, { kind: 'system', by: 'human', text: `attached ${added.length} file(s): ${added.map((a) => a.name).join(', ')}` });
+  broadcast({ type: 'state-changed' });
+  res.json({ added, attachments: t.attachments });
+});
+
+app.delete('/api/tickets/:id/attachments/:attId', (req, res) => {
+  const r = store.resolveAttachment(req.params.id, req.params.attId);
+  const ok = store.removeAttachment(req.params.id, req.params.attId);
+  if (!ok) return res.status(404).json({ error: 'not found' });
+  store.appendActivity(req.params.id, { kind: 'system', by: 'human', text: `removed attachment: ${r?.meta.name || req.params.attId}` });
+  broadcast({ type: 'state-changed' });
+  res.json({ ok: true });
+});
+
+app.get('/api/tickets/:id/attachments/:attId', (req, res) => {
+  const r = store.resolveAttachment(req.params.id, req.params.attId);
+  if (!r || !fs.existsSync(r.path)) return res.status(404).json({ error: 'not found' });
+  if (r.meta.type) res.type(r.meta.type);
+  const safe = r.meta.name.replace(/["\r\n]/g, "'");
+  res.setHeader('Content-Disposition', `${req.query.dl ? 'attachment' : 'inline'}; filename="${safe}"`);
+  res.sendFile(r.path);
 });
 
 // ---- columns / board ----

@@ -58,6 +58,9 @@ const DOSSIER_TEMPLATE = (ticket) => `# Ticket: ${ticket.title}
 ## Brief
 ${ticket.description}
 
+## Attachments
+_(none)_
+
 ## Plan
 _(written by the Planning phase)_
 
@@ -77,6 +80,37 @@ function atomicWrite(file, data) {
 
 function readJSON(file, fallback = null) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+}
+
+// Reduce an untrusted upload name to a safe basename: no directories, no control
+// chars, no leading dots (blocks "..", hidden files, and path traversal).
+function sanitizeName(name) {
+  return path.basename(String(name || ''))
+    .replace(/[\x00-\x1f]/g, '')
+    .replace(/[/\\]/g, '_')
+    .replace(/^\.+/, '')
+    .trim()
+    .slice(0, 200) || 'file';
+}
+
+export function fmtBytes(n) {
+  if (!Number.isFinite(n)) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// Replace a "## Heading" block (heading line through just before the next "## ")
+// with newBlock. Returns null if the heading isn't present so the caller can insert.
+function replaceSection(doc, heading, newBlock) {
+  const lines = doc.split('\n');
+  const start = lines.findIndex((l) => l.trim() === heading);
+  if (start === -1) return null;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) { end = i; break; }
+  }
+  return [...lines.slice(0, start), ...newBlock.split('\n'), '', ...lines.slice(end)].join('\n');
 }
 
 export class Store {
@@ -130,7 +164,7 @@ export class Store {
     return sorted.find((c, i) => i > from && c.role === 'agent') || null;
   }
 
-  createTicket({ title, description, workspace, columnId, overrides, scheduledAt }) {
+  createTicket({ title, description, workspace, columnId, overrides, scheduledAt, attachments }) {
     const id = `t-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     const ticket = {
       id, title, description: description || '',
@@ -144,11 +178,17 @@ export class Store {
       status: 'idle',
       bounces: 0,
       humanTest: null,
+      attachments: [],
       activity: [],
     };
     fs.mkdirSync(this.transcriptsDir(id), { recursive: true });
     fs.writeFileSync(this.dossierPath(id), DOSSIER_TEMPLATE(ticket));
     this.tickets.set(id, ticket);
+    for (const f of attachments || []) {
+      try { ticket.attachments.push(this._writeAttachmentFile(id, f)); }
+      catch { /* skip an unreadable upload — the ticket still gets created */ }
+    }
+    this.syncDossierAttachments(id);
     this.saveTicket(id);
     return ticket;
   }
@@ -172,6 +212,78 @@ export class Store {
 
   readDossier(id) {
     try { return fs.readFileSync(this.dossierPath(id), 'utf8'); } catch { return ''; }
+  }
+
+  /* ---- attachments ----
+     Files live under the ticket dir (attachments/<attId>/<name>) so both harnesses can
+     read them: dataDir = ticketDir is inside codex's --add-dir sandbox, and claude reads
+     absolute paths freely — the same mechanism that lets them read DOSSIER.md. */
+  attachmentsDir(id) { return path.join(this.ticketDir(id), 'attachments'); }
+  attachmentPath(id, meta) { return path.join(this.attachmentsDir(id), meta.id, meta.storedName); }
+
+  _writeAttachmentFile(id, { name, type, dataB64 }) {
+    const attId = crypto.randomBytes(4).toString('hex');
+    const storedName = sanitizeName(name);
+    const buf = Buffer.from(String(dataB64 || ''), 'base64');
+    const dir = path.join(this.attachmentsDir(id), attId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, storedName), buf);
+    return {
+      id: attId,
+      name: path.basename(String(name || storedName)) || storedName,
+      storedName,
+      type: type || '',
+      size: buf.length,
+      addedAt: new Date().toISOString(),
+    };
+  }
+
+  addAttachment(id, file) {
+    const t = this.tickets.get(id);
+    if (!t) return null;
+    const meta = this._writeAttachmentFile(id, file);
+    (t.attachments ||= []).push(meta);
+    this.syncDossierAttachments(id);
+    this.saveTicket(id);
+    return meta;
+  }
+
+  removeAttachment(id, attId) {
+    const t = this.tickets.get(id);
+    const meta = t?.attachments?.find((a) => a.id === attId);
+    if (!meta) return false;
+    t.attachments = t.attachments.filter((a) => a.id !== attId);
+    fs.rmSync(path.join(this.attachmentsDir(id), meta.id), { recursive: true, force: true });
+    this.syncDossierAttachments(id);
+    this.saveTicket(id);
+    return true;
+  }
+
+  resolveAttachment(id, attId) {
+    const meta = this.tickets.get(id)?.attachments?.find((a) => a.id === attId);
+    return meta ? { meta, path: this.attachmentPath(id, meta) } : null;
+  }
+
+  // Keep the dossier's "## Attachments" section in lockstep with the metadata, so the
+  // agents (who read the dossier by absolute path) always see the current files and where
+  // to read them. Called on every create/add/remove.
+  syncDossierAttachments(id) {
+    const t = this.tickets.get(id);
+    if (!t) return;
+    const atts = t.attachments || [];
+    const body = atts.length
+      ? ['## Attachments',
+         '_Files the human attached for reference — read any relevant to your phase (absolute paths below)._',
+         ...atts.map((a) => `- \`${a.name}\`${a.size ? ` (${fmtBytes(a.size)})` : ''} — ${this.attachmentPath(id, a)}`)].join('\n')
+      : ['## Attachments', '_(none)_'].join('\n');
+    let doc = this.readDossier(id);
+    const replaced = replaceSection(doc, '## Attachments', body);
+    if (replaced != null) doc = replaced;
+    else {
+      const at = doc.indexOf('\n## Plan'); // legacy dossiers predate the section — slot it before Plan
+      doc = at !== -1 ? `${doc.slice(0, at)}\n${body}\n${doc.slice(at + 1)}` : `${doc.trimEnd()}\n\n${body}\n`;
+    }
+    fs.writeFileSync(this.dossierPath(id), doc);
   }
 
   // Effective harness for a ticket in a column: column default merged with per-ticket override.

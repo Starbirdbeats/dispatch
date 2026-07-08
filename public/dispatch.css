@@ -16,7 +16,7 @@
   --scan-blend: multiply;
   --scan-opacity: 1;
   --mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, "Cascadia Mono", Menlo, monospace;
-  --base-font: 12px;            /* appearance: font-size slider */
+  --base-font: 20px;            /* appearance: font-size slider default */
 }
 
 /* ---- LIGHT (Swiss industrial print: unbleached documentation paper) ---- */

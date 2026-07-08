@@ -13,7 +13,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 /* ---------- appearance prefs (device-local, not server state) ---------- */
 const PREFS_KEY = 'dispatch.appearance';
-const DEFAULT_PREFS = { theme: 'dark', fontPx: 12, uiScale: 1 };
+const DEFAULT_PREFS = { theme: 'dark', fontPx: 20, uiScale: 1 };
 function loadPrefs() {
   try { return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; }
   catch { return { ...DEFAULT_PREFS }; }
@@ -693,7 +693,7 @@ function renderSettingsModal() {
         ${['dark', 'light', 'sepia'].map((th) => `<button class="theme-swatch th-${th} ${p.theme === th ? 'sel' : ''}" data-theme-pick="${th}">${th}</button>`).join('')}
       </div>
       <label class="f">FONT SIZE <output id="s-font-val">${p.fontPx}px</output></label>
-      <input id="s-font" type="range" min="9" max="20" step="1" value="${p.fontPx}">
+      <input id="s-font" type="range" min="12" max="32" step="1" value="${p.fontPx}">
       <label class="f">UI SIZE <output id="s-ui-val">${Math.round(p.uiScale * 100)}%</output></label>
       <input id="s-ui" type="range" min="0.7" max="1.6" step="0.05" value="${p.uiScale}">
       <button class="btn" id="s-appear-reset" style="margin-top:8px">[ RESET APPEARANCE ]</button>

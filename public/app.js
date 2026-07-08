@@ -142,6 +142,7 @@ const ticketsIn = (colId) => S.data.tickets.filter((t) => t.columnId === colId &
 const archivedTickets = () => S.data.tickets.filter((t) => t.archived)
   .sort((a, b) => ((a.archivedAt || '') < (b.archivedAt || '') ? 1 : -1)); // newest first
 const harnessLabel = (h) => h.type === 'human' ? 'HUMAN' : `${h.type} · ${h.model || 'default'} · ${h.effort || 'default'}`;
+const BY_LABEL = { claude: 'CLAUDE CODE', codex: 'CODEX', human: 'YOU', engine: 'ENGINE' };
 const effective = (t, c) => ({ ...c.harness, ...(t.overrides?.[c.id] || {}) });
 
 /* Diagnose a ticket into a plain-language state the UI can act on.
@@ -597,10 +598,11 @@ function renderActivity(body, t) {
   const base = { ...effective(t, c), ...(t.oneShotHarness || {}) };
   const hType = base.type === 'human' ? 'claude' : (base.type || 'claude');
 
+  // chronological: oldest at top, newest at the bottom next to the input box
   body.innerHTML = `
-    <div class="activity">${[...t.activity].reverse().map((a) => `
-      <div class="item kind-${a.kind}">
-        <div class="who"><span class="by-${a.by}">${esc(a.by)} / ${esc(a.kind)}</span><span>${esc(a.ts.replace('T', ' ').slice(0, 19))}</span></div>
+    <div class="activity">${t.activity.map((a) => `
+      <div class="item kind-${a.kind} by-${a.by}">
+        <div class="who"><span class="author by-${a.by}">${esc(BY_LABEL[a.by] || a.by)} · ${esc(a.kind)}</span><span>${esc(a.ts.replace('T', ' ').slice(0, 19))}</span></div>
         <div class="txt">${esc(a.text)}</div>
       </div>`).join('') || '<div class="item"><div class="txt">no activity yet</div></div>'}
     </div>
@@ -638,6 +640,19 @@ function renderActivity(body, t) {
   };
 
   renderWakePanel(t);
+
+  // Auto-scroll to newest (bottom). Stay pinned to the bottom unless the user scrolled up
+  // to read history — then leave them where they are until a new item arrives.
+  const prev = S.actScroll || {};
+  const sameTicket = prev.id === t.id;
+  const grew = sameTicket && t.activity.length > (prev.count || 0);
+  const pinned = !sameTicket ? true : (prev.pinned !== false) || grew;
+  if (pinned) body.scrollTop = body.scrollHeight;
+  body.onscroll = () => {
+    if (!S.actScroll) return;
+    S.actScroll.pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+  };
+  S.actScroll = { id: t.id, count: t.activity.length, pinned };
 }
 
 // The countdown + pick-now/cancel controls shown when a comment wake is pending.

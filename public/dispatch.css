@@ -200,11 +200,14 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; background: v
 /* ---------- modal ---------- */
 .overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,.72); z-index: 100;
-  display: flex; align-items: center; justify-content: center; padding: 3vh 3vw;
+  display: flex; justify-content: center; padding: 16px; overflow: auto;
 }
 .panel {
+  /* margin:auto centres when it fits and still lets you scroll to the top when it doesn't.
+     max-height/width are % of the overlay (a definite box) — zoom-safe, unlike vh/vw. */
+  margin: auto;
   background: var(--bg); border: 1px solid var(--fg-dim);
-  width: min(980px, 100%); max-height: 94vh; display: flex; flex-direction: column;
+  width: min(980px, 100%); max-width: 100%; max-height: 100%; display: flex; flex-direction: column;
 }
 .panel-head {
   display: flex; justify-content: space-between; align-items: center; gap: 10px;

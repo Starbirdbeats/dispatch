@@ -97,6 +97,13 @@ label.f { display: block; margin: 12px 0 4px; font-size: 10px; text-transform: u
 .col-harness .cfg:hover { color: var(--fg); }
 .col-harness .auto { color: var(--fg); }
 
+.col-sweep {
+  margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line);
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-faint);
+  display: flex; justify-content: space-between;
+}
+.col-sweep [data-sweep] { color: var(--fg); font-variant-numeric: tabular-nums; }
+
 .col-body { flex: 1 1 auto; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 
 /* ---------- cards ---------- */

@@ -85,6 +85,8 @@ function renderBoard() {
           <span>[ ${esc(harnessLabel(c.harness))} ]${c.autoRun ? ' <span class="auto">AUTO</span>' : ''}</span>
           <button class="cfg" data-cfg="${c.id}">CFG &gt;&gt;</button>
         </div>
+        ${c.role === 'intake' && S.data.scheduler?.autoDispatch
+          ? `<div class="col-sweep">AUTO SWEEP <span data-sweep>T-—:——</span></div>` : ''}
       </div>
       <div class="col-body"></div>`;
     const body = $('.col-body', col);
@@ -455,6 +457,21 @@ function renderSettingsModal() {
   }).then(() => { toast('SETTINGS SAVED'); closeAndReload(); }).catch(alertErr);
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
 }
+
+/* ---------- sweep countdown (1s tick, no full re-render) ---------- */
+setInterval(() => {
+  const at = S.data?.scheduler?.nextSweepAt;
+  const els = document.querySelectorAll('[data-sweep]');
+  if (!at || !els.length) return;
+  const ms = at - Date.now();
+  let label;
+  if (ms <= 0) label = 'DUE — next tick';
+  else {
+    const m = Math.floor(ms / 60000), s = Math.floor((ms % 60000) / 1000);
+    label = `T-${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
+  for (const el of els) el.textContent = label;
+}, 1000);
 
 /* ---------- boot ---------- */
 $('#btn-new').onclick = () => { S.modal = { type: 'new' }; renderModal(); };

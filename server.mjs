@@ -59,6 +59,8 @@ function autoDispatchTick() {
     if (t.scheduledAt) { t.scheduledAt = null; store.saveTicket(t.id); } // no refire if it ever returns
     runner.moveTicket(t.id, next.id, { by: 'engine', autoRun: true });
   }
+  // Even a no-op sweep advances nextSweepAt — push it so client countdowns reset.
+  if (sweep) broadcast({ type: 'state-changed' });
 }
 setInterval(() => { try { autoDispatchTick(); } catch (e) { console.error('auto-dispatch:', e); } }, TICK_MS);
 
@@ -70,6 +72,10 @@ app.get('/api/state', (_req, res) => {
     registry: REGISTRY,
     health,
     runs: runner.snapshot(),
+    scheduler: {
+      autoDispatch: store.board.settings.autoDispatch !== false,
+      nextSweepAt,
+    },
   });
 });
 

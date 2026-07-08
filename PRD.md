@@ -219,6 +219,11 @@ Node 24, ~/git/dispatch
 - **Persistence:** JSON files under `~/dispatch-data/` (board.json, tickets/<id>/ticket.json + DOSSIER.md + transcripts/). Human-readable and greppable > database, at this scale. Atomic write-rename.
 - **Systemd user service** (`dispatch.service`) so it survives reboots; port **4400**.
 
+## 9b. Shipped post-v1.0
+
+- **v1.1 — Feedback & mobile:** registry-driven select pickers for model/effort/permissions (scoped per harness, custom escape hatch), toast feedback on every action with surfaced refusal reasons, RUN from a human column starts the pipeline, mobile-responsive layout (swipe-snap columns, full-screen panels).
+- **v1.2 — Auto-dispatch:** scheduler ticks every 60s. Unscheduled tickets in intake columns are swept into the pipeline every N minutes (default 5, settings-configurable, toggleable). A ticket with a `scheduledAt` timestamp waits for that exact time instead (checked each tick, fired once, then cleared). Set at creation or on the ticket overview.
+
 ## 10. Out of scope (v1) / Roadmap
 
 - Multi-user, auth, mobile layout

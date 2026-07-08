@@ -112,7 +112,7 @@ function cardEl(t, c) {
   const last = [...t.activity].reverse().find((a) => a.kind !== 'run');
   el.innerHTML = `
     <div class="t"><span class="led ${status}"></span><span class="title">${esc(t.title)}</span></div>
-    <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span><span>${esc(status)}</span></div>
+    <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span><span>${t.scheduledAt ? `SCHED ${esc(t.scheduledAt.replace('T', ' '))} · ` : ''}${esc(status)}</span></div>
     ${last ? `<div class="last">&gt; ${esc(last.text)}</div>` : ''}`;
   el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/ticket', t.id); el.classList.add('dragging'); });
   el.addEventListener('dragend', () => el.classList.remove('dragging'));
@@ -243,6 +243,7 @@ function renderOverview(body, t) {
     <div class="kv">
       <div class="k">ID</div><div>${t.id}</div>
       <div class="k">WORKSPACE</div><div><input id="f-ws" value="${esc(t.workspace)}"></div>
+      <div class="k">SCHEDULED</div><div><input id="f-sched" type="datetime-local" value="${esc(t.scheduledAt || '')}"></div>
       <div class="k">SESSIONS</div><div>claude: ${t.sessions.claude || '—'}<br>codex: ${t.sessions.codex || '—'}</div>
       <div class="k">HUMAN TEST</div><div>${t.humanTest ? esc(t.humanTest) : '<span class="warn">not provided yet</span>'}</div>
     </div>
@@ -284,6 +285,7 @@ function renderOverview(body, t) {
     await api(`/api/tickets/${t.id}`, 'PATCH', {
       workspace: $('#f-ws').value.trim(),
       description: $('#f-desc').value,
+      scheduledAt: $('#f-sched').value || null,
       overrides: draft,
     }).then(() => toast('TICKET SAVED')).catch(alertErr);
   };
@@ -416,7 +418,9 @@ function renderNewModal() {
       <input id="n-ws" value="${esc(S.data.board.settings.defaultWorkspace)}">
       <label class="f">START IN</label>
       <select id="n-col">${cols().map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
-      <div class="hint">dropping straight into an auto-run agent phase starts the run immediately.</div>
+      <label class="f">SCHEDULE FOR (optional — leave blank for the next backlog sweep)</label>
+      <input id="n-sched" type="datetime-local">
+      <div class="hint">unscheduled backlog tickets auto-start every ${S.data.board.settings.autoDispatchEveryMin || 5} min. a scheduled ticket waits for its timestamp.</div>
     </div>`,
     `<button class="btn btn-accent" id="n-create">[ CREATE ]</button>`);
   $('#n-create').onclick = () => api('/api/tickets', 'POST', {
@@ -424,6 +428,7 @@ function renderNewModal() {
     description: $('#n-desc').value,
     workspace: $('#n-ws').value.trim(),
     columnId: $('#n-col').value,
+    scheduledAt: $('#n-sched').value || null,
   }).then(() => { toast('TICKET CREATED'); closeAndReload(); }).catch(alertErr);
 }
 
@@ -435,6 +440,9 @@ function renderSettingsModal() {
       <label class="f">MAX CONCURRENT RUNS</label><input id="s-cap" type="number" min="1" max="8" value="${s.maxConcurrent}">
       <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
       <label class="f">DEFAULT WORKSPACE</label><input id="s-ws" value="${esc(s.defaultWorkspace)}">
+      <label class="f">AUTO-DISPATCH BACKLOG</label>
+      <select id="s-auto"><option value="">off</option><option value="1" ${s.autoDispatch !== false ? 'selected' : ''}>on</option></select>
+      <label class="f">SWEEP INTERVAL (MINUTES)</label><input id="s-every" type="number" min="1" value="${s.autoDispatchEveryMin || 5}">
       <div class="hint" style="margin-top:14px">claude auth: subscription oauth on starbird · codex auth: chatgpt login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
     </div>`,
     `<button class="btn btn-accent" id="s-save">[ SAVE ]</button>`);
@@ -442,6 +450,8 @@ function renderSettingsModal() {
     maxConcurrent: Number($('#s-cap').value) || 2,
     runTimeoutMin: Number($('#s-to').value) || 30,
     defaultWorkspace: $('#s-ws').value.trim(),
+    autoDispatch: Boolean($('#s-auto').value),
+    autoDispatchEveryMin: Number($('#s-every').value) || 5,
   }).then(() => { toast('SETTINGS SAVED'); closeAndReload(); }).catch(alertErr);
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
 }

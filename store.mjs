@@ -13,6 +13,8 @@ const DEFAULT_BOARD = {
     maxConcurrent: 2,
     runTimeoutMin: 30,
     defaultWorkspace: path.join(os.homedir(), 'git'),
+    autoDispatch: true,          // sweep intake columns and start pipelines automatically
+    autoDispatchEveryMin: 5,
   },
   columns: [
     {
@@ -112,7 +114,7 @@ export class Store {
     return sorted.find((c, i) => i > from && c.role === 'agent') || null;
   }
 
-  createTicket({ title, description, workspace, columnId, overrides }) {
+  createTicket({ title, description, workspace, columnId, overrides, scheduledAt }) {
     const id = `t-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     const ticket = {
       id, title, description: description || '',
@@ -120,6 +122,7 @@ export class Store {
       columnId: columnId || this.board.columns.find((c) => c.role === 'intake')?.id || this.board.columns[0].id,
       createdAt: new Date().toISOString(),
       overrides: overrides || {},
+      scheduledAt: scheduledAt || null,
       sessions: { claude: null, codex: null },
       status: 'idle',
       bounces: 0,

@@ -31,6 +31,37 @@ function broadcast(msg) {
 
 const runner = new Runner(store, broadcast);
 
+// ---- auto-dispatch scheduler ----
+// Every tick (60s): fire tickets whose scheduledAt has come due. Every sweep interval
+// (default 5 min): start the pipeline for any unscheduled ticket sitting in an intake column.
+const TICK_MS = 60_000;
+let nextSweepAt = Date.now() + 5 * 60_000; // grace period after boot before the first sweep
+function autoDispatchTick() {
+  const s = store.board.settings;
+  if (s.autoDispatch === false) return;
+  const now = Date.now();
+  const sweep = now >= nextSweepAt;
+  if (sweep) nextSweepAt = now + (s.autoDispatchEveryMin || 5) * 60_000;
+
+  for (const t of store.tickets.values()) {
+    const col = store.column(t.columnId);
+    if (!col || col.role !== 'intake' || t.status !== 'idle') continue;
+    const due = t.scheduledAt
+      ? now >= new Date(t.scheduledAt).getTime()  // server-local time, same tz as the browser
+      : sweep;
+    if (!due) continue;
+    const next = store.nextAgentColumn(col.id);
+    if (!next) continue;
+    store.appendActivity(t.id, {
+      kind: 'system', by: 'engine',
+      text: t.scheduledAt ? `auto-dispatch: scheduled time ${t.scheduledAt} reached` : 'auto-dispatch: backlog sweep',
+    });
+    if (t.scheduledAt) { t.scheduledAt = null; store.saveTicket(t.id); } // no refire if it ever returns
+    runner.moveTicket(t.id, next.id, { by: 'engine', autoRun: true });
+  }
+}
+setInterval(() => { try { autoDispatchTick(); } catch (e) { console.error('auto-dispatch:', e); } }, TICK_MS);
+
 // ---- state ----
 app.get('/api/state', (_req, res) => {
   res.json({
@@ -50,9 +81,9 @@ app.post('/api/probe', async (_req, res) => {
 
 // ---- tickets ----
 app.post('/api/tickets', (req, res) => {
-  const { title, description, workspace, columnId, overrides } = req.body;
+  const { title, description, workspace, columnId, overrides, scheduledAt } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: 'title required' });
-  const t = store.createTicket({ title: title.trim(), description, workspace, columnId, overrides });
+  const t = store.createTicket({ title: title.trim(), description, workspace, columnId, overrides, scheduledAt });
   broadcast({ type: 'state-changed' });
   const col = store.column(t.columnId);
   if (col?.autoRun && col.role === 'agent') runner.enqueue(t.id, { by: 'human' });
@@ -62,7 +93,7 @@ app.post('/api/tickets', (req, res) => {
 app.patch('/api/tickets/:id', (req, res) => {
   const t = store.tickets.get(req.params.id);
   if (!t) return res.status(404).json({ error: 'not found' });
-  for (const k of ['title', 'description', 'workspace', 'overrides', 'humanTest']) {
+  for (const k of ['title', 'description', 'workspace', 'overrides', 'humanTest', 'scheduledAt']) {
     if (k in req.body) t[k] = req.body[k];
   }
   store.saveTicket(t.id);

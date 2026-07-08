@@ -444,6 +444,7 @@ function renderNewModal() {
 /* ---- settings modal ---- */
 function renderSettingsModal() {
   const s = S.data.board.settings;
+  const agentCols = cols().filter((c) => c.role === 'agent');
   shell('SETTINGS', `
     <div class="panel-body">
       <label class="f">MAX CONCURRENT RUNS</label><input id="s-cap" type="number" min="1" max="8" value="${s.maxConcurrent}">
@@ -454,17 +455,47 @@ function renderSettingsModal() {
       <label class="f">AUTO-DISPATCH BACKLOG</label>
       <select id="s-auto"><option value="">off</option><option value="1" ${s.autoDispatch !== false ? 'selected' : ''}>on</option></select>
       <label class="f">SWEEP INTERVAL (MINUTES)</label><input id="s-every" type="number" min="1" value="${s.autoDispatchEveryMin || 5}">
+
+      <label class="f">PHASE DEFAULTS — MODEL &amp; EFFORT PER COLUMN</label>
+      <div class="overrides-wrap"><div class="overrides-grid" style="grid-template-columns:110px 90px 1fr 1fr">
+        <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div>
+        ${agentCols.map((c) => `
+          <div>${esc(c.name)}</div>
+          <div>${esc(c.harness.type)}</div>
+          <div><select data-pd="${c.id}:model">${harnessOptions('model', c.harness.type, c.harness.model || '', '—')}</select></div>
+          <div><select data-pd="${c.id}:effort">${harnessOptions('effort', c.harness.type, c.harness.effort || '', '— (CLI default)')}</select></div>`).join('')}
+      </div></div>
+      <div class="hint">changing a harness TYPE (claude ⇄ codex) still needs that column's own CFG panel — this list only sets model/effort defaults.</div>
+
       <div class="hint" style="margin-top:14px">claude auth: subscription oauth on starbird · codex auth: chatgpt login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
     </div>`,
     `<button class="btn btn-accent" id="s-save">[ SAVE ]</button>`);
-  $('#s-save').onclick = () => api('/api/settings', 'PATCH', {
-    maxConcurrent: Number($('#s-cap').value) || 2,
-    runTimeoutMin: Number($('#s-to').value) || 30,
-    defaultWorkspace: $('#s-ws').value.trim(),
-    autoDispatch: Boolean($('#s-auto').value),
-    autoDispatchEveryMin: Number($('#s-every').value) || 5,
-    stallAfterMin: Number($('#s-stall').value),
-  }).then(() => { toast('SETTINGS SAVED'); closeAndReload(); }).catch(alertErr);
+
+  for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => handleCustomModel(sel);
+
+  $('#s-save').onclick = async () => {
+    const phaseDefaults = {};
+    for (const el of document.querySelectorAll('[data-pd]')) {
+      const [colId, key] = el.dataset.pd.split(':');
+      (phaseDefaults[colId] ||= {})[key] = el.value.trim();
+    }
+    await Promise.all(agentCols.map((c) => {
+      const d = phaseDefaults[c.id];
+      if (!d || (!d.model && !d.effort)) return null;
+      const harness = { ...c.harness };
+      if (d.model) harness.model = d.model;
+      if (d.effort) harness.effort = d.effort;
+      return api(`/api/columns/${c.id}`, 'PATCH', { harness });
+    }).filter(Boolean));
+    await api('/api/settings', 'PATCH', {
+      maxConcurrent: Number($('#s-cap').value) || 2,
+      runTimeoutMin: Number($('#s-to').value) || 30,
+      defaultWorkspace: $('#s-ws').value.trim(),
+      autoDispatch: Boolean($('#s-auto').value),
+      autoDispatchEveryMin: Number($('#s-every').value) || 5,
+      stallAfterMin: Number($('#s-stall').value),
+    }).then(() => { toast('SETTINGS SAVED'); closeAndReload(); }).catch(alertErr);
+  };
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
 }
 

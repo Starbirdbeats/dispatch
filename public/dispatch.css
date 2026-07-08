@@ -1,6 +1,7 @@
 /* DISPATCH — tactical telemetry / CRT terminal system
    substrate #0A0A0A · phosphor #EAEAEA · hazard #FF2A2A · green reserved for RUNNING LED only */
 
+/* ---- DARK (default substrate: deactivated CRT) ---- */
 :root {
   --bg: #0a0a0a;
   --bg-1: #121212;
@@ -11,7 +12,43 @@
   --fg-faint: #4d4d4d;
   --red: #ff2a2a;
   --green: #4af626;
+  --scan-rgb: 0, 0, 0;          /* scanline ink */
+  --scan-blend: multiply;
+  --scan-opacity: 1;
   --mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, "Cascadia Mono", Menlo, monospace;
+  --base-font: 12px;            /* appearance: font-size slider */
+}
+
+/* ---- LIGHT (Swiss industrial print: unbleached documentation paper) ---- */
+body[data-theme="light"] {
+  --bg: #f4f4f0;
+  --bg-1: #eae8e3;
+  --bg-2: #dedcd5;
+  --line: #c4c2ba;
+  --fg: #111111;
+  --fg-dim: #55534c;
+  --fg-faint: #9a988f;
+  --red: #e61919;
+  --green: #1f8a2e;             /* legible on paper */
+  --scan-rgb: 0, 0, 0;
+  --scan-blend: multiply;
+  --scan-opacity: 0.35;
+}
+
+/* ---- SEPIA (warm archival paper) ---- */
+body[data-theme="sepia"] {
+  --bg: #f2e7d0;
+  --bg-1: #ebdcbf;
+  --bg-2: #e2d0ac;
+  --line: #cbb488;
+  --fg: #3a2f24;
+  --fg-dim: #6e5d47;
+  --fg-faint: #a58f6d;
+  --red: #b3421a;
+  --green: #6a7d1f;
+  --scan-rgb: 90, 60, 20;
+  --scan-blend: multiply;
+  --scan-opacity: 0.3;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; border-radius: 0 !important; }
@@ -20,7 +57,7 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--base-font);
   letter-spacing: 0.04em;
   overflow: hidden;
   display: flex;
@@ -29,8 +66,10 @@ body {
 
 #scanlines {
   position: fixed; inset: 0; pointer-events: none; z-index: 999;
-  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,.12) 2px, rgba(0,0,0,.12) 4px);
-  mix-blend-mode: multiply;
+  background: repeating-linear-gradient(0deg, transparent, transparent 2px,
+    rgba(var(--scan-rgb), .12) 2px, rgba(var(--scan-rgb), .12) 4px);
+  mix-blend-mode: var(--scan-blend);
+  opacity: var(--scan-opacity);
 }
 
 /* ---------- top bar ---------- */
@@ -71,6 +110,30 @@ input, textarea, select {
 input:focus, textarea:focus, select:focus { outline: 1px solid var(--fg-dim); }
 textarea { resize: vertical; min-height: 70px; }
 label.f { display: block; margin: 12px 0 4px; font-size: 10px; text-transform: uppercase; color: var(--fg-dim); letter-spacing: 0.12em; }
+label.f output { color: var(--fg); float: right; font-variant-numeric: tabular-nums; }
+
+/* ---- appearance controls ---- */
+.section-head { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg); margin: 4px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--line); }
+.section-head:not(:first-child) { margin-top: 4px; }
+.section-head span { color: var(--fg-faint); font-weight: 400; letter-spacing: 0.06em; }
+hr.sep { border: none; border-top: 1px solid var(--line); margin: 20px 0 4px; }
+
+.theme-row { display: flex; gap: 8px; }
+.theme-swatch {
+  flex: 1; font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  padding: 12px 8px; cursor: pointer; border: 1px solid var(--line); color: var(--fg-dim);
+}
+.theme-swatch.th-dark { background: #0a0a0a; color: #eaeaea; }
+.theme-swatch.th-light { background: #f4f4f0; color: #111; }
+.theme-swatch.th-sepia { background: #f2e7d0; color: #3a2f24; }
+.theme-swatch.sel { outline: 2px solid var(--red); outline-offset: -2px; }
+
+input[type="range"] {
+  -webkit-appearance: none; appearance: none; height: 6px; padding: 0;
+  background: var(--bg-2); border: 1px solid var(--line); cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; background: var(--red); cursor: pointer; }
+input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; background: var(--red); border: none; border-radius: 0; cursor: pointer; }
 
 /* ---------- board ---------- */
 #board {
@@ -211,7 +274,25 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 .transcript .ln.k-error { color: var(--red); }
 .transcript .ln.k-result { color: var(--fg); border-top: 1px solid var(--line); padding-top: 5px; }
 
-.dossier { border: 1px solid var(--line); background: var(--bg-1); padding: 14px; max-height: 56vh; overflow-y: auto; white-space: pre-wrap; font-size: 11px; line-height: 1.6; color: var(--fg-dim); }
+.dossier { border: 1px solid var(--line); background: var(--bg-1); padding: 16px 18px; max-height: 60vh; overflow-y: auto; font-size: 12px; line-height: 1.65; color: var(--fg-dim); }
+.dossier h1, .dossier h2, .dossier h3 { color: var(--fg); text-transform: uppercase; letter-spacing: 0.04em; line-height: 1.2; }
+.dossier h1 { font-size: 16px; margin: 4px 0 12px; padding-bottom: 8px; border-bottom: 2px solid var(--red); }
+.dossier h2 { font-size: 13px; margin: 20px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--line); }
+.dossier h3 { font-size: 12px; margin: 16px 0 6px; color: var(--fg-dim); }
+.dossier p { margin: 8px 0; }
+.dossier ul, .dossier ol { margin: 8px 0 8px 4px; padding-left: 18px; }
+.dossier li { margin: 3px 0; }
+.dossier code { background: var(--bg-2); border: 1px solid var(--line); padding: 1px 5px; font-size: 0.92em; color: var(--fg); }
+.dossier pre { background: var(--bg-2); border: 1px solid var(--line); padding: 10px 12px; margin: 10px 0; overflow-x: auto; }
+.dossier pre code { background: none; border: none; padding: 0; }
+.dossier a { color: var(--red); text-decoration: underline; }
+.dossier strong { color: var(--fg); }
+.dossier em { color: var(--fg-dim); font-style: italic; }
+.dossier hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
+.dossier blockquote { border-left: 2px solid var(--line); padding-left: 12px; margin: 10px 0; color: var(--fg-faint); }
+.dossier table { border-collapse: collapse; margin: 10px 0; width: 100%; }
+.dossier th, .dossier td { border: 1px solid var(--line); padding: 5px 9px; text-align: left; font-size: 11px; }
+.dossier th { background: var(--bg-2); color: var(--fg); text-transform: uppercase; }
 
 .overrides-grid { display: grid; grid-template-columns: 110px 1fr 1fr 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); }
 .overrides-grid > div { background: var(--bg); padding: 6px 8px; font-size: 10px; display: flex; align-items: center; }

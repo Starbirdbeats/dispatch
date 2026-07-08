@@ -11,6 +11,95 @@ const S = {
 const $ = (sel, el = document) => el.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+/* ---------- appearance prefs (device-local, not server state) ---------- */
+const PREFS_KEY = 'dispatch.appearance';
+const DEFAULT_PREFS = { theme: 'dark', fontPx: 12, uiScale: 1 };
+function loadPrefs() {
+  try { return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; }
+  catch { return { ...DEFAULT_PREFS }; }
+}
+function applyPrefs(p) {
+  document.body.dataset.theme = p.theme;
+  document.documentElement.style.setProperty('--base-font', `${p.fontPx}px`);
+  document.documentElement.style.zoom = String(p.uiScale);
+}
+function savePrefs(p) {
+  S.prefs = p;
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch {}
+  applyPrefs(p);
+}
+
+/* ---------- minimal, XSS-safe markdown → HTML (no deps) ----------
+   Escapes everything first, then applies a fixed set of transforms, so agent/file
+   content can never inject live markup. Covers headings, lists, tables, code,
+   bold/italic, links, hr, blockquotes — the shapes dossiers actually use. */
+function mdInline(s) {
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return `XCODEX${codes.length - 1}XCODEX`; });
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, t, u) =>
+    `<a href="${/^(https?:\/\/|\/|#)/.test(u) ? u : '#'}" target="_blank" rel="noopener">${t}</a>`);
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
+  s = s.replace(/XCODEX(\d+)XCODEX/g, (_, i) => `<code>${codes[+i]}</code>`);
+  return s;
+}
+function renderMarkdown(src) {
+  const blocks = [];
+  src = String(src).replace(/\r\n/g, '\n').replace(/```[^\n]*\n([\s\S]*?)```/g, (_, code) => {
+    blocks.push(code.replace(/\n$/, ''));
+    return `XFENCEX${blocks.length - 1}XFENCEX`;
+  });
+  const lines = esc(src).split('\n');
+  const out = [];
+  let list = null; // 'ul' | 'ol'
+  let para = [];
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const flushPara = () => { if (para.length) { out.push(`<p>${mdInline(para.join(' '))}</p>`); para = []; } };
+  const flush = () => { flushPara(); closeList(); };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const ph = line.match(/^XFENCEX(\d+)XFENCEX\s*$/);
+    if (ph) { flush(); out.push(`<pre><code>${esc(blocks[+ph[1]])}</code></pre>`); continue; }
+    if (!line.trim()) { flush(); continue; }
+
+    const h = line.match(/^(#{1,6})\s+(.+)$/);
+    if (h) { flush(); const n = h[1].length; out.push(`<h${n}>${mdInline(h[2])}</h${n}>`); continue; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flush(); out.push('<hr>'); continue; }
+
+    // GFM table: header row followed by a |---|---| separator
+    if (line.includes('|') && i + 1 < lines.length && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+      flush();
+      const cells = (row) => row.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
+      const head = cells(line);
+      out.push('<table><thead><tr>' + head.map((c) => `<th>${mdInline(c)}</th>`).join('') + '</tr></thead><tbody>');
+      i++; // skip separator
+      while (i + 1 < lines.length && lines[i + 1].includes('|') && lines[i + 1].trim()) {
+        i++;
+        out.push('<tr>' + cells(lines[i]).map((c) => `<td>${mdInline(c)}</td>`).join('') + '</tr>');
+      }
+      out.push('</tbody></table>');
+      continue;
+    }
+
+    const ul = line.match(/^\s*[-*+]\s+(.+)$/);
+    const ol = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (ul || ol) {
+      const want = ul ? 'ul' : 'ol';
+      flushPara();
+      if (list !== want) { closeList(); out.push(`<${want}>`); list = want; }
+      out.push(`<li>${mdInline((ul || ol)[1])}</li>`);
+      continue;
+    }
+    const bq = line.match(/^\s*>\s?(.*)$/);
+    if (bq) { flushPara(); closeList(); out.push(`<blockquote>${mdInline(bq[1])}</blockquote>`); continue; }
+
+    para.push(line.trim());
+  }
+  flush();
+  return out.join('\n');
+}
+
 async function api(path, method = 'GET', body) {
   const res = await fetch(path, {
     method,
@@ -250,7 +339,13 @@ function renderTicketModal() {
   if (tab === 'overview') renderOverview(body, t);
   if (tab === 'activity') renderActivity(body, t);
   if (tab === 'transcript') renderTranscript(body, t);
-  if (tab === 'dossier') fetch(`/api/tickets/${t.id}/dossier`).then((r) => r.text()).then((txt) => { body.innerHTML = `<div class="dossier">${esc(txt)}</div>`; });
+  if (tab === 'dossier') {
+    body.innerHTML = `<div class="dossier" id="dossier-body">loading…</div>`;
+    fetch(`/api/tickets/${t.id}/dossier`).then((r) => r.text()).then((txt) => {
+      const el = $('#dossier-body');
+      if (el) el.innerHTML = renderMarkdown(txt);
+    });
+  }
 }
 
 function closeAndReload() { closeModal(); loadState(); }
@@ -589,8 +684,22 @@ function renderArchiveModal() {
 function renderSettingsModal() {
   const s = S.data.board.settings;
   const agentCols = cols().filter((c) => c.role === 'agent');
+  const p = S.prefs;
   shell('SETTINGS', `
     <div class="panel-body">
+      <div class="section-head">APPEARANCE <span>(this device only)</span></div>
+      <label class="f">THEME</label>
+      <div class="theme-row">
+        ${['dark', 'light', 'sepia'].map((th) => `<button class="theme-swatch th-${th} ${p.theme === th ? 'sel' : ''}" data-theme-pick="${th}">${th}</button>`).join('')}
+      </div>
+      <label class="f">FONT SIZE <output id="s-font-val">${p.fontPx}px</output></label>
+      <input id="s-font" type="range" min="9" max="20" step="1" value="${p.fontPx}">
+      <label class="f">UI SIZE <output id="s-ui-val">${Math.round(p.uiScale * 100)}%</output></label>
+      <input id="s-ui" type="range" min="0.7" max="1.6" step="0.05" value="${p.uiScale}">
+      <button class="btn" id="s-appear-reset" style="margin-top:8px">[ RESET APPEARANCE ]</button>
+      <hr class="sep">
+
+      <div class="section-head">ENGINE</div>
       <label class="f">MAX CONCURRENT RUNS</label><input id="s-cap" type="number" min="1" max="8" value="${s.maxConcurrent}">
       <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
       <label class="f">DEFAULT WORKSPACE</label><input id="s-ws" value="${esc(s.defaultWorkspace)}">
@@ -616,6 +725,17 @@ function renderSettingsModal() {
     `<button class="btn btn-accent" id="s-save">[ SAVE ]</button>`);
 
   for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => handleCustomModel(sel);
+
+  // Appearance — device-local, applies live and persists immediately (no server round-trip).
+  for (const btn of document.querySelectorAll('[data-theme-pick]')) {
+    btn.onclick = () => {
+      savePrefs({ ...S.prefs, theme: btn.dataset.themePick });
+      for (const b of document.querySelectorAll('[data-theme-pick]')) b.classList.toggle('sel', b === btn);
+    };
+  }
+  $('#s-font').oninput = (e) => { savePrefs({ ...S.prefs, fontPx: Number(e.target.value) }); $('#s-font-val').textContent = `${e.target.value}px`; };
+  $('#s-ui').oninput = (e) => { savePrefs({ ...S.prefs, uiScale: Number(e.target.value) }); $('#s-ui-val').textContent = `${Math.round(e.target.value * 100)}%`; };
+  $('#s-appear-reset').onclick = () => { savePrefs({ ...DEFAULT_PREFS }); renderSettingsModal(); };
 
   $('#s-save').onclick = async () => {
     const phaseDefaults = {};
@@ -664,4 +784,5 @@ $('#btn-settings').onclick = () => { S.modal = { type: 'settings' }; renderModal
 $('#btn-archive').onclick = () => { S.modal = { type: 'archive' }; renderModal(); };
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
+savePrefs(loadPrefs()); // apply saved theme / font / UI scale before first paint
 loadState().then(connectWS).catch((e) => { document.body.innerHTML = `<pre style="color:#ff2a2a;padding:20px">DISPATCH FAILED TO LOAD: ${esc(e.message)}</pre>`; });

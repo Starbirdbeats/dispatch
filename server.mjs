@@ -140,8 +140,15 @@ app.post('/api/tickets/:id/comment', (req, res) => {
   const t = store.tickets.get(req.params.id);
   if (!t) return res.status(404).json({ error: 'not found' });
   store.appendActivity(t.id, { kind: 'comment', by: 'human', text: String(req.body.text || '').trim() });
+  // A human comment on a parked ticket is an answer — wake the agent to act on it.
+  const col = store.column(t.columnId);
+  const h = store.effectiveHarness(t, col);
+  let woke = false;
+  if (col?.role === 'agent' && h.type !== 'human' && ['idle', 'awaiting-human', 'error'].includes(t.status)) {
+    woke = runner.enqueue(t.id, { by: 'engine' });
+  }
   broadcast({ type: 'state-changed' });
-  res.json(t);
+  res.json({ ...t, woke });
 });
 
 app.post('/api/tickets/:id/run', (req, res) => {

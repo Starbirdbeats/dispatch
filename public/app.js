@@ -313,7 +313,7 @@ function renderActivity(body, t) {
     const text = $('#f-comment').value.trim();
     if (!text) return;
     S.commentDraft = '';
-    await api(`/api/tickets/${t.id}/comment`, 'POST', { text }).then(() => toast('COMMENT POSTED')).catch(alertErr);
+    await api(`/api/tickets/${t.id}/comment`, 'POST', { text }).then((r) => toast(r.woke ? 'COMMENT POSTED — AGENT WAKING' : 'COMMENT POSTED')).catch(alertErr);
   };
 }
 
@@ -364,6 +364,8 @@ function renderColumnModal(draftOverride) {
       <input id="c-tools" value="${esc(h.allowedTools || '')}">
       <label class="f">CHROME EXTENSION (claude only)</label>
       <select id="c-chrome"><option value="">off</option><option value="1" ${h.chrome ? 'selected' : ''}>on</option></select>
+      <label class="f">SANDBOX NETWORK ACCESS (codex only — needed for npm, ssh to MSI)</label>
+      <select id="c-net"><option value="">off</option><option value="1" ${h.network ? 'selected' : ''}>on</option></select>
       <label class="f">AUTO-RUN WHEN A TICKET ARRIVES</label>
       <select id="c-auto"><option value="">off</option><option value="1" ${(draftOverride?._autoRun ?? c.autoRun) ? 'selected' : ''}>on</option></select>
       <label class="f">PHASE PROMPT</label>
@@ -381,6 +383,7 @@ function renderColumnModal(draftOverride) {
     permissions: $('#c-perms').value,
     allowedTools: $('#c-tools').value.trim(),
     chrome: Boolean($('#c-chrome').value),
+    network: Boolean($('#c-net').value),
     _name: $('#c-name').value,
     _role: $('#c-role').value,
     _autoRun: Boolean($('#c-auto').value),
@@ -406,6 +409,7 @@ function renderColumnModal(draftOverride) {
       model: $('#c-model').value.trim(),
       effort: $('#c-effort').value.trim(),
       permissions: $('#c-perms').value.trim(),
+      network: Boolean($('#c-net').value),
       allowedTools: $('#c-tools').value.trim(),
       chrome: Boolean($('#c-chrome').value),
     },

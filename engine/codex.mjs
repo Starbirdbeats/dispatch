@@ -12,6 +12,8 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
   args.push('--json', '-o', lastMsgFile, '--skip-git-repo-check');
   if (harness.model) args.push('-m', harness.model);
   if (harness.effort) args.push('-c', `model_reasoning_effort="${harness.effort}"`);
+  // workspace-write blocks network by default — opt in per column/ticket (npm, ssh to MSI, etc.)
+  if (harness.network) args.push('-c', 'sandbox_workspace_write.network_access=true');
 
   const sandbox = harness.permissions || 'workspace-write';
   // .git is kept read-only inside workspace-write unless listed as a writable root,

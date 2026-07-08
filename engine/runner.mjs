@@ -443,6 +443,11 @@ export class Runner {
     } else if (intent === 'timeout') {
       ticket.status = 'error';
       this.store.appendActivity(ticketId, { kind: 'system', by: 'engine', text: `run timed out after ${this.store.board.settings.runTimeoutMin || 30} min` });
+    } else if (state.rateLimitedUntil && !parseControlBlock(finalText)) {
+      // Subscription window exhausted mid-run: park with a retry time; the scheduler resumes it.
+      ticket.status = 'error';
+      ticket.retryAt = state.rateLimitedUntil + 2 * 60_000;
+      this.store.appendActivity(ticketId, { kind: 'system', by: 'engine', text: `${harnessType} rate limit hit — auto-retry scheduled for ${new Date(ticket.retryAt).toLocaleString()}` });
     } else if (!Number.isFinite(code) || code !== 0) {
       ticket.status = 'error';
       this.store.appendActivity(ticketId, { kind: 'system', by: 'engine', text: `run failed (exit ${Number.isFinite(code) ? code : '?'}): ${tailFile(path.join(runDir, 'stderr.log')) || 'no stderr'}` });

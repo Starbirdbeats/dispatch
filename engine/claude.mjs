@@ -37,6 +37,11 @@ export function parseLine(line, state) {
 
   if (obj.session_id) state.sessionId = obj.session_id;
 
+  if (obj.type === 'rate_limit_event' && obj.rate_limit_info?.status === 'rejected') {
+    state.rateLimitedUntil = (obj.rate_limit_info.resetsAt || 0) * 1000;
+    return { kind: 'error', text: `claude rate limit (${obj.rate_limit_info.rateLimitType}) — resets ${new Date(state.rateLimitedUntil).toLocaleString()}` };
+  }
+
   switch (obj.type) {
     case 'system':
       if (obj.subtype === 'init') return { kind: 'system', text: `claude session ${obj.session_id} · model ${obj.model || '?'}` };

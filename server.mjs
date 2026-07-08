@@ -60,6 +60,19 @@ function autoDispatchTick() {
     if (t.scheduledAt) { t.scheduledAt = null; store.saveTicket(t.id); } // no refire if it ever returns
     runner.moveTicket(t.id, next.id, { by: 'engine', autoRun: true });
   }
+  // Rate-limited runs parked with a retryAt: resume them once the window resets.
+  for (const t of store.tickets.values()) {
+    if (!t.retryAt || now < t.retryAt) continue;
+    const col = store.column(t.columnId);
+    delete t.retryAt;
+    store.saveTicket(t.id);
+    if (col?.role === 'agent' && t.status === 'error') {
+      store.appendActivity(t.id, { kind: 'system', by: 'engine', text: 'rate-limit window reset — retrying run' });
+      t.status = 'idle';
+      runner.enqueue(t.id, { by: 'engine' });
+    }
+  }
+
   // Even a no-op sweep advances nextSweepAt — push it so client countdowns reset.
   if (sweep) broadcast({ type: 'state-changed' });
 }

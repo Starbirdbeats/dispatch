@@ -72,7 +72,7 @@ function autoDispatchTick() {
       ? now >= new Date(t.scheduledAt).getTime()  // server-local time, same tz as the browser
       : sweep;
     if (!due) continue;
-    const next = store.nextAgentColumn(col.id);
+    const next = store.nextAgentColumn(col.id, t);
     if (!next) continue;
     store.appendActivity(t.id, {
       kind: 'system', by: 'engine',
@@ -198,11 +198,11 @@ app.post('/api/probe', async (_req, res) => {
 
 // ---- tickets ----
 app.post('/api/tickets', (req, res) => {
-  const { title, description, workspace, columnId, overrides, scheduledAt, attachments } = req.body;
+  const { title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: 'title required' });
   const att = checkAttachments(attachments);
   if (!att.ok) return res.status(att.status).json({ error: att.error });
-  const t = store.createTicket({ title: title.trim(), description, workspace, columnId, overrides, scheduledAt, attachments: att.files });
+  const t = store.createTicket({ title: title.trim(), description, workspace, columnId, overrides, scheduledAt, attachments: att.files, readOnly, skip });
   broadcast({ type: 'state-changed' });
 
   const col = store.column(t.columnId);
@@ -215,7 +215,7 @@ app.post('/api/tickets', (req, res) => {
   } else if (col?.role === 'intake' && !t.scheduledAt && freeSlot) {
     // A free run slot and no scheduled time → don't make the human wait for the 5-min sweep;
     // dispatch into the pipeline now. If at capacity, leave it for the sweep as before.
-    const next = store.nextAgentColumn(col.id);
+    const next = store.nextAgentColumn(col.id, t);
     if (next) { runner.moveTicket(t.id, next.id, { by: 'human', autoRun: true }); started = next.name; }
   }
   res.json({ ...t, started });
@@ -224,7 +224,7 @@ app.post('/api/tickets', (req, res) => {
 app.patch('/api/tickets/:id', (req, res) => {
   const t = store.tickets.get(req.params.id);
   if (!t) return res.status(404).json({ error: 'not found' });
-  for (const k of ['title', 'description', 'workspace', 'overrides', 'humanTest', 'scheduledAt']) {
+  for (const k of ['title', 'description', 'workspace', 'overrides', 'humanTest', 'scheduledAt', 'readOnly', 'skip']) {
     if (k in req.body) t[k] = req.body[k];
   }
   store.saveTicket(t.id);
@@ -322,7 +322,7 @@ app.post('/api/tickets/:id/run', (req, res) => {
   const h = store.effectiveHarness(t, col);
   // RUN from a human column means "start the pipeline": advance to the next agent phase.
   if (h.type === 'human') {
-    const next = store.nextAgentColumn(col.id);
+    const next = store.nextAgentColumn(col.id, t);
     if (!next) return res.json({ queued: false, reason: `no agent phase after ${col.name}` });
     runner.moveTicket(t.id, next.id, { by: 'human', autoRun: true });
     return res.json({ queued: true, startedPhase: next.name });

@@ -323,7 +323,7 @@ function cardEl(t, c) {
   const last = [...t.activity].reverse().find((a) => a.kind !== 'run');
   const dx = diagnose(t, c);
   el.innerHTML = `
-    <div class="t"><span class="led ${status}"></span><span class="title">${esc(t.title)}</span>${c.role === 'terminal' ? `<button class="arch" title="Archive ticket">[ ARCH ]</button>` : ''}</div>
+    <div class="t"><span class="led ${status}"></span><span class="title">${esc(t.title)}</span>${t.readOnly ? '<span class="ro-tag" title="Read-only ticket">RO</span>' : ''}${c.role === 'terminal' ? `<button class="arch" title="Archive ticket">[ ARCH ]</button>` : ''}</div>
     <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span><span class="badge tone-${dx.tone}">${dx.tone === 'stuck' ? '⚠ ' : ''}${esc(dx.label)}</span></div>
     ${t.scheduledAt ? `<div class="last">SCHED ${esc(t.scheduledAt.replace('T', ' '))}</div>` : ''}
     ${last ? `<div class="last">&gt; ${esc(last.text)}</div>` : ''}`;
@@ -512,6 +512,10 @@ function renderOverview(body, t) {
       <div class="k">ID</div><div>${t.id}</div>
       <div class="k">WORKSPACE</div><div><input id="f-ws" value="${esc(t.workspace)}"></div>
       <div class="k">SCHEDULED</div><div><input id="f-sched" type="datetime-local" value="${esc(t.scheduledAt || '')}"></div>
+      <div class="k">MODE</div><div>
+        <label class="check-row inline"><input type="checkbox" id="f-readonly" ${t.readOnly ? 'checked' : ''}> <span>read-only (agents can't modify the repo)</span></label>
+        ${t.skip?.length ? `<div class="skip-note">skipping: ${t.skip.map((cid) => esc(cols().find((c) => c.id === cid)?.name || cid)).join(', ')}</div>` : ''}
+      </div>
       <div class="k">SESSIONS</div><div>claude: ${t.sessions.claude || '—'}<br>codex: ${t.sessions.codex || '—'}</div>
     </div>
     <label class="f">HOW TO HUMAN-TEST</label>
@@ -558,6 +562,7 @@ function renderOverview(body, t) {
       workspace: $('#f-ws').value.trim(),
       description: $('#f-desc').value,
       scheduledAt: $('#f-sched').value || null,
+      readOnly: $('#f-readonly').checked,
       overrides: draft,
     }).then(() => toast('TICKET SAVED')).catch(alertErr);
   };
@@ -798,6 +803,11 @@ function renderNewModal() {
       <select id="n-col">${cols().map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
       <label class="f">SCHEDULE FOR (optional — leave blank for the next backlog sweep)</label>
       <input id="n-sched" type="datetime-local">
+      <label class="check-row"><input type="checkbox" id="n-readonly"> <span>READ-ONLY — agents may only read the repo for context (no edits, no commits)</span></label>
+      <div id="n-skip-wrap" class="skip-wrap" hidden>
+        <div class="skip-lbl">skip these phases (nothing to build/verify on a read-only ticket):</div>
+        ${cols().filter((c) => c.role === 'agent').map((c) => `<label class="check-row sub"><input type="checkbox" class="n-skip" value="${c.id}" ${/build/i.test(c.name) ? 'checked' : ''}> <span>${esc(c.name)}</span></label>`).join('')}
+      </div>
       <label class="f">ATTACHMENTS (listed in the dossier for the agents to read — max ${MAX_ATTACH_MB}MB each)</label>
       ${dropzoneHTML('n-att-drop', 'n-att-input', 'n-att-browse')}
       <div class="att-list" id="n-att-list"></div>
@@ -808,15 +818,21 @@ function renderNewModal() {
     S.newAttachments = (S.newAttachments || []).concat(await readUploads(files));
     renderStagedAttachments();
   });
+  $('#n-readonly').onchange = (e) => { $('#n-skip-wrap').hidden = !e.target.checked; };
   renderStagedAttachments();
-  $('#n-create').onclick = () => api('/api/tickets', 'POST', {
-    title: $('#n-title').value,
-    description: $('#n-desc').value,
-    workspace: $('#n-ws').value.trim(),
-    columnId: $('#n-col').value,
-    scheduledAt: $('#n-sched').value || null,
-    attachments: (S.newAttachments || []).map(({ name, type, size, dataB64 }) => ({ name, type, size, dataB64 })),
-  }).then((r) => { S.newAttachments = []; toast(r.started ? `CREATED — STARTED → ${r.started.toUpperCase()}` : 'TICKET CREATED'); closeAndReload(); }).catch(alertErr);
+  $('#n-create').onclick = () => {
+    const readOnly = $('#n-readonly').checked;
+    const skip = readOnly ? [...document.querySelectorAll('.n-skip:checked')].map((el) => el.value) : [];
+    api('/api/tickets', 'POST', {
+      title: $('#n-title').value,
+      description: $('#n-desc').value,
+      workspace: $('#n-ws').value.trim(),
+      columnId: $('#n-col').value,
+      scheduledAt: $('#n-sched').value || null,
+      readOnly, skip,
+      attachments: (S.newAttachments || []).map(({ name, type, size, dataB64 }) => ({ name, type, size, dataB64 })),
+    }).then((r) => { S.newAttachments = []; toast(r.started ? `CREATED — STARTED → ${r.started.toUpperCase()}` : 'TICKET CREATED'); closeAndReload(); }).catch(alertErr);
+  };
 }
 
 // Staged (not-yet-uploaded) files for the New Ticket modal — held in memory until CREATE.

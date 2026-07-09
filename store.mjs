@@ -153,18 +153,24 @@ export class Store {
   columnByName(name) {
     return this.board.columns.find((c) => c.name.toLowerCase() === String(name || '').toLowerCase());
   }
-  nextColumn(id) {
-    const sorted = [...this.board.columns].sort((a, b) => a.order - b.order);
-    const i = sorted.findIndex((c) => c.id === id);
-    return i >= 0 && i < sorted.length - 1 ? sorted[i + 1] : null;
+  // Sorted columns, minus any this ticket is set to skip (read-only tickets skip Build, etc.)
+  _pipeline(ticket) {
+    const skip = new Set(ticket?.skip || []);
+    return [...this.board.columns].sort((a, b) => a.order - b.order).filter((c) => !skip.has(c.id));
   }
-  nextAgentColumn(id) {
-    const sorted = [...this.board.columns].sort((a, b) => a.order - b.order);
-    const from = sorted.findIndex((c) => c.id === id);
-    return sorted.find((c, i) => i > from && c.role === 'agent') || null;
+  // Next column after `id`, honouring the ticket's skip list.
+  nextColumn(id, ticket = null) {
+    const sorted = this._pipeline(ticket);
+    // find where `id` sits in the FULL order, then take the next non-skipped column
+    const order = this.column(id)?.order ?? -1;
+    return sorted.find((c) => c.order > order) || null;
+  }
+  nextAgentColumn(id, ticket = null) {
+    const order = this.column(id)?.order ?? -1;
+    return this._pipeline(ticket).find((c) => c.order > order && c.role === 'agent') || null;
   }
 
-  createTicket({ title, description, workspace, columnId, overrides, scheduledAt, attachments }) {
+  createTicket({ title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip }) {
     const id = `t-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     const ticket = {
       id, title, description: description || '',
@@ -174,6 +180,8 @@ export class Store {
       enteredColumnAt: new Date().toISOString(),
       overrides: overrides || {},
       scheduledAt: scheduledAt || null,
+      readOnly: Boolean(readOnly),
+      skip: Array.isArray(skip) ? skip.filter((cid) => this.column(cid)) : [],
       sessions: { claude: null, codex: null },
       status: 'idle',
       bounces: 0,

@@ -113,6 +113,16 @@ textarea { resize: vertical; min-height: 70px; }
 label.f { display: block; margin: 12px 0 4px; font-size: 10px; text-transform: uppercase; color: var(--fg-dim); letter-spacing: 0.12em; }
 label.f output { color: var(--fg); float: right; font-variant-numeric: tabular-nums; }
 
+/* checkbox rows (read-only toggle, skip phases) */
+.check-row { display: flex; align-items: center; gap: 8px; margin: 12px 0 2px; font-size: 12px; color: var(--fg); cursor: pointer; }
+.check-row.inline { margin: 0; font-size: 11px; }
+.check-row.sub { margin: 4px 0 4px 18px; font-size: 11px; color: var(--fg-dim); }
+.check-row input[type="checkbox"] { width: 15px; height: 15px; flex: 0 0 15px; accent-color: var(--red); cursor: pointer; }
+.skip-wrap { border-left: 2px solid var(--line); padding: 4px 0 4px 12px; margin: 4px 0 6px; }
+.skip-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint); }
+.skip-note { font-size: 10px; color: var(--fg-faint); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+.ro-tag { font-size: 8px; font-weight: 800; letter-spacing: 0.1em; color: var(--bg); background: #4fd0e6; padding: 1px 4px; margin-left: 2px; align-self: center; }
+
 /* ---- appearance controls ---- */
 .section-head { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg); margin: 4px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--line); }
 .section-head:not(:first-child) { margin-top: 4px; }

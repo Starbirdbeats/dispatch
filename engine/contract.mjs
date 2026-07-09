@@ -27,6 +27,11 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
     for (const a of recentActivity) lines.push(`- [${a.by}] ${a.text}`);
   }
 
+  if (ticket.readOnly) {
+    lines.push('\n## READ-ONLY TICKET');
+    lines.push('This ticket is READ-ONLY: analyse/read the repo for context only. Your sandbox blocks writes, so do NOT attempt to edit files, run migrations, or commit — the goal is understanding, not changes. Put your findings/analysis in the dossier and advance.');
+  }
+
   lines.push('\n## Tooling notes');
   lines.push('- Puppeteer is available for browser automation (`npm install puppeteer` in a scratch dir) if you need to scrape, test UI, or drive a headless browser.');
   if (harness.type === 'claude' && harness.chrome) {

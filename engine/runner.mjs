@@ -114,7 +114,12 @@ export class Runner {
   // Effective harness for the next run, honouring a one-shot override (e.g. chosen in the
   // comment composer to steer who picks the ticket up next).
   harnessFor(ticket, column) {
-    return { ...this.store.effectiveHarness(ticket, column), ...(ticket.oneShotHarness || {}) };
+    const h = { ...this.store.effectiveHarness(ticket, column), ...(ticket.oneShotHarness || {}) };
+    // READ-ONLY tickets: force sandbox to look-but-don't-touch, whatever the column configured.
+    if (ticket.readOnly && h.type !== 'human') {
+      h.permissions = h.type === 'codex' ? 'read-only' : 'plan';
+    }
+    return h;
   }
 
   enqueue(ticketId, { by = 'engine' } = {}) {
@@ -162,7 +167,8 @@ export class Runner {
     const from = this.store.column(ticket.columnId);
 
     // Done gate: nothing enters a terminal column without human-test instructions.
-    if (column.role === 'terminal' && !ticket.humanTest && by !== 'human') {
+    // Read-only tickets are exempt — they change nothing, so there's nothing to test.
+    if (column.role === 'terminal' && !ticket.humanTest && !ticket.readOnly && by !== 'human') {
       ticket.status = 'awaiting-human';
       this.store.appendActivity(ticketId, { kind: 'system', by: 'engine', text: `blocked from entering ${column.name}: no human_test provided` });
       this.store.saveTicket(ticketId);
@@ -613,7 +619,7 @@ export class Runner {
 
     switch (control.action) {
       case 'advance': {
-        const target = control.target_column ? store.columnByName(control.target_column) : store.nextColumn(column.id);
+        const target = control.target_column ? store.columnByName(control.target_column) : store.nextColumn(column.id, ticket);
         if (!target) {
           ticket.status = 'awaiting-human';
           ticket.stuckReason = { kind: 'no-next-column', at: nowIso(), detail: `The agent wanted to advance${control.target_column ? ` to "${control.target_column}"` : ''} but there is no such next column.` };

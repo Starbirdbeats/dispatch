@@ -100,6 +100,18 @@ function renderMarkdown(src) {
   return out.join('\n');
 }
 
+// Human-test text arrives as a run-on paragraph ("1) do x 2) do y ...") with inline `code`.
+// Break the numbered steps onto their own lines so they render as a clean ordered list, then
+// reuse the markdown renderer (headings, inline code, etc.).
+function formatHumanTest(text) {
+  let s = String(text || '').trim();
+  if (!s) return '';
+  if (/^NONE\b/i.test(s)) return `<p class="ht-none">${mdInline(esc(s))}</p>`;
+  // " 2) " / " 2. " step markers → newline + "2. " (only digit-then-delimiter, so URLs/prose are safe)
+  s = s.replace(/\s+(\d{1,2})[).]\s+/g, '\n$1. ').replace(/^(\d{1,2})[).]\s+/, '$1. ');
+  return renderMarkdown(s);
+}
+
 async function api(path, method = 'GET', body) {
   const res = await fetch(path, {
     method,
@@ -501,8 +513,9 @@ function renderOverview(body, t) {
       <div class="k">WORKSPACE</div><div><input id="f-ws" value="${esc(t.workspace)}"></div>
       <div class="k">SCHEDULED</div><div><input id="f-sched" type="datetime-local" value="${esc(t.scheduledAt || '')}"></div>
       <div class="k">SESSIONS</div><div>claude: ${t.sessions.claude || '—'}<br>codex: ${t.sessions.codex || '—'}</div>
-      <div class="k">HUMAN TEST</div><div>${t.humanTest ? esc(t.humanTest) : '<span class="warn">not provided yet</span>'}</div>
     </div>
+    <label class="f">HOW TO HUMAN-TEST</label>
+    ${t.humanTest ? `<div class="human-test">${formatHumanTest(t.humanTest)}</div>` : '<div class="human-test empty">not provided yet — the Review phase fills this before Done</div>'}
     <label class="f">DESCRIPTION</label>
     <textarea id="f-desc">${esc(t.description)}</textarea>
     <label class="f">ATTACHMENTS (referenced in the dossier for the agents — max ${MAX_ATTACH_MB}MB each)</label>

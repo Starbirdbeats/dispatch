@@ -308,6 +308,19 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 .dossier th, .dossier td { border: 1px solid var(--line); padding: 5px 9px; text-align: left; font-size: 11px; }
 .dossier th { background: var(--bg-2); color: var(--fg); text-transform: uppercase; }
 
+/* ---- human-test block (formatted, readable) ---- */
+.human-test { border: 1px solid var(--line); border-left: 3px solid var(--green); background: var(--bg-1); padding: 12px 16px; font-size: 12px; line-height: 1.6; color: var(--fg-dim); }
+.human-test.empty { border-left-color: var(--fg-faint); color: var(--fg-faint); font-style: italic; }
+.human-test .ht-none { margin: 0; color: var(--fg-dim); }
+.human-test ol { margin: 2px 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; }
+.human-test ol li { padding-left: 4px; }
+.human-test ol li::marker { color: var(--green); font-weight: 700; }
+.human-test ul { margin: 6px 0; padding-left: 20px; }
+.human-test p { margin: 6px 0; }
+.human-test code { background: var(--bg-2); border: 1px solid var(--line); padding: 1px 5px; font-size: 0.92em; color: var(--fg); word-break: break-word; }
+.human-test strong { color: var(--fg); }
+.human-test a { color: var(--green); text-decoration: underline; word-break: break-all; }
+
 .overrides-grid { display: grid; grid-template-columns: 110px 1fr 1fr 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); }
 .overrides-grid > div { background: var(--bg); padding: 6px 8px; font-size: 10px; display: flex; align-items: center; }
 .overrides-grid .h { color: var(--fg-faint); text-transform: uppercase; font-size: 9px; letter-spacing: 0.1em; }

@@ -34,6 +34,7 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
 
   lines.push('\n## Tooling notes');
   lines.push('- Puppeteer is available for browser automation (`npm install puppeteer` in a scratch dir) if you need to scrape, test UI, or drive a headless browser.');
+  lines.push(`- SCRATCH SPACE: the ticket data dir (${dossierPath.replace(/\/DOSSIER\.md$/, '')}) is for the dossier and Dispatch's own files only. Do NOT create git worktrees, clones, node_modules, or build output there — use a temp dir (\`mktemp -d\`) or work inside your workspace. Scratch left in the data dir gets pruned.`);
   if (harness.type === 'claude' && harness.chrome) {
     lines.push('- The Claude-in-Chrome extension is enabled for this run; you may drive the real browser.');
   }

@@ -17,6 +17,7 @@ const DEFAULT_BOARD = {
     autoDispatch: true,          // sweep intake columns and start pipelines automatically
     autoDispatchEveryMin: 5,
     stallAfterMin: 10,           // stall watchdog: resume orphaned tickets after this dwell; 0 = off
+    keepRunsPerTicket: 5,        // disk retention: run journals kept per ticket (older pruned)
   },
   columns: [
     {
@@ -114,6 +115,9 @@ function replaceSection(doc, heading, newBlock) {
 }
 
 export class Store {
+  // Files/dirs Dispatch itself owns inside a ticket dir. Anything else is agent scratch.
+  static KNOWN_TICKET_ENTRIES = new Set(['ticket.json', 'DOSSIER.md', 'last-message.txt', 'transcripts', 'runs', 'attachments']);
+
   constructor() {
     fs.mkdirSync(TICKETS_DIR, { recursive: true });
     this.board = readJSON(BOARD_FILE) || structuredClone(DEFAULT_BOARD);
@@ -219,6 +223,28 @@ export class Store {
   deleteTicket(id) {
     this.tickets.delete(id);
     fs.rmSync(this.ticketDir(id), { recursive: true, force: true });
+  }
+
+  // Reclaim disk in a ticket dir: remove anything that isn't part of Dispatch's own record
+  // (agents sometimes dump worktrees / node_modules / clones here because it's a writable root),
+  // and trim the run journal to the most recent `keepRuns`. Never call this on a running ticket.
+  pruneTicketData(id, { keepRuns = 5 } = {}) {
+    const dir = this.ticketDir(id);
+    const removed = [];
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return { removed }; }
+    for (const e of entries) {
+      if (Store.KNOWN_TICKET_ENTRIES.has(e.name)) continue; // keep our own files
+      try { fs.rmSync(path.join(dir, e.name), { recursive: true, force: true }); removed.push(e.name); } catch {}
+    }
+    try {
+      const runsDir = path.join(dir, 'runs');
+      const runIds = fs.readdirSync(runsDir).sort(); // ISO-timestamp prefix → chronological
+      for (const r of runIds.slice(0, Math.max(0, runIds.length - keepRuns))) {
+        try { fs.rmSync(path.join(runsDir, r), { recursive: true, force: true }); removed.push(`runs/${r}`); } catch {}
+      }
+    } catch { /* no runs dir yet */ }
+    return { removed };
   }
 
   readDossier(id) {

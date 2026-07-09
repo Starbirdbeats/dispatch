@@ -128,6 +128,8 @@ label.f output { color: var(--fg); float: right; font-variant-numeric: tabular-n
 .section-head:not(:first-child) { margin-top: 4px; }
 .section-head span { color: var(--fg-faint); font-weight: 400; letter-spacing: 0.06em; }
 hr.sep { border: none; border-top: 1px solid var(--line); margin: 20px 0 4px; }
+.disk-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-dim); }
+.disk-row b { color: var(--fg); font-variant-numeric: tabular-nums; }
 
 .theme-row { display: flex; gap: 8px; }
 .theme-swatch {

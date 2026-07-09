@@ -940,9 +940,30 @@ function renderSettingsModal() {
       </div></div>
       <div class="hint">changing a harness TYPE (claude ⇄ codex) still needs that column's own CFG panel — this list only sets model/effort defaults.</div>
 
+      <hr class="sep">
+      <div class="section-head">DISK</div>
+      <label class="f">RUN JOURNALS KEPT PER TICKET (older ones pruned)</label>
+      <input id="s-keepruns" type="number" min="1" max="50" value="${s.keepRunsPerTicket ?? 5}">
+      <div class="disk-row">
+        <span>DATA DIR: <b id="s-usage">…</b></span>
+        <button class="btn" id="s-prune">[ RECLAIM DISK SPACE ]</button>
+      </div>
+      <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>
+
       <div class="hint" style="margin-top:14px">claude auth: subscription oauth on starbird · codex auth: chatgpt login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
     </div>`,
     `<button class="btn btn-accent" id="s-save">[ SAVE ]</button>`);
+
+  const fmtBytes = (n) => n == null ? '?' : n > 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e3).toFixed(0)} KB`;
+  api('/api/maintenance/usage').then((u) => { const el = $('#s-usage'); if (el) el.textContent = fmtBytes(u.bytes); }).catch(() => {});
+  $('#s-prune').onclick = () => {
+    $('#s-prune').textContent = '[ RECLAIMING… ]';
+    api('/api/maintenance/prune', 'POST', {}).then((r) => {
+      toast(`RECLAIMED ${fmtBytes(r.freedBytes)} · ${r.itemsRemoved} item(s) removed`);
+      const el = $('#s-usage'); if (el) el.textContent = fmtBytes(r.after);
+      $('#s-prune').textContent = '[ RECLAIM DISK SPACE ]';
+    }).catch((e) => { alertErr(e); $('#s-prune').textContent = '[ RECLAIM DISK SPACE ]'; });
+  };
 
   for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => handleCustomModel(sel);
 
@@ -978,6 +999,7 @@ function renderSettingsModal() {
       autoDispatch: Boolean($('#s-auto').value),
       autoDispatchEveryMin: Number($('#s-every').value) || 5,
       stallAfterMin: Number($('#s-stall').value),
+      keepRunsPerTicket: Math.max(1, Number($('#s-keepruns').value) || 5),
     }).then(() => { toast('SETTINGS SAVED'); closeAndReload(); }).catch(alertErr);
   };
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);

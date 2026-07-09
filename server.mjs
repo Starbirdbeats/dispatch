@@ -6,7 +6,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
-import { Store } from './store.mjs';
+import { execFile } from 'node:child_process';
+import { Store, DATA_DIR } from './store.mjs';
 import { Runner } from './engine/runner.mjs';
 import { REGISTRY, loadCodexDefaults, probe } from './registry.mjs';
 
@@ -172,6 +173,27 @@ setInterval(() => {
   try { processPendingWakes(Date.now()); } catch (e) { console.error('pending-wake:', e); }
 }, 5_000);
 
+// ---- disk retention ----
+// Prune agent scratch + trim run journals across all tickets that aren't actively being worked.
+function pruneSweep() {
+  const snap = runner.snapshot();
+  const busy = new Set([...snap.running, ...snap.queued]);
+  const keepRuns = store.board.settings.keepRunsPerTicket ?? 5;
+  let items = 0;
+  for (const t of store.tickets.values()) {
+    if (busy.has(t.id) || (t.activeRun?.pid && pidAlive(t.activeRun.pid))) continue; // never touch live work
+    items += store.pruneTicketData(t.id, { keepRuns }).removed.length;
+  }
+  return items;
+}
+function dataDirBytes() {
+  return new Promise((resolve) => {
+    execFile('du', ['-sb', DATA_DIR], { timeout: 30_000 }, (err, out) => resolve(err ? null : parseInt(out, 10) || 0));
+  });
+}
+const PRUNE_EVERY_MS = 6 * 60 * 60 * 1000; // every 6h, plus on archive/delete
+setInterval(() => { try { pruneSweep(); } catch (e) { console.error('prune-sweep:', e); } }, PRUNE_EVERY_MS);
+
 runner.recover();
 
 // ---- state ----
@@ -256,7 +278,11 @@ app.post('/api/tickets/:id/archive', (req, res) => {
   if (col?.role !== 'terminal') return res.status(400).json({ error: 'only completed (terminal) tickets can be archived' });
   t.archived = true;
   t.archivedAt = new Date().toISOString();
+  // reclaim scratch + trim run journals now that it's done being worked
+  const { removed } = store.pruneTicketData(t.id, { keepRuns: store.board.settings.keepRunsPerTicket ?? 5 });
+  if (removed.length) store.appendActivity(t.id, { kind: 'system', by: 'engine', text: `pruned on archive: removed ${removed.length} scratch item(s) — ${removed.slice(0, 6).join(', ')}${removed.length > 6 ? '…' : ''}` });
   store.appendActivity(t.id, { kind: 'system', by: 'human', text: 'archived' });
+  store.saveTicket(t.id);
   broadcast({ type: 'state-changed' });
   res.json(t);
 });
@@ -431,6 +457,20 @@ app.patch('/api/settings', (req, res) => {
   runner.pump(); // raising the cap (or un-pausing) should drain any queued work immediately
   broadcast({ type: 'state-changed' });
   res.json(store.board.settings);
+});
+
+// current on-disk footprint of the data dir
+app.get('/api/maintenance/usage', async (_req, res) => {
+  res.json({ bytes: await dataDirBytes() });
+});
+
+// prune scratch + trim run journals across idle tickets, report space reclaimed
+app.post('/api/maintenance/prune', async (_req, res) => {
+  const before = await dataDirBytes();
+  const items = pruneSweep();
+  const after = await dataDirBytes();
+  broadcast({ type: 'state-changed' });
+  res.json({ ticketsScanned: store.tickets.size, itemsRemoved: items, before, after, freedBytes: before != null && after != null ? Math.max(0, before - after) : null });
 });
 
 server.listen(PORT, '0.0.0.0', () => {

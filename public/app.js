@@ -208,6 +208,20 @@ function fmtDur(ms) {
   if (m < 60) return `${m}m ${s % 60}s`;
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
+// human-readable local timestamp for completion display
+function fmtTs(iso) { try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); } catch { return iso || ''; } }
+
+// kv rows for the lifecycle clock: live ACTIVE elapsed, or frozen COMPLETED + TOOK.
+function timingRowHTML(t) {
+  if (t.completedAt) {
+    return `<div class="k">COMPLETED</div><div>${esc(fmtTs(t.completedAt))}</div>` +
+      (t.durationMs != null ? `<div class="k">TOOK</div><div>${esc(fmtDur(t.durationMs))}</div>` : '');
+  }
+  if (t.startedAt) {
+    return `<div class="k">ACTIVE FOR</div><div><span data-liveclock="${Date.parse(t.startedAt)}">${esc(fmtDur(Date.now() - Date.parse(t.startedAt)))}</span> <span class="since">since ${esc(fmtTs(t.startedAt))}</span></div>`;
+  }
+  return '';
+}
 
 /* ---------- attachments ---------- */
 const MAX_ATTACH_MB = 16;
@@ -325,6 +339,9 @@ function cardEl(t, c) {
   el.innerHTML = `
     <div class="t"><span class="led ${status}"></span><span class="title">${esc(t.title)}</span>${t.readOnly ? '<span class="ro-tag" title="Read-only ticket">RO</span>' : ''}${c.role === 'terminal' ? `<button class="arch" title="Archive ticket">[ ARCH ]</button>` : ''}</div>
     <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span><span class="badge tone-${dx.tone}">${dx.tone === 'stuck' ? '⚠ ' : ''}${esc(dx.label)}</span></div>
+    ${t.completedAt && t.durationMs != null
+      ? `<div class="timing done">✓ took ${esc(fmtDur(t.durationMs))} · ${esc(fmtTs(t.completedAt))}</div>`
+      : (t.startedAt ? `<div class="timing">⏱ active <span data-liveclock="${Date.parse(t.startedAt)}">${esc(fmtDur(Date.now() - Date.parse(t.startedAt)))}</span></div>` : '')}
     ${t.scheduledAt ? `<div class="last">SCHED ${esc(t.scheduledAt.replace('T', ' '))}</div>` : ''}
     ${last ? `<div class="last">&gt; ${esc(last.text)}</div>` : ''}`;
   el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/ticket', t.id); el.classList.add('dragging'); });
@@ -516,6 +533,7 @@ function renderOverview(body, t) {
         <label class="check-row inline"><input type="checkbox" id="f-readonly" ${t.readOnly ? 'checked' : ''}> <span>read-only (agents can't modify the repo)</span></label>
         ${t.skip?.length ? `<div class="skip-note">skipping: ${t.skip.map((cid) => esc(cols().find((c) => c.id === cid)?.name || cid)).join(', ')}</div>` : ''}
       </div>
+      ${timingRowHTML(t)}
       <div class="k">SESSIONS</div><div>claude: ${t.sessions.claude || '—'}<br>codex: ${t.sessions.codex || '—'}</div>
     </div>
     <label class="f">HOW TO HUMAN-TEST</label>

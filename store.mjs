@@ -186,6 +186,9 @@ export class Store {
       status: 'idle',
       bounces: 0,
       humanTest: null,
+      startedAt: null,       // set when work first begins (enters an agent phase / first run)
+      completedAt: null,     // set when it lands in a terminal column
+      durationMs: null,      // completedAt - startedAt, frozen at completion
       attachments: [],
       activity: [],
     };

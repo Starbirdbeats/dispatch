@@ -182,6 +182,16 @@ export class Runner {
     delete ticket.holds;           // hold counter is per column visit
     delete ticket.stuckReason;     // whatever stuck it is left behind
     delete ticket.pendingWake;
+
+    // lifecycle clock: startedAt when work begins, completedAt+duration when it lands in a terminal
+    if (column.role === 'agent' && !ticket.startedAt) ticket.startedAt = new Date().toISOString();
+    if (column.role === 'terminal') {
+      ticket.completedAt = new Date().toISOString();
+      ticket.durationMs = ticket.startedAt ? Date.parse(ticket.completedAt) - Date.parse(ticket.startedAt) : null;
+    } else if (ticket.completedAt) {
+      delete ticket.completedAt; delete ticket.durationMs; // reopened out of Done → clock resumes
+    }
+
     if (by === 'human') ticket.bounces = 0;
     if (ticket.status !== 'running') ticket.status = 'idle';
     this.store.appendActivity(ticketId, { kind: 'move', by, text: `${from?.name || '?'} → ${column.name}` });
@@ -291,6 +301,7 @@ export class Runner {
     }, null, 2));
 
     ticket.status = 'running';
+    if (!ticket.startedAt) ticket.startedAt = startedAt; // lifecycle clock, if a move didn't set it
     delete ticket.stuckReason;   // fresh run — clear whatever stuck the last attempt
     delete ticket.pendingWake;   // this run IS the wake
     ticket.currentRun = { column: column.name, harness: harness.type, model: harness.model, startedAt, transcriptFile };

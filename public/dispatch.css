@@ -195,6 +195,10 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; background: v
 .card .t .arch:hover { color: var(--red); }
 .card .meta { margin-top: 7px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint); display: flex; justify-content: space-between; gap: 6px; }
 .card .last { margin-top: 5px; font-size: 10px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .timing { margin-top: 5px; font-size: 10px; letter-spacing: 0.04em; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
+.card .timing [data-liveclock] { color: var(--fg); }
+.card .timing.done { color: var(--fg-dim); }
+.kv .since { color: var(--fg-faint); font-size: 10px; }
 .card.status-error { border-color: var(--red); }
 .card.status-awaiting-human { border-color: var(--red); }
 .card.status-awaiting-human .title::after { content: " [HUMAN]"; color: var(--red); font-size: 9px; }

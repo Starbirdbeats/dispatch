@@ -163,7 +163,11 @@ async function refreshModelRegistry() {
   try {
     const r = await api('/api/models/refresh', 'POST', {});
     S.data.registry = r.registry;
-    toast(r.added ? `MODELS UPDATED — ${r.added} new${r.failures?.length ? ` · ${r.failures.join('/')} unreachable` : ''}` : 'MODELS ALREADY UP TO DATE');
+    const parts = ['claude', 'codex'].map((ty) => {
+      const p = r.report?.[ty];
+      return p?.ok ? `${ty}: ${p.count} via ${p.source}` : `${ty}: unreachable (kept ${p?.kept || 'cache'})`;
+    });
+    toast(`MODELS — ${parts.join(' · ')}`, !r.report?.claude?.ok && !r.report?.codex?.ok);
     renderModal(); // re-render the open modal so the new options appear
   } catch (e) { alertErr(e); }
   finally { document.querySelectorAll('.refresh-models').forEach((b) => b.classList.remove('spin')); }
@@ -504,12 +508,20 @@ function renderDiagBanner(t) {
 
 // Build a <select> for model/effort/permissions scoped to a harness type, with the
 // current value always present and a custom escape hatch for models.
-function harnessOptions(kind, type, current, defaultLabel) {
+// For kind='effort', pass modelId to filter to that model's supported levels (per the live
+// registry); its provider default is marked. Empty efforts array = model takes no effort param.
+function harnessOptions(kind, type, current, defaultLabel, modelId) {
   const reg = S.data.registry[type];
   let items = [];
   if (reg) {
-    if (kind === 'model') items = reg.models.map((m) => ({ v: m.id, l: m.label }));
-    if (kind === 'effort') items = reg.efforts.map((e) => ({ v: e, l: e }));
+    if (kind === 'model') items = reg.models.map((m) => ({ v: m.id, l: m.label + (m.stale ? ' (retired)' : '') }));
+    if (kind === 'effort') {
+      const m = modelId ? reg.models.find((x) => x.id === modelId) : null;
+      const efforts = (m && Array.isArray(m.efforts) && m.efforts.length) ? m.efforts
+        : (m && Array.isArray(m.efforts)) ? [] // explicitly none — model ignores effort
+        : reg.efforts;
+      items = efforts.map((e) => ({ v: e, l: e + (m?.defaultEffort === e ? ' · model default' : '') }));
+    }
     if (kind === 'permissions') items = reg.permissions.map((p) => ({ v: p, l: p }));
   }
   if (current && !items.some((i) => i.v === current)) items.push({ v: current, l: `${current} (custom)` });
@@ -569,7 +581,7 @@ function renderOverview(body, t) {
             <option value="codex" ${o.type === 'codex' ? 'selected' : ''}>codex</option>
           </select></div>
           <div class="model-cell"><select data-ov="${c.id}:model">${harnessOptions('model', effType, o.model || '', `default (${c.harness.model || '—'})`)}</select>${refreshBtn()}</div>
-          <div><select data-ov="${c.id}:effort">${harnessOptions('effort', effType, o.effort || '', `default (${c.harness.effort || '—'})`)}</select></div>
+          <div><select data-ov="${c.id}:effort">${harnessOptions('effort', effType, o.effort || '', `default (${c.harness.effort || '—'})`, o.model || c.harness.model)}</select></div>
           <div><select data-ov="${c.id}:permissions">${harnessOptions('permissions', effType, o.permissions || '', `default (${c.harness.permissions || '—'})`)}</select></div>`;
       }).join('')}
     </div></div>
@@ -583,8 +595,8 @@ function renderOverview(body, t) {
       const v = sel.value.trim();
       if (v) (draft[colId] ||= {})[key] = v;
       else if (draft[colId]) { delete draft[colId][key]; if (!Object.keys(draft[colId]).length) delete draft[colId]; }
-      // switching harness type changes which models/efforts/perms apply
-      if (key === 'type') renderOverview(body, t);
+      // type changes which models/efforts/perms apply; model changes which efforts apply
+      if (key === 'type' || key === 'model') renderOverview(body, t);
     };
   }
 
@@ -666,13 +678,17 @@ function renderActivity(body, t) {
       <span class="wake-lbl">picked up by</span>
       <select id="cw-type">${['claude', 'codex'].map((x) => `<option ${x === hType ? 'selected' : ''}>${x}</option>`).join('')}</select>
       <select id="cw-model">${harnessOptions('model', hType, base.model || '', 'default')}</select>${refreshBtn()}
-      <select id="cw-effort">${harnessOptions('effort', hType, base.effort || '', 'default')}</select>
+      <select id="cw-effort">${harnessOptions('effort', hType, base.effort || '', 'default', base.model)}</select>
     </div>` : ''}`;
 
   $('#f-comment').oninput = (e) => { S.commentDraft = e.target.value; };
   if (canWake) {
     $('#cw-type').onchange = () => renderActivity(body, S.data.tickets.find((x) => x.id === t.id) || t);
-    $('#cw-model').onchange = () => handleCustomModel($('#cw-model'));
+    $('#cw-model').onchange = () => {
+      if (!handleCustomModel($('#cw-model'))) return;
+      // refill efforts for the chosen model
+      $('#cw-effort').innerHTML = harnessOptions('effort', $('#cw-type').value, $('#cw-effort').value, 'default', $('#cw-model').value);
+    };
   }
   $('#btn-comment').onclick = async () => {
     const text = $('#f-comment').value.trim();
@@ -762,7 +778,7 @@ function renderColumnModal(draftOverride) {
       <label class="f">MODEL</label>
       <div class="model-cell"><select id="c-model" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('model', type, h.model || '', '—')}</select>${refreshBtn()}</div>
       <label class="f">EFFORT</label>
-      <select id="c-effort" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', type, h.effort || '', '— (CLI default)')}</select>
+      <select id="c-effort" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', type, h.effort || '', '— (CLI default)', h.model)}</select>
       <label class="f">PERMISSIONS</label>
       <select id="c-perms" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('permissions', type, h.permissions || '', '— (harness default)')}</select>
       <label class="f">ALLOWED TOOLS (claude only, e.g. "Bash(git *) Read Glob")</label>
@@ -801,7 +817,7 @@ function renderColumnModal(draftOverride) {
     d.model = ''; d.effort = ''; d.permissions = '';
     renderColumnModal(d);
   };
-  $('#c-model').onchange = () => handleCustomModel($('#c-model'));
+  $('#c-model').onchange = () => { if (handleCustomModel($('#c-model'))) renderColumnModal(collectDraft()); }; // model change re-filters efforts
 
   $('#c-save').onclick = () => api(`/api/columns/${c.id}`, 'PATCH', {
     name: $('#c-name').value.trim(),
@@ -949,9 +965,14 @@ function renderSettingsModal() {
           <div>${esc(c.name)}</div>
           <div>${esc(c.harness.type)}</div>
           <div class="model-cell"><select data-pd="${c.id}:model">${harnessOptions('model', c.harness.type, c.harness.model || '', '—')}</select>${refreshBtn()}</div>
-          <div><select data-pd="${c.id}:effort">${harnessOptions('effort', c.harness.type, c.harness.effort || '', '— (CLI default)')}</select></div>`).join('')}
+          <div><select data-pd="${c.id}:effort">${harnessOptions('effort', c.harness.type, c.harness.effort || '', '— (CLI default)', c.harness.model)}</select></div>`).join('')}
       </div></div>
       <div class="hint">changing a harness TYPE (claude ⇄ codex) still needs that column's own CFG panel — this list only sets model/effort defaults.</div>
+      <div class="hint" id="s-models-meta">${['claude', 'codex'].map((ty) => {
+        const m = S.data.registry[ty]?.meta || {};
+        const age = m.fetchedAt ? fmtDur(Date.now() - Date.parse(m.fetchedAt)) + ' ago' : 'never';
+        return `${ty}: ${esc(m.source || 'seed')} · ${age}`;
+      }).join(' &nbsp;///&nbsp; ')} — models auto-refresh daily; ↻ forces it now.</div>
 
       <hr class="sep">
       <div class="section-head">DISK</div>
@@ -978,7 +999,14 @@ function renderSettingsModal() {
     }).catch((e) => { alertErr(e); $('#s-prune').textContent = '[ RECLAIM DISK SPACE ]'; });
   };
 
-  for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => handleCustomModel(sel);
+  for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => {
+    if (!handleCustomModel(sel)) return;
+    // refill the sibling effort select with the chosen model's supported levels
+    const colId = sel.dataset.pd.split(':')[0];
+    const eff = document.querySelector(`[data-pd="${colId}:effort"]`);
+    const col = cols().find((c) => c.id === colId);
+    if (eff && col) eff.innerHTML = harnessOptions('effort', col.harness.type, eff.value, '— (CLI default)', sel.value);
+  };
 
   // Appearance — device-local, applies live and persists immediately (no server round-trip).
   for (const btn of document.querySelectorAll('[data-theme-pick]')) {

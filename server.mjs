@@ -9,7 +9,7 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { Store, DATA_DIR } from './store.mjs';
 import { Runner } from './engine/runner.mjs';
-import { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, probe } from './registry.mjs';
+import { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe } from './registry.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
@@ -461,15 +461,43 @@ app.patch('/api/settings', (req, res) => {
 });
 
 // refresh the model dropdowns from the providers' official model docs
+// Models referenced by column configs or ticket overrides — must survive a refresh even if retired.
+function inUseModels() {
+  const inUse = { claude: new Set(), codex: new Set() };
+  for (const c of store.board.columns) {
+    if (c.harness?.model && inUse[c.harness.type]) inUse[c.harness.type].add(c.harness.model);
+  }
+  for (const t of store.tickets.values()) {
+    for (const [colId, o] of Object.entries(t.overrides || {})) {
+      const type = o.type || store.column(colId)?.harness?.type;
+      if (o.model && inUse[type]) inUse[type].add(o.model);
+    }
+  }
+  return inUse;
+}
+
+async function doModelRefresh() {
+  const report = await refreshModels({ inUse: inUseModels() });
+  broadcast({ type: 'state-changed' });
+  return report;
+}
+
 app.post('/api/models/refresh', async (_req, res) => {
   try {
-    const summary = await refreshModels();
-    broadcast({ type: 'state-changed' });
-    res.json({ registry: REGISTRY, ...summary });
+    res.json({ registry: REGISTRY, report: await doModelRefresh() });
   } catch (e) {
     res.status(502).json({ error: `model refresh failed: ${e.message}` });
   }
 });
+
+// Auto-freshness: refresh at boot when the cache is older than a day, then daily.
+const MODELS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+if (registryAgeMs() > MODELS_MAX_AGE_MS) {
+  doModelRefresh().then((r) => console.log('model auto-refresh (boot):', JSON.stringify(r))).catch((e) => console.error('model auto-refresh:', e.message));
+}
+setInterval(() => {
+  doModelRefresh().then((r) => console.log('model auto-refresh (daily):', JSON.stringify(r))).catch((e) => console.error('model auto-refresh:', e.message));
+}, MODELS_MAX_AGE_MS);
 
 // current on-disk footprint of the data dir
 app.get('/api/maintenance/usage', async (_req, res) => {

@@ -9,7 +9,7 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { Store, DATA_DIR } from './store.mjs';
 import { Runner } from './engine/runner.mjs';
-import { REGISTRY, loadCodexDefaults, probe } from './registry.mjs';
+import { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, probe } from './registry.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
@@ -17,6 +17,7 @@ const PORT = Number(process.env.DISPATCH_PORT || 4400);
 const BOOT_ID = crypto.randomUUID(); // stale open tabs self-reload when this changes
 const store = new Store();
 loadCodexDefaults();
+loadModelsCache(); // merge any previously-refreshed model list
 let health = { claude: { ok: false }, codex: { ok: false } };
 probe().then((h) => { health = h; broadcast({ type: 'state-changed' }); });
 
@@ -457,6 +458,17 @@ app.patch('/api/settings', (req, res) => {
   runner.pump(); // raising the cap (or un-pausing) should drain any queued work immediately
   broadcast({ type: 'state-changed' });
   res.json(store.board.settings);
+});
+
+// refresh the model dropdowns from the providers' official model docs
+app.post('/api/models/refresh', async (_req, res) => {
+  try {
+    const summary = await refreshModels();
+    broadcast({ type: 'state-changed' });
+    res.json({ registry: REGISTRY, ...summary });
+  } catch (e) {
+    res.status(502).json({ error: `model refresh failed: ${e.message}` });
+  }
 });
 
 // current on-disk footprint of the data dir

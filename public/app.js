@@ -155,6 +155,19 @@ const archivedTickets = () => S.data.tickets.filter((t) => t.archived)
   .sort((a, b) => ((a.archivedAt || '') < (b.archivedAt || '') ? 1 : -1)); // newest first
 const harnessLabel = (h) => h.type === 'human' ? 'HUMAN' : `${h.type} · ${h.model || 'default'} · ${h.effort || 'default'}`;
 const BY_LABEL = { claude: 'CLAUDE CODE', codex: 'CODEX', human: 'YOU', engine: 'ENGINE' };
+// ↻ button placed beside model dropdowns — fetches the latest model releases into the registry
+const refreshBtn = () => '<button type="button" class="refresh-models" title="Fetch latest model releases from the provider">↻</button>';
+async function refreshModelRegistry() {
+  toast('FETCHING LATEST MODELS…');
+  document.querySelectorAll('.refresh-models').forEach((b) => b.classList.add('spin'));
+  try {
+    const r = await api('/api/models/refresh', 'POST', {});
+    S.data.registry = r.registry;
+    toast(r.added ? `MODELS UPDATED — ${r.added} new${r.failures?.length ? ` · ${r.failures.join('/')} unreachable` : ''}` : 'MODELS ALREADY UP TO DATE');
+    renderModal(); // re-render the open modal so the new options appear
+  } catch (e) { alertErr(e); }
+  finally { document.querySelectorAll('.refresh-models').forEach((b) => b.classList.remove('spin')); }
+}
 const effective = (t, c) => ({ ...c.harness, ...(t.overrides?.[c.id] || {}) });
 
 /* Diagnose a ticket into a plain-language state the UI can act on.
@@ -555,7 +568,7 @@ function renderOverview(body, t) {
             <option value="claude" ${o.type === 'claude' ? 'selected' : ''}>claude</option>
             <option value="codex" ${o.type === 'codex' ? 'selected' : ''}>codex</option>
           </select></div>
-          <div><select data-ov="${c.id}:model">${harnessOptions('model', effType, o.model || '', `default (${c.harness.model || '—'})`)}</select></div>
+          <div class="model-cell"><select data-ov="${c.id}:model">${harnessOptions('model', effType, o.model || '', `default (${c.harness.model || '—'})`)}</select>${refreshBtn()}</div>
           <div><select data-ov="${c.id}:effort">${harnessOptions('effort', effType, o.effort || '', `default (${c.harness.effort || '—'})`)}</select></div>
           <div><select data-ov="${c.id}:permissions">${harnessOptions('permissions', effType, o.permissions || '', `default (${c.harness.permissions || '—'})`)}</select></div>`;
       }).join('')}
@@ -652,7 +665,7 @@ function renderActivity(body, t) {
     ${canWake ? `<div class="wake-harness">
       <span class="wake-lbl">picked up by</span>
       <select id="cw-type">${['claude', 'codex'].map((x) => `<option ${x === hType ? 'selected' : ''}>${x}</option>`).join('')}</select>
-      <select id="cw-model">${harnessOptions('model', hType, base.model || '', 'default')}</select>
+      <select id="cw-model">${harnessOptions('model', hType, base.model || '', 'default')}</select>${refreshBtn()}
       <select id="cw-effort">${harnessOptions('effort', hType, base.effort || '', 'default')}</select>
     </div>` : ''}`;
 
@@ -747,7 +760,7 @@ function renderColumnModal(draftOverride) {
       <label class="f">HARNESS</label>
       <select id="c-type">${['human', 'claude', 'codex'].map((r) => `<option ${r === type ? 'selected' : ''}>${r}</option>`).join('')}</select>
       <label class="f">MODEL</label>
-      <select id="c-model" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('model', type, h.model || '', '—')}</select>
+      <div class="model-cell"><select id="c-model" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('model', type, h.model || '', '—')}</select>${refreshBtn()}</div>
       <label class="f">EFFORT</label>
       <select id="c-effort" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', type, h.effort || '', '— (CLI default)')}</select>
       <label class="f">PERMISSIONS</label>
@@ -935,7 +948,7 @@ function renderSettingsModal() {
         ${agentCols.map((c) => `
           <div>${esc(c.name)}</div>
           <div>${esc(c.harness.type)}</div>
-          <div><select data-pd="${c.id}:model">${harnessOptions('model', c.harness.type, c.harness.model || '', '—')}</select></div>
+          <div class="model-cell"><select data-pd="${c.id}:model">${harnessOptions('model', c.harness.type, c.harness.model || '', '—')}</select>${refreshBtn()}</div>
           <div><select data-pd="${c.id}:effort">${harnessOptions('effort', c.harness.type, c.harness.effort || '', '— (CLI default)')}</select></div>`).join('')}
       </div></div>
       <div class="hint">changing a harness TYPE (claude ⇄ codex) still needs that column's own CFG panel — this list only sets model/effort defaults.</div>
@@ -1044,6 +1057,7 @@ $('#btn-pause').onclick = () => {
     .catch(alertErr);
 };
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+document.addEventListener('click', (e) => { if (e.target.closest('.refresh-models')) { e.preventDefault(); refreshModelRegistry(); } });
 
 savePrefs(loadPrefs()); // apply saved theme / font / UI scale before first paint
 loadState().then(connectWS).catch((e) => { document.body.innerHTML = `<pre style="color:#ff2a2a;padding:20px">DISPATCH FAILED TO LOAD: ${esc(e.message)}</pre>`; });

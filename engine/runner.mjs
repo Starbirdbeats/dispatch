@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import * as claude from './claude.mjs';
 import * as codex from './codex.mjs';
 import { composePrompt, parseControlBlock } from './contract.mjs';
+import { telegramConfig, sendTelegram, renderMessage } from './notify.mjs';
 
 const ADAPTERS = { claude, codex };
 const MAX_BOUNCES = 3;
@@ -170,8 +171,10 @@ export class Runner {
     // Read-only tickets are exempt — they change nothing, so there's nothing to test.
     if (column.role === 'terminal' && !ticket.humanTest && !ticket.readOnly && by !== 'human') {
       ticket.status = 'awaiting-human';
+      ticket.stuckReason = { kind: 'done-gate', at: nowIso(), detail: `Blocked from entering ${column.name}: no human_test was provided.` };
       this.store.appendActivity(ticketId, { kind: 'system', by: 'engine', text: `blocked from entering ${column.name}: no human_test provided` });
       this.store.saveTicket(ticketId);
+      this._maybeNotify(ticket);
       this.broadcast({ type: 'state-changed' });
       return ticket;
     }
@@ -199,8 +202,35 @@ export class Runner {
 
     const shouldRun = autoRun ?? column.autoRun;
     if (shouldRun && column.role === 'agent') this.enqueue(ticketId, { by });
+    this._maybeNotify(ticket, { by });
     this.broadcast({ type: 'state-changed' });
     return ticket;
+  }
+
+  _maybeNotify(ticket, { by = 'engine' } = {}) {
+    const col = this.store.column(ticket.columnId);
+    let event = null;
+    let key = null;
+
+    if (col?.role === 'terminal' && ticket.completedAt) {
+      if (by === 'human') return;
+      event = 'completed';
+      key = `done:${ticket.completedAt}`;
+    } else if (ticket.status === 'awaiting-human' || (ticket.status === 'error' && !ticket.retryAt)) {
+      event = 'intervention';
+      key = `stuck:${ticket.stuckReason?.at || ticket.lastRunEndedAt || ticket.enteredColumnAt || ''}`;
+    } else {
+      return;
+    }
+
+    if (!key || key === ticket.lastNotifyKey) return;
+    const cfg = telegramConfig(this.store.board.settings);
+    if (!cfg.enabled || cfg.events[event] === false) return;
+
+    ticket.lastNotifyKey = key;
+    this.store.saveTicket(ticket.id);
+    sendTelegram(cfg, renderMessage(event, ticket, col, cfg.baseUrl))
+      .catch((e) => this.store.appendActivity(ticket.id, { kind: 'system', by: 'engine', text: `telegram notify failed: ${e.message}` }));
   }
 
   _saveQueue() {
@@ -219,9 +249,11 @@ export class Runner {
         const t = this.store.tickets.get(job.ticketId);
         if (t) {
           t.status = 'error';
+          t.stuckReason = { kind: 'runner-crash', at: nowIso(), detail: `The engine crashed while starting the run: ${err.message}` };
           delete t.activeRun;
           delete t.currentRun;
           this.store.saveTicket(t.id);
+          this._maybeNotify(t);
         }
         this.store.appendActivity(job.ticketId, { kind: 'system', by: 'engine', text: `runner crash: ${err.message}` });
         this._closeEntry(job.ticketId);
@@ -495,6 +527,7 @@ export class Runner {
     }
 
     this.store.saveTicket(ticketId);
+    this._maybeNotify(ticket);
     this.broadcast({ type: 'state-changed' });
     this._pump();
   }
@@ -524,6 +557,7 @@ export class Runner {
       this.store.appendActivity(ticketId, { kind: 'system', by: 'human', text: 'run stopped' });
     } else if (intent === 'timeout') {
       ticket.status = 'error';
+      ticket.stuckReason = { kind: 'timeout', at: nowIso(), detail: `The run exceeded the ${this.store.board.settings.runTimeoutMin || 30} min timeout and stopped without a finalized exit record.` };
       this.store.appendActivity(ticketId, { kind: 'system', by: 'engine', text: `run timed out after ${this.store.board.settings.runTimeoutMin || 30} min` });
     } else {
       ticket.status = 'idle';
@@ -533,6 +567,7 @@ export class Runner {
     }
 
     this.store.saveTicket(ticketId);
+    this._maybeNotify(ticket);
     this.broadcast({ type: 'state-changed' });
     this._pump();
   }
@@ -543,12 +578,14 @@ export class Runner {
     delete ticket.activeRun;
     delete ticket.currentRun;
     ticket.status = 'awaiting-human';
+    ticket.stuckReason = { kind: 'orphaned-finalize', at: nowIso(), detail: 'The run finalized, but post-run handling may have been lost. Check the transcript before continuing.' };
     this._closeEntry(ticketId);
     this.store.appendActivity(ticketId, {
       kind: 'system', by: 'engine',
       text: 'finalized but post-run handling may have been lost — check transcript',
     });
     this.store.saveTicket(ticketId);
+    this._maybeNotify(ticket);
     this.broadcast({ type: 'state-changed' });
     this._pump();
   }

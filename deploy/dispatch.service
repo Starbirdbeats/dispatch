@@ -9,6 +9,7 @@ Restart=on-failure
 RestartSec=5
 KillMode=process
 Environment=DISPATCH_PORT=4400
+EnvironmentFile=-/home/Starbird/dispatch-data/dispatch.env
 Environment=PATH=/home/Starbird/.npm-global/bin:/home/Starbird/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]

@@ -24,6 +24,14 @@ systemctl --user daemon-reload
 systemctl --user restart dispatch
 ```
 
+Optional Telegram alerts read secrets from `/home/Starbird/dispatch-data/dispatch.env`, which is loaded by the service unit and should not be committed:
+
+```bash
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+DISPATCH_PUBLIC_URL=http://starbird:4400
+```
+
 ## How it works
 
 - **Columns = phases.** Each has a harness (`claude` / `codex` / `human`), model, effort, permissions, a phase prompt, and an auto-run toggle. Configure via the `CFG >>` button on any column.

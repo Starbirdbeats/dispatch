@@ -1001,6 +1001,18 @@ function renderSettingsModal() {
       </div>
       <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>
 
+      <hr class="sep">
+      <div class="section-head">NOTIFICATIONS <span>(telegram)</span></div>
+      <label class="f">TELEGRAM ALERTS</label>
+      <select id="s-tg-on"><option value="">off</option><option value="1" ${s.telegram?.enabled ? 'selected' : ''}>on</option></select>
+      <label class="f">CHAT ID</label>
+      <input id="s-tg-chat" value="${esc(s.telegram?.chatId || '')}" placeholder="e.g. 123456789">
+      <label class="f">PING ON</label>
+      <label class="check-row inline"><input type="checkbox" id="s-tg-done" ${s.telegram?.events?.completed !== false ? 'checked' : ''}> <span>ticket completed</span></label>
+      <label class="check-row inline"><input type="checkbox" id="s-tg-stuck" ${s.telegram?.events?.intervention !== false ? 'checked' : ''}> <span>needs my intervention</span></label>
+      <div class="disk-row"><span></span><button class="btn" id="s-tg-test">[ SEND TEST ]</button></div>
+      <div class="hint">bot token comes from the <code>TELEGRAM_BOT_TOKEN</code> env var (kept out of the data dir). set it in the service unit / dispatch.env. reuses your existing Claude-hook bot.</div>
+
       <div class="hint" style="margin-top:14px">claude auth: subscription oauth on starbird · codex auth: chatgpt login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
     </div>`,
     `<button class="btn btn-accent" id="s-save">[ SAVE ]</button>`);
@@ -1014,6 +1026,13 @@ function renderSettingsModal() {
       const el = $('#s-usage'); if (el) el.textContent = fmtBytes(r.after);
       $('#s-prune').textContent = '[ RECLAIM DISK SPACE ]';
     }).catch((e) => { alertErr(e); $('#s-prune').textContent = '[ RECLAIM DISK SPACE ]'; });
+  };
+  $('#s-tg-test').onclick = () => {
+    $('#s-tg-test').textContent = '[ SENDING... ]';
+    api('/api/notify/test', 'POST', { chatId: $('#s-tg-chat').value.trim() })
+      .then(() => toast('TEST SENT — check your phone'))
+      .catch(alertErr)
+      .finally(() => { $('#s-tg-test').textContent = '[ SEND TEST ]'; });
   };
 
   for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => {
@@ -1058,6 +1077,14 @@ function renderSettingsModal() {
       autoDispatchEveryMin: Number($('#s-every').value) || 5,
       stallAfterMin: Number($('#s-stall').value),
       keepRunsPerTicket: Math.max(1, Number($('#s-keepruns').value) || 5),
+      telegram: {
+        enabled: Boolean($('#s-tg-on').value),
+        chatId: $('#s-tg-chat').value.trim(),
+        events: {
+          completed: $('#s-tg-done').checked,
+          intervention: $('#s-tg-stuck').checked,
+        },
+      },
     }).then(() => { toast('SETTINGS SAVED'); closeAndReload(); }).catch(alertErr);
   };
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);

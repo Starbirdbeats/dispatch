@@ -9,6 +9,7 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { Store, DATA_DIR } from './store.mjs';
 import { Runner } from './engine/runner.mjs';
+import { telegramConfig, sendTelegram } from './engine/notify.mjs';
 import { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe } from './registry.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -217,6 +218,27 @@ app.post('/api/probe', async (_req, res) => {
   health = await probe();
   broadcast({ type: 'state-changed' });
   res.json(health);
+});
+
+app.post('/api/notify/test', async (req, res) => {
+  const override = {
+    telegram: {
+      ...(store.board.settings.telegram || {}),
+      enabled: true,
+      token: req.body?.token || undefined,
+      chatId: req.body?.chatId || undefined,
+    },
+  };
+  const cfg = telegramConfig(override);
+  if (!cfg.token || !cfg.chatId) {
+    return res.status(400).json({ error: 'need a bot token (env TELEGRAM_BOT_TOKEN) and a chat id' });
+  }
+  try {
+    await sendTelegram(cfg, `🔔 Dispatch test — notifications are wired up.\n${cfg.baseUrl}`);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
 });
 
 // ---- tickets ----

@@ -18,6 +18,7 @@ const DEFAULT_BOARD = {
     autoDispatchEveryMin: 5,
     stallAfterMin: 10,           // stall watchdog: resume orphaned tickets after this dwell; 0 = off
     keepRunsPerTicket: 5,        // disk retention: run journals kept per ticket (older pruned)
+    telegram: { enabled: false, chatId: '', events: { completed: true, intervention: true } },
   },
   columns: [
     {

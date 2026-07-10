@@ -282,10 +282,11 @@ function render() {
   renderBoard();
   if (S.modal?.type === 'ticket') {
     // Live-refresh only the non-form tabs; overview holds user edits.
-    if (['activity', 'dossier'].includes(S.modal.tab)) renderModal();
+    const lt = S.data.tickets.find((x) => x.id === S.modal.id);
+    if (S.modal.tab === 'activity') renderModal();
+    else if (S.modal.tab === 'dossier' && lt) renderDossier(lt, { live: true });
     else updateTicketModalHead();
     // the diagnosis banner is informational — safe to refresh on every state change
-    const lt = S.data.tickets.find((x) => x.id === S.modal.id);
     if (lt && $('#diag-banner')) renderDiagBanner(lt);
   }
 }
@@ -312,6 +313,9 @@ function renderTopbar() {
 
 function renderBoard() {
   const board = $('#board');
+  const savedX = board.scrollLeft;
+  const savedY = new Map([...board.querySelectorAll('.column')]
+    .map((el) => [el.dataset.colId, $('.col-body', el)?.scrollTop || 0]));
   board.innerHTML = '';
   for (const c of cols()) {
     const col = document.createElement('section');
@@ -342,6 +346,11 @@ function renderBoard() {
     });
     $('.cfg', col).onclick = () => { S.modal = { type: 'column', id: c.id }; renderModal(); };
     board.appendChild(col);
+  }
+  board.scrollLeft = savedX;
+  for (const colEl of board.querySelectorAll('.column')) {
+    const y = savedY.get(colEl.dataset.colId);
+    if (y) $('.col-body', colEl).scrollTop = y;
   }
 }
 
@@ -418,6 +427,19 @@ function updateTicketModalHead() {
   if (t && h) h.textContent = t.status.toUpperCase();
 }
 
+function renderDossier(t, { live = false } = {}) {
+  const host = $('#tab-body');
+  if (!host) return;
+  if (!live) host.innerHTML = '<div class="dossier" id="dossier-body">loading…</div>';
+  fetch(`/api/tickets/${t.id}/dossier`).then((r) => r.text()).then((txt) => {
+    const el = $('#dossier-body');
+    if (!el) return;
+    const y = el.scrollTop;
+    el.innerHTML = renderMarkdown(txt);
+    el.scrollTop = y;
+  });
+}
+
 /* ---- ticket modal ---- */
 function renderTicketModal() {
   const t = S.data.tickets.find((x) => x.id === S.modal.id);
@@ -455,13 +477,7 @@ function renderTicketModal() {
   if (tab === 'overview') renderOverview(body, t);
   if (tab === 'activity') renderActivity(body, t);
   if (tab === 'transcript') renderTranscript(body, t);
-  if (tab === 'dossier') {
-    body.innerHTML = `<div class="dossier" id="dossier-body">loading…</div>`;
-    fetch(`/api/tickets/${t.id}/dossier`).then((r) => r.text()).then((txt) => {
-      const el = $('#dossier-body');
-      if (el) el.innerHTML = renderMarkdown(txt);
-    });
-  }
+  if (tab === 'dossier') renderDossier(t);
 }
 
 function closeAndReload() { closeModal(); loadState(); }

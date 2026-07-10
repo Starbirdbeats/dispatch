@@ -771,11 +771,12 @@ function renderTranscript(body, t) {
 function appendTranscriptLine(ev) {
   const box = $('#transcript');
   if (!box || !ev?.text) return;
+  const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   const div = document.createElement('div');
   div.className = `ln k-${ev.kind || 'text'}`;
   div.innerHTML = `<span class="tag">${esc(ev.kind || 'text')}</span>${esc(ev.text)}`;
   box.appendChild(div);
-  box.scrollTop = box.scrollHeight;
+  if (pinned) box.scrollTop = box.scrollHeight;
 }
 
 /* ---- column config modal ---- */

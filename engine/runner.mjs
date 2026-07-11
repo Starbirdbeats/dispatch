@@ -186,11 +186,12 @@ export class Runner {
     delete ticket.stuckReason;     // whatever stuck it is left behind
     delete ticket.pendingWake;
 
-    // lifecycle clock: startedAt when work begins, completedAt+duration when it lands in a terminal
+    // lifecycle clock: startedAt when work begins, duration is accumulated active time.
     if (column.role === 'agent' && !ticket.startedAt) ticket.startedAt = new Date().toISOString();
     if (column.role === 'terminal') {
       ticket.completedAt = new Date().toISOString();
-      ticket.durationMs = ticket.startedAt ? Date.parse(ticket.completedAt) - Date.parse(ticket.startedAt) : null;
+      this.store.reconcileClock(ticket);
+      ticket.durationMs = ticket.startedAt ? ticket.activeMs : null;
     } else if (ticket.completedAt) {
       delete ticket.completedAt; delete ticket.durationMs; // reopened out of Done → clock resumes
     }

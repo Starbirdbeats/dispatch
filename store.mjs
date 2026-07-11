@@ -102,6 +102,24 @@ export function fmtBytes(n) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+// Active time accrues only while an agent phase is working or queued to work.
+export function activeClockRunning(ticket, column) {
+  if (!ticket.startedAt || ticket.completedAt) return false;
+  if (!column || column.role !== 'agent') return false;
+  return ticket.status === 'running' || ticket.status === 'queued';
+}
+
+export function reconcileActiveClock(ticket, column, now = Date.now()) {
+  if (ticket.activeMs == null) ticket.activeMs = 0;
+  const running = activeClockRunning(ticket, column);
+  if (running && ticket.activeSince == null) {
+    ticket.activeSince = now;
+  } else if (!running && ticket.activeSince != null) {
+    ticket.activeMs += Math.max(0, now - ticket.activeSince);
+    ticket.activeSince = null;
+  }
+}
+
 // Replace a "## Heading" block (heading line through just before the next "## ")
 // with newBlock. Returns null if the heading isn't present so the caller can insert.
 function replaceSection(doc, heading, newBlock) {
@@ -134,6 +152,10 @@ export class Store {
         t.interrupted = true;
       }
       if (!t.activeRun) delete t.currentRun;
+      if (t.activeMs === undefined) {
+        t.activeMs = 0;
+        t.activeSince = (t.activeRun && t.startedAt && !t.completedAt) ? Date.parse(t.startedAt) : null;
+      }
       this.tickets.set(t.id, t);
     }
   }
@@ -175,6 +197,10 @@ export class Store {
     return this._pipeline(ticket).find((c) => c.order > order && c.role === 'agent') || null;
   }
 
+  reconcileClock(ticket, now = Date.now()) {
+    reconcileActiveClock(ticket, this.column(ticket.columnId), now);
+  }
+
   createTicket({ title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip }) {
     const id = `t-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     const ticket = {
@@ -193,7 +219,9 @@ export class Store {
       humanTest: null,
       startedAt: null,       // set when work first begins (enters an agent phase / first run)
       completedAt: null,     // set when it lands in a terminal column
-      durationMs: null,      // completedAt - startedAt, frozen at completion
+      durationMs: null,      // activeMs, frozen at completion
+      activeMs: 0,
+      activeSince: null,
       attachments: [],
       activity: [],
     };
@@ -211,7 +239,10 @@ export class Store {
 
   saveTicket(id) {
     const t = this.tickets.get(id);
-    if (t) atomicWrite(path.join(this.ticketDir(id), 'ticket.json'), JSON.stringify(t, null, 2));
+    if (t) {
+      this.reconcileClock(t);
+      atomicWrite(path.join(this.ticketDir(id), 'ticket.json'), JSON.stringify(t, null, 2));
+    }
   }
 
   appendActivity(id, item) {

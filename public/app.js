@@ -230,6 +230,9 @@ function fmtDur(ms) {
 }
 // human-readable local timestamp for completion display
 function fmtTs(iso) { try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); } catch { return iso || ''; } }
+const activeElapsed = (t) => (t.activeMs || 0) + (t.activeSince ? Date.now() - t.activeSince : 0);
+const activeClockSpan = (t) => `<span data-active-base="${t.activeMs || 0}" data-active-since="${t.activeSince || ''}">${esc(fmtDur(activeElapsed(t)))}</span>`;
+const isClockPaused = (t) => Boolean(t.startedAt) && !t.completedAt && !t.activeSince;
 
 // kv rows for the lifecycle clock: live ACTIVE elapsed, or frozen COMPLETED + TOOK.
 function timingRowHTML(t) {
@@ -238,7 +241,7 @@ function timingRowHTML(t) {
       (t.durationMs != null ? `<div class="k">TOOK</div><div>${esc(fmtDur(t.durationMs))}</div>` : '');
   }
   if (t.startedAt) {
-    return `<div class="k">ACTIVE FOR</div><div><span data-liveclock="${Date.parse(t.startedAt)}">${esc(fmtDur(Date.now() - Date.parse(t.startedAt)))}</span> <span class="since">since ${esc(fmtTs(t.startedAt))}</span></div>`;
+    return `<div class="k">ACTIVE FOR</div><div>${activeClockSpan(t)} <span class="since">${isClockPaused(t) ? 'paused · ' : ''}since ${esc(fmtTs(t.startedAt))}</span></div>`;
   }
   return '';
 }
@@ -370,7 +373,7 @@ function cardEl(t, c) {
     <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span><span class="badge tone-${dx.tone}">${dx.tone === 'stuck' ? '⚠ ' : ''}${esc(dx.label)}</span></div>
     ${t.completedAt && t.durationMs != null
       ? `<div class="timing done">✓ took ${esc(fmtDur(t.durationMs))} · ${esc(fmtTs(t.completedAt))}</div>`
-      : (t.startedAt ? `<div class="timing">⏱ active <span data-liveclock="${Date.parse(t.startedAt)}">${esc(fmtDur(Date.now() - Date.parse(t.startedAt)))}</span></div>` : '')}
+      : (t.startedAt ? `<div class="timing">${isClockPaused(t) ? '⏸ paused' : '⏱ active'} ${activeClockSpan(t)}</div>` : '')}
     ${t.scheduledAt ? `<div class="last">SCHED ${esc(t.scheduledAt.replace('T', ' '))}</div>` : ''}
     ${last ? `<div class="last">&gt; ${esc(last.text)}</div>` : ''}`;
   el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/ticket', t.id); el.classList.add('dragging'); });
@@ -1187,6 +1190,11 @@ setInterval(() => {
   }
   for (const el of document.querySelectorAll('[data-liveclock]')) {
     el.textContent = fmtDur(now - Number(el.dataset.liveclock));
+  }
+  for (const el of document.querySelectorAll('[data-active-base]')) {
+    const base = Number(el.dataset.activeBase) || 0;
+    const since = Number(el.dataset.activeSince) || 0;
+    el.textContent = fmtDur(base + (since ? now - since : 0));
   }
 }, 1000);
 

@@ -108,7 +108,7 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 
-if [ "$1" = "login" ]; then
+if [ "$1" = "setup-token" ]; then
   exit 0
 fi
 

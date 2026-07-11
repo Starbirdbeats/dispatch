@@ -39,7 +39,7 @@ cp .env.example .env
 
 Then edit:
 
-- `DISPATCH_DATA` (defaults to `./dispatch-data`)
+- `DISPATCH_DATA` (defaults to `~/dispatch-data`)
 - `DISPATCH_PORT` (defaults to `4400`)
 - `DISPATCH_ENV_FILE` (defaults to `.env`)
 
@@ -89,7 +89,7 @@ If a phase uses a disabled provider, Dispatch will pause that phase and ask for 
 
 ## Data and secrets
 
-- Board + tickets are stored in `DISPATCH_DATA` (defaults to `./dispatch-data`).
+- Board + tickets are stored in `DISPATCH_DATA` (defaults to `~/dispatch-data`).
 - Secrets come from:
   - `.env` (repo working directory or `DISPATCH_ENV_FILE`)
   - Environment variables injected by your service definition

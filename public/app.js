@@ -386,7 +386,7 @@ function setupNotice() {
 
 function providerStatusText(type) {
   const state = setupInfo().providers?.[type] || {};
-  if (state.authenticated) return `authenticated${state.authDetail ? ` · ${state.authDetail}` : ''}`;
+  if (state.authenticated) return `authenticated${state.authDetail && state.authDetail !== 'authenticated' ? ` · ${state.authDetail}` : ''}`;
   if (state.installed) return `installed${state.error ? ` · ${state.authDetail || state.error}` : ''} · not authenticated`;
   return state.error ? `offline (${state.error})` : 'not installed';
 }
@@ -448,7 +448,7 @@ function providerCommands(type) {
   if (type === 'claude') {
     return [
       'claude --version',
-      'claude login',
+      'claude setup-token',
     ];
   }
   return [
@@ -1048,8 +1048,9 @@ function renderOverview(body, t) {
           ? '<div class="setup-pill warn">disabled in setup</div>'
           : '';
         return `<div>${esc(c.name)}</div>
-          <div><select data-ov="${c.id}:type">${providerTypeOptions(o.type, { includeHuman: false, includeCurrent: true })}
-            <option value="">default (${esc(c.harness.type)})</option>
+          <div><select data-ov="${c.id}:type">
+            <option value="" ${o.type ? '' : 'selected'}>default (${esc(c.harness.type)})</option>
+            ${providerTypeOptions(o.type, { includeHuman: false, includeCurrent: true })}
           </select>${disabledWarning}</div>
           <div class="model-cell"><select data-ov="${c.id}:model">${harnessOptions('model', effType, n.model || '', defaultModelLabel)}</select>${refreshBtn()}</div>
           <div><select data-ov="${c.id}:effort">${harnessOptions('effort', effType, n.effort || '', defaultEffortLabel, n.model || (sameHarnessType ? c.harness.model : ''))}</select></div>

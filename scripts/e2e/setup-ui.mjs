@@ -35,7 +35,7 @@ async function clickFresh(page, selector, attempts = 4) {
     } catch (e) {
       const msg = String(e);
       if (i + 1 < attempts && /detached|not attached|missing/i.test(msg)) {
-        await page.waitForTimeout(120);
+        await new Promise((resolve) => setTimeout(resolve, 120));
         continue;
       }
       throw e;

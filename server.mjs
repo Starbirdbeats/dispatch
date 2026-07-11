@@ -784,6 +784,7 @@ app.post('/api/tickets/:id/run', (req, res) => {
   const col = store.column(t.columnId);
   const h = store.effectiveHarness(t, col);
   if (h.type !== 'human' && !store.providerEnabled(h.type)) {
+    runner.parkForDisabledProvider(t.id, h.type);
     return res.status(409).json({
       queued: false,
       reason: `${h.type} is disabled in Setup. Open Setup to enable it first.`,

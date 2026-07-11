@@ -33,4 +33,3 @@ test('runner parks ticket in setup when harness provider is disabled', () => {
   assert.match(ticket.stuckReason?.detail, /Codex is disabled/i);
   assert.equal(ticket.scheduledAt, null);
 });
-

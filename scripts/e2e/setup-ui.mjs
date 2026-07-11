@@ -125,4 +125,4 @@ function screenshotsDir() {
     await harness.cleanup();
     await fs.mkdir(screenshotsDir(), { recursive: true }).catch(() => {});
   }
-})( ); 
+})();

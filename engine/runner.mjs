@@ -190,6 +190,19 @@ export class Runner {
     return true;
   }
 
+  parkForDisabledProvider(ticketId, type) {
+    const ticket = this.store.tickets.get(ticketId);
+    if (!ticket) return false;
+    const column = this.store.column(ticket.columnId);
+    const harness = column ? this.harnessFor(ticket, column) : {};
+    const providerType = type || harness.type;
+    if (!providerType || providerType === 'human') return false;
+
+    this._parkDisabledProvider(ticket, providerType);
+    this.broadcast({ type: 'state-changed' });
+    return true;
+  }
+
   _providerDisplayName(type) {
     return type === 'claude' ? 'Claude' : type === 'codex' ? 'Codex' : type;
   }

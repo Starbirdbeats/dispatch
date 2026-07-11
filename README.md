@@ -21,7 +21,7 @@ Each phase (column) has a harness configuration (`claude` / `codex` / `human`) a
 ## Quick Start
 
 ```bash
-git clone https://github.com/<owner>/dispatch.git
+	git clone https://github.com/starbirdbeats/dispatch.git
 cd dispatch
 npm ci
 npm start

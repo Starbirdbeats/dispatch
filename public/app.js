@@ -2490,8 +2490,9 @@ function renderSettingsModal() {
       <label class="f">PING ON</label>
       <label class="check-row inline"><input type="checkbox" id="s-tg-done" ${s.telegram?.events?.completed !== false ? 'checked' : ''}> <span>ticket completed</span></label>
       <label class="check-row inline"><input type="checkbox" id="s-tg-stuck" ${s.telegram?.events?.intervention !== false ? 'checked' : ''}> <span>needs my intervention</span></label>
-      <div class="disk-row"><span></span><button class="btn" id="s-tg-test">[ SEND TEST ]</button></div>
-      <div class="hint">bot token comes from the <code>TELEGRAM_BOT_TOKEN</code> env var (kept out of the data dir). set it in the service unit / dispatch.env. reuses your existing Claude-hook bot.</div>`)}
+      <div class="disk-row"><span></span><span style="display:flex;gap:6px"><button class="btn" id="s-tg-detect">[ DETECT CHAT ID ]</button><button class="btn" id="s-tg-test">[ SEND TEST ]</button></span></div>
+      <div class="hint" id="s-tg-detect-out"></div>
+      <div class="hint">bot token comes from the <code>TELEGRAM_BOT_TOKEN</code> env var (kept out of the data dir). don't know your chat id? message the bot once in telegram, then hit DETECT — it fills the numeric id for you (a @username won't work for DMs).</div>`)}
 
       ${pane('appearance', `
       <div class="section-head">APPEARANCE <span>(this device only)</span></div>
@@ -2561,6 +2562,29 @@ function renderSettingsModal() {
       eff.innerHTML = human ? '<option value="">—</option>' : harnessOptions('effort', type, '', '— (CLI default)', '');
       eff.disabled = human;
     }
+  };
+  $('#s-tg-detect').onclick = () => {
+    const out = $('#s-tg-detect-out');
+    $('#s-tg-detect').textContent = '[ DETECTING... ]';
+    api('/api/notify/detect-chat', 'POST', {})
+      .then((r) => {
+        // prefer the private DM — that's where "ping me" alerts should land
+        const pick = r.chats.find((c) => c.type === 'private') || r.chats[0];
+        if (pick) {
+          $('#s-tg-chat').value = pick.id;
+          out.textContent = `found ${r.chats.length} chat(s) — filled ${pick.id}${pick.name ? ` (${pick.name})` : ''}. send test to confirm, then save.`;
+          toast('CHAT ID DETECTED');
+        } else if (r.webhookUrl) {
+          out.textContent = `no updates visible — a webhook (${r.webhookUrl}) is consuming them. clear the webhook or enter the numeric chat id manually.`;
+          toast('NO CHATS FOUND');
+        } else {
+          const bot = r.bot?.username ? `t.me/${r.bot.username}` : 'your bot';
+          out.textContent = `no chats found yet. open ${bot} in telegram, send it any message (e.g. /start), then hit DETECT again. telegram forgets updates after ~24h, so do both steps together.`;
+          toast('MESSAGE THE BOT FIRST');
+        }
+      })
+      .catch(alertErr)
+      .finally(() => { $('#s-tg-detect').textContent = '[ DETECT CHAT ID ]'; });
   };
 
   for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => {

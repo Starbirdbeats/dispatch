@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { telegramConfig, renderMessage } from '../engine/notify.mjs';
+import { telegramConfig, renderMessage, chatsFromUpdates } from '../engine/notify.mjs';
 
 function withEnv(env, fn) {
   const prev = {
@@ -87,4 +87,23 @@ test('renderMessage formats intervention tickets and truncates long reasons', ()
   assert.ok(msg.includes('a'.repeat(400)));
   assert.ok(!msg.includes('bbbb'));
   assert.match(msg, /https:\/\/dispatch\.test\/#t-2/);
+});
+
+test('chatsFromUpdates extracts and dedupes chats across update kinds', () => {
+  const chats = chatsFromUpdates([
+    { message: { chat: { id: 111, type: 'private', first_name: 'Marcello', last_name: 'Haupt', username: 'starbirdbeats' } } },
+    { edited_message: { chat: { id: 111, type: 'private', first_name: 'Marcello' } } },
+    { my_chat_member: { chat: { id: -222, type: 'group', title: 'Ops' } } },
+    { channel_post: { chat: { id: -333, type: 'channel', title: 'Announce' } } },
+    { update_id: 5 }, // no chat — skipped
+  ]);
+  assert.equal(chats.length, 3);
+  assert.deepEqual(chats[0], { id: 111, type: 'private', username: 'starbirdbeats', name: 'Marcello Haupt' });
+  assert.equal(chats[1].name, 'Ops');
+  assert.equal(chats[2].id, -333);
+});
+
+test('chatsFromUpdates handles empty/absent input', () => {
+  assert.deepEqual(chatsFromUpdates([]), []);
+  assert.deepEqual(chatsFromUpdates(), []);
 });

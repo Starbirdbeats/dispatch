@@ -34,7 +34,7 @@ const [{ Store, DATA_DIR, providerEnabled, enabledProviders }, { Runner }, notif
   import('./engine/usage.mjs'),
   import('./registry.mjs'),
 ]);
-const { telegramConfig, sendTelegram } = notify;
+const { telegramConfig, sendTelegram, detectChats } = notify;
 const { USAGE, extractCodexRateLimitsSnapshot, loadUsageCache, setProviderUsage, setProviderPlan } = usage;
 const { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe, readClaudeOAuthToken } = registry;
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
@@ -660,6 +660,22 @@ app.post('/api/notify/test', async (req, res) => {
   try {
     await sendTelegram(cfg, `🔔 Dispatch test — notifications are wired up.\n${cfg.baseUrl}`);
     res.json({ ok: true });
+  } catch (e) {
+    // "chat not found" = wrong/username-style id, or the human never messaged the bot.
+    const hint = /chat not found/i.test(e.message)
+      ? ' — telegram can only DM a numeric chat id, and only after you have messaged the bot once. open your bot in telegram, send /start, then hit DETECT CHAT ID.'
+      : '';
+    res.status(502).json({ error: e.message + hint });
+  }
+});
+
+// Find the numeric chat id without leaving the browser: the human messages the bot once,
+// then this pulls the bot's update backlog and returns every chat it can see.
+app.post('/api/notify/detect-chat', async (_req, res) => {
+  const cfg = telegramConfig(store.board.settings);
+  if (!cfg.token) return res.status(400).json({ error: 'need a bot token (env TELEGRAM_BOT_TOKEN)' });
+  try {
+    res.json(await detectChats(cfg.token));
   } catch (e) {
     res.status(502).json({ error: e.message });
   }

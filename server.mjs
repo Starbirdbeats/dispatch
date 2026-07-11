@@ -3,22 +3,46 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { Store, DATA_DIR } from './store.mjs';
-import { Runner } from './engine/runner.mjs';
-import { telegramConfig, sendTelegram } from './engine/notify.mjs';
-import { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe } from './registry.mjs';
+import { execFile, spawn } from 'node:child_process';
+import readline from 'node:readline';
+import {
+  deleteEnvFileValue,
+  ensureEnvFile,
+  envEntries,
+  loadEnvFile,
+  upsertEnvFileValue,
+  validateEnvKey,
+} from './engine/envfile.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ENV_FILE = path.join(__dirname, '.env');
+const SYSTEM_FILE = path.join(__dirname, 'SYSTEM.md');
+const SYSTEM_LIMIT_BYTES = 256 * 1024;
+
+ensureEnvFile(ENV_FILE);
+loadEnvFile(ENV_FILE);
+
+const [{ Store, DATA_DIR }, { Runner }, notify, usage, registry] = await Promise.all([
+  import('./store.mjs'),
+  import('./engine/runner.mjs'),
+  import('./engine/notify.mjs'),
+  import('./engine/usage.mjs'),
+  import('./registry.mjs'),
+]);
+const { telegramConfig, sendTelegram } = notify;
+const { USAGE, loadUsageCache, setProviderUsage } = usage;
+const { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe, readClaudeOAuthToken } = registry;
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
 
 const BOOT_ID = crypto.randomUUID(); // stale open tabs self-reload when this changes
 const store = new Store();
 loadCodexDefaults();
 loadModelsCache(); // merge any previously-refreshed model list
+loadUsageCache(); // merge last known account usage windows
 let health = { claude: { ok: false }, codex: { ok: false } };
 probe().then((h) => { health = h; broadcast({ type: 'state-changed' }); });
 
@@ -52,6 +76,118 @@ function broadcast(msg) {
 }
 
 const runner = new Runner(store, broadcast);
+
+function writeTextAtomic(file, data) {
+  const tmp = `${file}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, file);
+}
+
+function readSystemPrompt() {
+  try { return fs.readFileSync(SYSTEM_FILE, 'utf8'); }
+  catch (e) {
+    if (e.code === 'ENOENT') return '';
+    throw e;
+  }
+}
+
+async function probeClaudeUsage() {
+  const at = new Date().toISOString();
+  try {
+    const token = readClaudeOAuthToken();
+    const res = await fetch('https://api.anthropic.com/api/oauth/usage', {
+      headers: {
+        authorization: `Bearer ${token}`,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'oauth-2025-04-20',
+        'content-type': 'application/json',
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(`usage API ${res.status}`);
+    const body = await res.json();
+    setProviderUsage('claude', {
+      fiveHour: body.five_hour ? { usedPct: body.five_hour.utilization, resetsAt: body.five_hour.resets_at } : null,
+      weekly: body.seven_day ? { usedPct: body.seven_day.utilization, resetsAt: body.seven_day.resets_at } : null,
+      at,
+      source: 'claude-oauth-usage',
+    });
+    return USAGE.claude;
+  } catch (e) {
+    setProviderUsage('claude', { fiveHour: null, weekly: null, at, source: 'claude-oauth-usage', error: e.message });
+    return USAGE.claude;
+  }
+}
+
+function fetchCodexRateLimits({ timeoutMs = 8000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('codex', ['app-server'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const rl = readline.createInterface({ input: proc.stdout });
+    let settled = false;
+    let reqId = 1;
+    const finish = (err, val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { proc.kill(); } catch {}
+      err ? reject(err) : resolve(val);
+    };
+    const send = (o) => proc.stdin.write(JSON.stringify(o) + '\n');
+    const timer = setTimeout(() => finish(new Error('app-server timeout')), timeoutMs);
+    proc.on('error', (e) => finish(e));
+    proc.on('exit', () => { if (!settled) finish(new Error('app-server exited early')); });
+    rl.on('line', (line) => {
+      let msg; try { msg = JSON.parse(line); } catch { return; }
+      if (msg.id === 1) {
+        if (msg.error) return finish(new Error(`initialize: ${msg.error.message}`));
+        send({ jsonrpc: '2.0', method: 'initialized' });
+        send({ jsonrpc: '2.0', id: ++reqId, method: 'account/rateLimits/read' });
+      } else if (msg.id === 2) {
+        if (msg.error) return finish(new Error(`rateLimits/read: ${msg.error.message}`));
+        finish(null, msg.result);
+      }
+    });
+    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'dispatch', title: 'Dispatch', version: '0.1.0' } } });
+  });
+}
+
+function mapCodexRateLimitWindow(win) {
+  if (!win) return null;
+  return {
+    usedPct: win.usedPercent ?? win.used_percent ?? win.used_percentage,
+    resetsAt: win.resetsAt ?? win.resets_at,
+  };
+}
+
+async function probeCodexUsage() {
+  const at = new Date().toISOString();
+  try {
+    const body = await fetchCodexRateLimits();
+    const snap = body?.rateLimitsByLimitId?.codex || body?.rateLimits;
+    if (!snap) throw new Error('rate limits missing');
+    setProviderUsage('codex', {
+      fiveHour: mapCodexRateLimitWindow(snap.primary),
+      weekly: mapCodexRateLimitWindow(snap.secondary),
+      at,
+      source: 'codex-app-server',
+    });
+    return USAGE.codex;
+  } catch (e) {
+    setProviderUsage('codex', {
+      fiveHour: USAGE.codex.fiveHour,
+      weekly: USAGE.codex.weekly,
+      at,
+      source: USAGE.codex.source || 'codex-app-server',
+      error: e.message,
+    });
+    return USAGE.codex;
+  }
+}
+
+Promise.allSettled([probeClaudeUsage(), probeCodexUsage()]).then(() => broadcast({ type: 'usage-update', usage: USAGE })).catch(() => {});
+setInterval(() => {
+  Promise.allSettled([probeClaudeUsage(), probeCodexUsage()]).then(() => broadcast({ type: 'usage-update', usage: USAGE })).catch(() => {});
+}, 5 * 60 * 1000);
 
 // ---- auto-dispatch scheduler ----
 // Every tick (60s): fire tickets whose scheduledAt has come due. Every sweep interval
@@ -205,6 +341,7 @@ app.get('/api/state', (_req, res) => {
     tickets: [...store.tickets.values()],
     registry: REGISTRY,
     health,
+    usage: USAGE,
     runs: runner.snapshot(),
     scheduler: {
       autoDispatch: store.board.settings.autoDispatch !== false,
@@ -215,7 +352,8 @@ app.get('/api/state', (_req, res) => {
 });
 
 app.post('/api/probe', async (_req, res) => {
-  health = await probe();
+  const [nextHealth] = await Promise.all([probe(), probeClaudeUsage(), probeCodexUsage()]);
+  health = nextHealth;
   broadcast({ type: 'state-changed' });
   res.json(health);
 });
@@ -238,6 +376,86 @@ app.post('/api/notify/test', async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     res.status(502).json({ error: e.message });
+  }
+});
+
+app.get('/api/secrets', (_req, res) => {
+  try {
+    res.json({ path: ENV_FILE, entries: envEntries(ENV_FILE) });
+  } catch (e) {
+    res.status(500).json({ error: `failed to read secrets: ${e.message}` });
+  }
+});
+
+app.post('/api/secrets', (req, res) => {
+  try {
+    const key = validateEnvKey(req.body?.key);
+    const value = String(req.body?.value ?? '');
+    const entries = upsertEnvFileValue(ENV_FILE, key, value);
+    broadcast({ type: 'state-changed' });
+    res.json({ path: ENV_FILE, entries });
+  } catch (e) {
+    res.status(400).json({ error: e.message || 'failed to save secret' });
+  }
+});
+
+app.delete('/api/secrets/:key', (req, res) => {
+  try {
+    const key = validateEnvKey(req.params.key);
+    const entries = deleteEnvFileValue(ENV_FILE, key);
+    broadcast({ type: 'state-changed' });
+    res.json({ path: ENV_FILE, entries });
+  } catch (e) {
+    res.status(400).json({ error: e.message || 'failed to delete secret' });
+  }
+});
+
+app.get('/api/system-prompt', (_req, res) => {
+  try {
+    res.json({ path: SYSTEM_FILE, content: readSystemPrompt() });
+  } catch (e) {
+    res.status(500).json({ error: `failed to read system prompt: ${e.message}` });
+  }
+});
+
+app.put('/api/system-prompt', (req, res) => {
+  try {
+    if (typeof req.body?.content !== 'string') return res.status(400).json({ error: 'content required' });
+    if (Buffer.byteLength(req.body.content, 'utf8') > SYSTEM_LIMIT_BYTES) {
+      return res.status(413).json({ error: 'system prompt is too large' });
+    }
+    writeTextAtomic(SYSTEM_FILE, req.body.content.endsWith('\n') ? req.body.content : `${req.body.content}\n`);
+    broadcast({ type: 'state-changed' });
+    res.json({ path: SYSTEM_FILE, content: readSystemPrompt() });
+  } catch (e) {
+    res.status(500).json({ error: `failed to save system prompt: ${e.message}` });
+  }
+});
+
+app.get('/api/fs/dirs', (req, res) => {
+  const requested = String(req.query.path || store.board.settings.defaultWorkspace || os.homedir());
+  const expanded = requested === '~' ? os.homedir() : requested.replace(/^~(?=\/|$)/, os.homedir());
+  const target = path.resolve(expanded);
+  const parent = path.dirname(target);
+  const fallback = fs.existsSync(target) ? target : (fs.existsSync(parent) ? parent : os.homedir());
+  try {
+    const st = fs.statSync(fallback);
+    if (!st.isDirectory()) return res.status(400).json({ error: 'path is not a directory' });
+    const dirs = fs.readdirSync(fallback, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && !d.name.startsWith('.'))
+      .map((d) => d.name)
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+      .slice(0, 300)
+      .map((name) => ({ name, path: path.join(fallback, name) }));
+    res.json({
+      path: fallback,
+      parent: path.dirname(fallback),
+      home: os.homedir(),
+      defaultWorkspace: store.board.settings.defaultWorkspace,
+      dirs,
+    });
+  } catch (e) {
+    res.status(400).json({ error: `cannot read directory: ${e.message}` });
   }
 });
 

@@ -62,7 +62,7 @@ const CACHE_VERSION = 2;
 
 /* ================= source 1a: Anthropic Models API (OAuth) ================= */
 
-function readClaudeOAuthToken() {
+export function readClaudeOAuthToken() {
   // Claude Code refreshes this file itself; read fresh every time, never cache or log it.
   const creds = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8'));
   const oauth = creds.claudeAiOauth || creds;

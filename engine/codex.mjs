@@ -2,6 +2,7 @@
 // Sessions: session/thread id captured from --json events; later runs use `codex exec resume <id>`.
 // Final message: written to a file via -o (more reliable than scraping events across versions).
 import path from 'node:path';
+import { CODEX_CONTEXT_WINDOW } from './limits.mjs';
 
 export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace }) {
   const lastMsgFile = path.join(dataDir, 'last-message.txt');
@@ -42,6 +43,17 @@ export function parseLine(line, state) {
     || (obj.type === 'session.created' ? obj.session?.id : null);
   if (sid) state.sessionId = sid;
 
+  if (obj.method === 'thread/tokenUsage/updated' && obj.params?.tokenUsage) {
+    applyThreadTokenUsage(obj.params.tokenUsage, state);
+    return null;
+  }
+
+  const tokenCount = obj.type === 'token_count' ? obj : (obj.msg?.type === 'token_count' ? obj.msg : null);
+  if (tokenCount) {
+    applyTokenCount(tokenCount, state);
+    return null;
+  }
+
   // Current schema
   if (obj.type === 'thread.started') return { kind: 'system', text: `codex thread ${obj.thread_id}` };
   if (obj.type === 'item.completed' && obj.item) {
@@ -54,6 +66,7 @@ export function parseLine(line, state) {
   }
   if (obj.type === 'turn.completed') {
     state.exitInfo = { usage: obj.usage };
+    if (!state.usage && obj.usage) applyUsageFallback(obj.usage, state);
     return { kind: 'result', text: 'turn completed' };
   }
   if (obj.type === 'turn.failed') {
@@ -70,6 +83,50 @@ export function parseLine(line, state) {
     if (msg.type === 'error') return { kind: 'error', text: msg.message || 'error' };
   }
   return null;
+}
+
+function applyThreadTokenUsage(tokenUsage, state) {
+  const total = tokenUsage.total || tokenUsage.total_token_usage || tokenUsage.totalTokenUsage;
+  const model = tokenUsage.model || state.model || '';
+  applyUsageFallback(total, state, {
+    model,
+    windowTokens: tokenUsage.modelContextWindow || tokenUsage.model_context_window || CODEX_CONTEXT_WINDOW,
+  });
+}
+
+function applyTokenCount(obj, state) {
+  const info = obj.info || obj.token_count || obj;
+  const usage = info.total_token_usage || info.totalTokenUsage || info.last_token_usage || info.lastTokenUsage || info.usage;
+  const total = usage?.total_tokens ?? usage?.totalTokens;
+  const model = info.model || obj.model || state.model || '';
+  if (model) state.model = model;
+  state.rateLimits = obj.rate_limits || obj.rateLimits || info.rate_limits || info.rateLimits || state.rateLimits;
+  if (Number.isFinite(Number(total))) {
+    state.usage = {
+      contextTokens: Number(total),
+      windowTokens: Number(info.model_context_window || info.modelContextWindow || CODEX_CONTEXT_WINDOW),
+      model,
+      at: new Date().toISOString(),
+    };
+  } else if (usage) {
+    applyUsageFallback(usage, state, { model, windowTokens: info.model_context_window || info.modelContextWindow });
+  }
+}
+
+function applyUsageFallback(usage, state, { model = state.model || '', windowTokens = CODEX_CONTEXT_WINDOW } = {}) {
+  if (!usage) return;
+  const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+  const total = usage.total_tokens ?? usage.totalTokens;
+  const contextTokens = Number.isFinite(Number(total))
+    ? Number(total)
+    : num(usage.input_tokens) + num(usage.cached_input_tokens) + num(usage.output_tokens);
+  if (!contextTokens) return;
+  state.usage = {
+    contextTokens,
+    windowTokens: Number(windowTokens || CODEX_CONTEXT_WINDOW),
+    model,
+    at: new Date().toISOString(),
+  };
 }
 
 function truncate(s, n = 200) {

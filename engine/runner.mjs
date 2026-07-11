@@ -8,8 +8,23 @@ import * as claude from './claude.mjs';
 import * as codex from './codex.mjs';
 import { composePrompt, parseControlBlock } from './contract.mjs';
 import { telegramConfig, sendTelegram, renderMessage } from './notify.mjs';
+import { applyCodexRateLimits, USAGE } from './usage.mjs';
+import { contextSnapshot } from './limits.mjs';
+import { REGISTRY } from '../registry.mjs';
 
 const ADAPTERS = { claude, codex };
+const VALID_PERMISSIONS = {
+  claude: ['auto', 'acceptEdits', 'manual', 'bypassPermissions'],
+  codex: ['read-only', 'workspace-write', 'danger-full-access'],
+};
+const DEFAULT_PERMISSIONS = {
+  claude: 'acceptEdits',
+  codex: 'workspace-write',
+};
+const PROVIDER_MODEL_PREFIX = {
+  claude: /^claude-/,
+  codex: /^gpt-/,
+};
 const MAX_BOUNCES = 3;
 const MAX_HOLDS = 3; // a phase that holds this many times without advancing is parked for a human
 const POLL_MS = 1000;
@@ -56,6 +71,29 @@ function tailFile(file, n = 800) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function normalizeModelAndEffort(h) {
+  const reg = REGISTRY[h.type];
+  if (!reg) return h;
+
+  const models = reg.models || [];
+  const modelKnown = models.some((m) => m.id === h.model);
+  const otherProviderModel = Object.entries(PROVIDER_MODEL_PREFIX)
+    .some(([type, prefix]) => type !== h.type && prefix.test(h.model || ''));
+  if (!h.model || otherProviderModel) h.model = models[0]?.id || '';
+
+  const model = models.find((m) => m.id === h.model);
+  const efforts = (model && Array.isArray(model.efforts) && model.efforts.length) ? model.efforts
+    : (model && Array.isArray(model.efforts)) ? []
+    : (modelKnown || !h.model) ? (reg.efforts || [])
+    : null;
+  if (efforts && h.effort && !efforts.includes(h.effort)) {
+    h.effort = model?.defaultEffort && efforts.includes(model.defaultEffort)
+      ? model.defaultEffort
+      : (efforts[0] || '');
+  }
+  return h;
 }
 
 export class Runner {
@@ -116,9 +154,14 @@ export class Runner {
   // comment composer to steer who picks the ticket up next).
   harnessFor(ticket, column) {
     const h = { ...this.store.effectiveHarness(ticket, column), ...(ticket.oneShotHarness || {}) };
+    normalizeModelAndEffort(h);
+    const validPerms = VALID_PERMISSIONS[h.type] || [];
+    if (validPerms.length && !validPerms.includes(h.permissions)) {
+      h.permissions = DEFAULT_PERMISSIONS[h.type];
+    }
     // READ-ONLY tickets: force sandbox to look-but-don't-touch, whatever the column configured.
     if (ticket.readOnly && h.type !== 'human') {
-      h.permissions = h.type === 'codex' ? 'read-only' : 'plan';
+      h.permissions = h.type === 'codex' ? 'read-only' : 'manual';
     }
     return h;
   }
@@ -336,6 +379,7 @@ export class Runner {
     ticket.status = 'running';
     if (!ticket.startedAt) ticket.startedAt = startedAt; // lifecycle clock, if a move didn't set it
     delete ticket.stuckReason;   // fresh run — clear whatever stuck the last attempt
+    delete ticket.retryAt;       // manual/fresh runs replace any parked rate-limit retry
     delete ticket.pendingWake;   // this run IS the wake
     ticket.currentRun = { column: column.name, harness: harness.type, model: harness.model, startedAt, transcriptFile };
     ticket.activeRun = activeRun;
@@ -388,6 +432,8 @@ export class Runner {
       buf: Buffer.alloc(0),
       pollTimer: null,
       killTimer: null,
+      lastContextPct: null,
+      lastRateLimitSig: null,
     };
     this.running.set(ticket.id, entry);
     if (poll) {
@@ -438,17 +484,20 @@ export class Runner {
       const data = entry.buf.length ? Buffer.concat([entry.buf, chunk]) : chunk;
       let pos = 0;
       let idx = data.indexOf(10, pos);
+      let consumedLine = false;
       while (idx !== -1) {
         const lineEnd = fileStart + idx + 1;
         const line = data.subarray(pos, idx).toString('utf8');
         const publish = lineEnd > entry.committedOffset;
         this._consumeLine(ticketId, entry, line, publish);
         if (publish) entry.committedOffset = lineEnd;
+        consumedLine = true;
         pos = idx + 1;
         idx = data.indexOf(10, pos);
       }
       entry.buf = data.subarray(pos);
       atomicWrite(path.join(entry.runDir, 'offset'), String(entry.committedOffset));
+      if (consumedLine) this._flushLiveTelemetry(ticketId, entry);
     } finally {
       fs.closeSync(fd);
     }
@@ -465,6 +514,30 @@ export class Runner {
       if (!publish) continue;
       entry.transcript.write(JSON.stringify({ ev }) + '\n');
       this.broadcast({ type: 'run-event', ticketId, column: entry.columnName, event: ev });
+    }
+  }
+
+  _flushLiveTelemetry(ticketId, entry) {
+    const snap = contextSnapshot(entry.state.usage);
+    if (snap && snap.pct !== entry.lastContextPct) {
+      entry.lastContextPct = snap.pct;
+      this.broadcast({
+        type: 'context-update',
+        ticketId,
+        harnessType: this.store.tickets.get(ticketId)?.activeRun?.harnessType,
+        context: snap,
+      });
+    }
+
+    const harnessType = this.store.tickets.get(ticketId)?.activeRun?.harnessType;
+    if (harnessType === 'codex' && entry.state.rateLimits) {
+      const sig = JSON.stringify(entry.state.rateLimits);
+      if (sig !== entry.lastRateLimitSig) {
+        entry.lastRateLimitSig = sig;
+        if (applyCodexRateLimits(entry.state.rateLimits, { at: nowIso(), source: 'codex-stream' })) {
+          this.broadcast({ type: 'usage-update', usage: USAGE });
+        }
+      }
     }
   }
 
@@ -501,6 +574,14 @@ export class Runner {
     ticket.lastRunEndedAt = exitInfo.endedAt || nowIso();
     const sessionId = state.sessionId || ar.newSessionId || cmd.newSessionId;
     if (sessionId && harnessType) ticket.sessions[harnessType] = sessionId;
+    const usageSnap = contextSnapshot(state.usage);
+    if (usageSnap && harnessType) {
+      ticket.context ||= {};
+      ticket.context[harnessType] = usageSnap;
+    }
+    if (harnessType === 'codex' && state.rateLimits && applyCodexRateLimits(state.rateLimits, { at: nowIso(), source: 'codex-finalize' })) {
+      this.broadcast({ type: 'usage-update', usage: USAGE });
+    }
     delete ticket.activeRun;
     delete ticket.currentRun;
     this._closeEntry(ticketId);

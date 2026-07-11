@@ -24,7 +24,9 @@ systemctl --user daemon-reload
 systemctl --user restart dispatch
 ```
 
-Optional Telegram alerts read secrets from `/home/Starbird/dispatch-data/dispatch.env`, which is loaded by the service unit and should not be committed:
+Dispatch also reads repo-local secrets from `.env` at startup. The file is git-ignored and editable from Settings. Values from the systemd environment still win when already set.
+
+Optional Telegram alerts can still read secrets from `/home/Starbird/dispatch-data/dispatch.env`, which is loaded by the service unit and should not be committed:
 
 ```bash
 TELEGRAM_BOT_TOKEN=...
@@ -43,6 +45,11 @@ DISPATCH_PUBLIC_URL=http://starbird:4400
 ## Data
 
 Everything lives in `~/dispatch-data/` as plain files: `board.json`, `tickets/<id>/ticket.json`, `DOSSIER.md`, `transcripts/*.jsonl`. Grep away.
+
+Repo-local operator settings live alongside the app:
+
+- `.env` stores local secrets and is managed from Settings. It is never committed.
+- `SYSTEM.md` is the editable root system prompt. `CLAUDE.md` and `AGENTS.md` point agents at it.
 
 ## Layout
 

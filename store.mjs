@@ -156,6 +156,7 @@ export class Store {
         t.activeMs = 0;
         t.activeSince = (t.activeRun && t.startedAt && !t.completedAt) ? Date.parse(t.startedAt) : null;
       }
+      if (!t.context) t.context = {};
       this.tickets.set(t.id, t);
     }
   }
@@ -214,6 +215,7 @@ export class Store {
       readOnly: Boolean(readOnly),
       skip: Array.isArray(skip) ? skip.filter((cid) => this.column(cid)) : [],
       sessions: { claude: null, codex: null },
+      context: {},
       status: 'idle',
       bounces: 0,
       humanTest: null,

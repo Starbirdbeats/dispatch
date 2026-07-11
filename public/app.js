@@ -5,6 +5,7 @@ const S = {
   data: null,          // /api/state payload
   modal: null,         // {type:'ticket'|'column'|'new'|'settings', id?, tab?}
   live: {},            // ticketId -> normalized run events (session-local)
+  liveContext: {},     // ticketId -> latest live context snapshot
   transcript: null,    // current transcript tab view state
   commentDraft: '',
 };
@@ -137,6 +138,17 @@ function connectWS() {
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'state-changed') loadState().catch(console.error);
+    if (msg.type === 'usage-update') {
+      S.data.usage = msg.usage;
+      renderTopbar();
+    }
+    if (msg.type === 'context-update') {
+      S.liveContext[msg.ticketId] = msg.context;
+      if (S.modal?.type === 'ticket' && S.modal.id === msg.ticketId && $('#diag-banner')) {
+        const t = S.data.tickets.find((x) => x.id === msg.ticketId);
+        if (t) renderDiagBanner(t);
+      }
+    }
     if (msg.type === 'run-event') {
       (S.live[msg.ticketId] ||= []).push(msg.event);
       if (S.live[msg.ticketId].length > 800) S.live[msg.ticketId].shift();
@@ -159,7 +171,7 @@ const archivedTickets = () => S.data.tickets.filter((t) => t.archived)
 const harnessLabel = (h) => h.type === 'human' ? 'HUMAN' : `${h.type} · ${h.model || 'default'} · ${h.effort || 'default'}`;
 const BY_LABEL = { claude: 'CLAUDE CODE', codex: 'CODEX', human: 'YOU', engine: 'ENGINE' };
 // ↻ button placed beside model dropdowns — fetches the latest model releases into the registry
-const refreshBtn = () => '<button type="button" class="refresh-models" title="Fetch latest model releases from the provider">↻</button>';
+const refreshBtn = () => '<button type="button" class="refresh-models" title="Fetch latest model releases from the provider"><span>↻</span></button>';
 async function refreshModelRegistry() {
   toast('FETCHING LATEST MODELS…');
   document.querySelectorAll('.refresh-models').forEach((b) => b.classList.add('spin'));
@@ -234,6 +246,100 @@ const activeElapsed = (t) => (t.activeMs || 0) + (t.activeSince ? Date.now() - t
 const activeClockSpan = (t) => `<span data-active-base="${t.activeMs || 0}" data-active-since="${t.activeSince || ''}">${esc(fmtDur(activeElapsed(t)))}</span>`;
 const isClockPaused = (t) => Boolean(t.startedAt) && !t.completedAt && !t.activeSince;
 
+function clamp(n, min = 0, max = 100) {
+  return Math.max(min, Math.min(max, Number(n)));
+}
+
+function pctText(n) {
+  if (!Number.isFinite(Number(n))) return '—';
+  const v = Math.round(Number(n) * 10) / 10;
+  return Number.isInteger(v) ? `${v}%` : `${v.toFixed(1)}%`;
+}
+
+function meterTone(remainingPct) {
+  if (!Number.isFinite(Number(remainingPct))) return 'muted';
+  if (remainingPct < 10) return 'stuck';
+  if (remainingPct < 25) return 'warn';
+  return 'live';
+}
+
+function meterHTML(fillPct, remainingPct) {
+  const fill = Number.isFinite(Number(fillPct)) ? clamp(fillPct) : 0;
+  return `<span class="meter tone-${meterTone(remainingPct)}" style="--pct:${fill}%"><span></span></span>`;
+}
+
+function fmtTokens(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(v >= 10_000_000 ? 0 : 1)}m`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(v >= 100_000 ? 0 : 1)}k`;
+  return String(Math.round(v));
+}
+
+function contextStats(ctx) {
+  if (!ctx) return null;
+  const pct = Number.isFinite(Number(ctx.pct))
+    ? clamp(ctx.pct)
+    : (ctx.windowTokens ? clamp((Number(ctx.contextTokens) / Number(ctx.windowTokens)) * 100) : null);
+  if (pct == null || !Number.isFinite(pct)) return null;
+  return { usedPct: pct, remainingPct: clamp(100 - pct) };
+}
+
+function contextLineHTML(type, ctx, { live = false } = {}) {
+  const stats = contextStats(ctx);
+  if (!stats) return '';
+  const title = [ctx.model, ctx.at ? `updated ${fmtTs(ctx.at)}` : ''].filter(Boolean).join(' · ');
+  return `<div class="context-line" title="${esc(title)}">
+    <span class="context-name">${esc(type)}</span>
+    ${meterHTML(stats.usedPct, stats.remainingPct)}
+    <span class="context-num">${fmtTokens(ctx.contextTokens)} / ${fmtTokens(ctx.windowTokens)} · ${live ? `${pctText(stats.usedPct)} full · ` : ''}${pctText(stats.remainingPct)} left</span>
+  </div>`;
+}
+
+function contextOverviewHTML(t) {
+  const lines = ['claude', 'codex']
+    .map((type) => t.context?.[type] ? contextLineHTML(type, t.context[type]) : '')
+    .filter(Boolean);
+  return lines.length ? `<div class="context-list">${lines.join('')}</div>` : '<span class="muted">no runs yet</span>';
+}
+
+function liveContextHTML(t) {
+  const runningType = t.currentRun?.harness;
+  if (!runningType) return '';
+  const ctx = S.liveContext[t.id] || t.context?.[runningType];
+  if (!ctx) return '';
+  return `<div class="diag-context">${contextLineHTML(runningType, ctx, { live: true })}</div>`;
+}
+
+function usageWindowHTML(label, win, provider) {
+  if (!win || !Number.isFinite(Number(win.usedPct))) {
+    return `<span class="usage-window missing"><span class="usage-key">${label}</span><b>—</b></span>`;
+  }
+  const remaining = clamp(100 - Number(win.usedPct));
+  const title = [
+    `${provider} ${label}: ${pctText(remaining)} remaining`,
+    `${pctText(win.usedPct)} used`,
+    win.resetsAt ? `resets ${fmtTs(win.resetsAt)}` : '',
+  ].filter(Boolean).join(' · ');
+  return `<span class="usage-window tone-${meterTone(remaining)}" title="${esc(title)}">
+    <span class="usage-key">${label}</span>${meterHTML(remaining, remaining)}<b>${pctText(remaining)}</b>
+  </span>`;
+}
+
+function usageProviderHTML(provider) {
+  const u = S.data.usage?.[provider] || {};
+  const title = [u.source, u.at ? `updated ${fmtTs(u.at)}` : '', u.error ? `error: ${u.error}` : ''].filter(Boolean).join(' · ');
+  return `<div class="usage-provider" title="${esc(title)}">
+    <span class="usage-name">${provider}</span>
+    ${usageWindowHTML('5H', u.fiveHour, provider)}
+    ${usageWindowHTML('7D', u.weekly, provider)}
+  </div>`;
+}
+
+function usageStripHTML() {
+  return `${usageProviderHTML('claude')}${usageProviderHTML('codex')}`;
+}
+
 // kv rows for the lifecycle clock: live ACTIVE elapsed, or frozen COMPLETED + TOOK.
 function timingRowHTML(t) {
   if (t.completedAt) {
@@ -302,6 +408,7 @@ function renderTopbar() {
   $('#health').innerHTML =
     `<span class="${h.claude?.ok ? 'ok' : 'bad'}">CLAUDE ${h.claude?.ok ? (h.claude.version || 'OK') : 'OFFLINE'}</span>` +
     ` &nbsp;///&nbsp; <span class="${h.codex?.ok ? 'ok' : 'bad'}">CODEX ${h.codex?.ok ? (h.codex.version || 'OK') : 'OFFLINE'}</span>`;
+  $('#usage').innerHTML = usageStripHTML();
   const r = S.data.runs;
   const cap = S.data.board.settings.maxConcurrent ?? 2;
   const paused = cap <= 0;
@@ -564,6 +671,7 @@ function renderDiagBanner(t) {
       <span class="diag-head">${esc(dx.headline)}</span>
     </div>
     ${dx.detail ? `<div class="diag-detail">${esc(dx.detail)}</div>` : ''}
+    ${dx.kind === 'running' ? liveContextHTML(t) : ''}
     ${acts.length ? `<div class="diag-acts">${acts.join('')}${dx.stuck ? `<span class="diag-hint">or answer in the comment box below — that also wakes an agent</span>` : ''}</div>` : ''}`;
 
   for (const b of el.querySelectorAll('[data-dx]')) {
@@ -603,6 +711,69 @@ function harnessOptions(kind, type, current, defaultLabel, modelId) {
   return opts.join('');
 }
 
+function registryModels(type) {
+  return S.data.registry[type]?.models || [];
+}
+
+function modelSupportsEffort(type, modelId, effort) {
+  if (!effort) return true;
+  const reg = S.data.registry[type];
+  const m = modelId ? reg?.models?.find((x) => x.id === modelId) : null;
+  const efforts = (m && Array.isArray(m.efforts) && m.efforts.length) ? m.efforts
+    : (m && Array.isArray(m.efforts)) ? []
+    : (reg?.efforts || []);
+  return efforts.includes(effort);
+}
+
+function firstEffortFor(type, modelId) {
+  const reg = S.data.registry[type];
+  const m = modelId ? reg?.models?.find((x) => x.id === modelId) : null;
+  const efforts = (m && Array.isArray(m.efforts) && m.efforts.length) ? m.efforts
+    : (m && Array.isArray(m.efforts)) ? []
+    : (reg?.efforts || []);
+  if (m?.defaultEffort && efforts.includes(m.defaultEffort)) return m.defaultEffort;
+  return efforts[0] || '';
+}
+
+function normalizeHarnessChoice(choice, fallback = {}) {
+  const type = choice.type || fallback.type || 'claude';
+  if (type === 'human') return { ...choice, type, model: '', effort: '', permissions: '' };
+
+  const models = registryModels(type);
+  const fallbackModel = models.some((m) => m.id === fallback.model) ? fallback.model : '';
+  const chosenModel = models.some((m) => m.id === choice.model) ? choice.model : '';
+  const model = chosenModel || fallbackModel || models[0]?.id || '';
+
+  const fallbackEffort = modelSupportsEffort(type, model, fallback.effort) ? fallback.effort : '';
+  const effort = modelSupportsEffort(type, model, choice.effort) ? (choice.effort || fallbackEffort) : (fallbackEffort || firstEffortFor(type, model));
+
+  const perms = S.data.registry[type]?.permissions || [];
+  const fallbackPerm = perms.includes(fallback.permissions) ? fallback.permissions : '';
+  const permissions = perms.includes(choice.permissions) ? (choice.permissions || fallbackPerm) : (fallbackPerm || perms[0] || '');
+
+  return { ...choice, type, model, effort, permissions };
+}
+
+function normalizeOverrideForColumn(o, c) {
+  const type = o.type || c.harness.type;
+  const normalized = normalizeHarnessChoice(
+    { type, model: o.model || '', effort: o.effort || '', permissions: o.permissions || '' },
+    c.harness,
+  );
+  return {
+    type,
+    model: o.model ? normalized.model : (normalized.model !== c.harness.model ? normalized.model : ''),
+    effort: o.effort ? normalized.effort : (normalized.effort !== c.harness.effort ? normalized.effort : ''),
+    permissions: o.permissions ? normalized.permissions : (normalized.permissions !== c.harness.permissions ? normalized.permissions : ''),
+  };
+}
+
+function setOverrideDraft(draft, colId, next) {
+  const cleaned = Object.fromEntries(Object.entries(next).filter(([, v]) => v));
+  if (Object.keys(cleaned).length) draft[colId] = cleaned;
+  else delete draft[colId];
+}
+
 function handleCustomModel(sel) {
   if (sel.value !== '__custom') return true;
   const v = prompt('Model id (free text — anything the CLI accepts):');
@@ -617,6 +788,59 @@ function handleCustomModel(sel) {
   return false;
 }
 
+const workspacePicker = (id, value) => `
+  <div class="workspace-picker" data-wp="${esc(id)}">
+    <input id="${esc(id)}" value="${esc(value)}" autocomplete="off">
+    <div class="workspace-nav">
+      <button type="button" class="btn wp-up" title="Parent folder">[ UP ]</button>
+      <button type="button" class="btn wp-home" title="Home folder">[ HOME ]</button>
+      <button type="button" class="btn wp-refresh" title="Refresh folders">[ ↻ ]</button>
+    </div>
+    <select class="wp-dirs" aria-label="Folders under workspace path"><option value="">loading folders…</option></select>
+  </div>`;
+
+async function refreshWorkspacePicker(box, preferPath) {
+  const input = $('input', box);
+  const select = $('.wp-dirs', box);
+  const path = preferPath || input.value.trim() || S.data.board.settings.defaultWorkspace || '/';
+  select.innerHTML = '<option value="">loading folders…</option>';
+  try {
+    const r = await api(`/api/fs/dirs?path=${encodeURIComponent(path)}`);
+    box.dataset.path = r.path;
+    box.dataset.parent = r.parent;
+    box.dataset.home = r.home;
+    input.value = r.path;
+    select.innerHTML = [
+      `<option value="">${esc(r.dirs.length ? `choose folder inside ${r.path}` : `no folders inside ${r.path}`)}</option>`,
+      ...r.dirs.map((d) => `<option value="${esc(d.path)}">${esc(d.name)}/</option>`),
+    ].join('');
+  } catch (e) {
+    select.innerHTML = `<option value="">${esc(e.message || 'cannot read folder')}</option>`;
+  }
+}
+
+function wireWorkspacePicker(id) {
+  const input = $(`#${id}`);
+  const box = input?.closest('.workspace-picker');
+  if (!box) return;
+  let timer = null;
+  const schedule = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => refreshWorkspacePicker(box), 250);
+  };
+  refreshWorkspacePicker(box);
+  input.onchange = schedule;
+  input.oninput = schedule;
+  $('.wp-dirs', box).onchange = (e) => {
+    if (!e.target.value) return;
+    input.value = e.target.value;
+    refreshWorkspacePicker(box, e.target.value);
+  };
+  $('.wp-up', box).onclick = () => refreshWorkspacePicker(box, box.dataset.parent || input.value);
+  $('.wp-home', box).onclick = () => refreshWorkspacePicker(box, box.dataset.home || '~');
+  $('.wp-refresh', box).onclick = () => refreshWorkspacePicker(box);
+}
+
 function renderOverview(body, t) {
   if (S.ovDraft?.id !== t.id) S.ovDraft = { id: t.id, ov: structuredClone(t.overrides || {}) };
   const draft = S.ovDraft.ov;
@@ -624,7 +848,7 @@ function renderOverview(body, t) {
   body.innerHTML = `
     <div class="kv">
       <div class="k">ID</div><div>${t.id}</div>
-      <div class="k">WORKSPACE</div><div><input id="f-ws" value="${esc(t.workspace)}"></div>
+      <div class="k">WORKSPACE</div><div>${workspacePicker('f-ws', t.workspace)}</div>
       <div class="k">SCHEDULED</div><div><input id="f-sched" type="datetime-local" value="${esc(t.scheduledAt || '')}"></div>
       <div class="k">MODE</div><div>
         <label class="check-row inline"><input type="checkbox" id="f-readonly" ${t.readOnly ? 'checked' : ''}> <span>read-only (agents can't modify the repo)</span></label>
@@ -632,6 +856,7 @@ function renderOverview(body, t) {
       </div>
       ${timingRowHTML(t)}
       <div class="k">SESSIONS</div><div>claude: ${t.sessions.claude || '—'}<br>codex: ${t.sessions.codex || '—'}</div>
+      <div class="k">CONTEXT</div><div>${contextOverviewHTML(t)}</div>
     </div>
     <label class="f">HOW TO HUMAN-TEST</label>
     ${t.humanTest ? `<div class="human-test">${formatHumanTest(t.humanTest)}</div>` : '<div class="human-test empty">not provided yet — the Review phase fills this before Done</div>'}
@@ -645,16 +870,24 @@ function renderOverview(body, t) {
       <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div><div class="h">PERMS</div>
       ${agentCols.map((c) => {
         const o = draft[c.id] || {};
-        const effType = o.type || c.harness.type;
+        const n = normalizeOverrideForColumn(o, c);
+        if (n.model !== (o.model || '') || n.effort !== (o.effort || '') || n.permissions !== (o.permissions || '')) {
+          setOverrideDraft(draft, c.id, { ...o, model: n.model, effort: n.effort, permissions: n.permissions });
+        }
+        const effType = n.type;
+        const sameHarnessType = !o.type || o.type === c.harness.type;
+        const defaultModelLabel = sameHarnessType ? `default (${c.harness.model || '—'})` : 'default';
+        const defaultEffortLabel = sameHarnessType ? `default (${c.harness.effort || '—'})` : 'default';
+        const defaultPermsLabel = sameHarnessType ? `default (${c.harness.permissions || '—'})` : 'default';
         return `<div>${esc(c.name)}</div>
           <div><select data-ov="${c.id}:type">
             <option value="">default (${esc(c.harness.type)})</option>
             <option value="claude" ${o.type === 'claude' ? 'selected' : ''}>claude</option>
             <option value="codex" ${o.type === 'codex' ? 'selected' : ''}>codex</option>
           </select></div>
-          <div class="model-cell"><select data-ov="${c.id}:model">${harnessOptions('model', effType, o.model || '', `default (${c.harness.model || '—'})`)}</select>${refreshBtn()}</div>
-          <div><select data-ov="${c.id}:effort">${harnessOptions('effort', effType, o.effort || '', `default (${c.harness.effort || '—'})`, o.model || c.harness.model)}</select></div>
-          <div><select data-ov="${c.id}:permissions">${harnessOptions('permissions', effType, o.permissions || '', `default (${c.harness.permissions || '—'})`)}</select></div>`;
+          <div class="model-cell"><select data-ov="${c.id}:model">${harnessOptions('model', effType, n.model || '', defaultModelLabel)}</select>${refreshBtn()}</div>
+          <div><select data-ov="${c.id}:effort">${harnessOptions('effort', effType, n.effort || '', defaultEffortLabel, n.model || (sameHarnessType ? c.harness.model : ''))}</select></div>
+          <div><select data-ov="${c.id}:permissions">${harnessOptions('permissions', effType, n.permissions || '', defaultPermsLabel)}</select></div>`;
       }).join('')}
     </div></div>
     <div class="hint">claude efforts go up to max; codex up to xhigh. "custom…" under model takes any id the CLI accepts.</div>
@@ -668,9 +901,18 @@ function renderOverview(body, t) {
       if (v) (draft[colId] ||= {})[key] = v;
       else if (draft[colId]) { delete draft[colId][key]; if (!Object.keys(draft[colId]).length) delete draft[colId]; }
       // type changes which models/efforts/perms apply; model changes which efforts apply
-      if (key === 'type' || key === 'model') renderOverview(body, t);
+      if (key === 'type' || key === 'model') {
+        const c = cols().find((x) => x.id === colId);
+        if (c) {
+          const o = draft[colId] || {};
+          const n = normalizeOverrideForColumn(o, c);
+          setOverrideDraft(draft, colId, { ...o, ...(o.type ? { type: o.type } : {}), model: n.model, effort: n.effort, permissions: n.permissions });
+        }
+        renderOverview(body, t);
+      }
     };
   }
+  wireWorkspacePicker('f-ws');
 
   $('#btn-save-ticket').onclick = async () => {
     await api(`/api/tickets/${t.id}`, 'PATCH', {
@@ -730,6 +972,7 @@ function renderActivity(body, t) {
   // harness the pickup will use: current one-shot > column default; dropdowns let you steer it
   const base = { ...effective(t, c), ...(t.oneShotHarness || {}) };
   const hType = base.type === 'human' ? 'claude' : (base.type || 'claude');
+  const wakeChoice = normalizeHarnessChoice({ type: hType, model: base.model || '', effort: base.effort || '' }, {});
 
   // chronological: oldest at top, newest at the bottom next to the input box
   body.innerHTML = `
@@ -749,17 +992,21 @@ function renderActivity(body, t) {
     ${canWake ? `<div class="wake-harness">
       <span class="wake-lbl">picked up by</span>
       <select id="cw-type">${['claude', 'codex'].map((x) => `<option ${x === hType ? 'selected' : ''}>${x}</option>`).join('')}</select>
-      <select id="cw-model">${harnessOptions('model', hType, base.model || '', 'default')}</select>${refreshBtn()}
-      <select id="cw-effort">${harnessOptions('effort', hType, base.effort || '', 'default', base.model)}</select>
+      <select id="cw-model">${harnessOptions('model', hType, wakeChoice.model || '', 'default')}</select>${refreshBtn()}
+      <select id="cw-effort">${harnessOptions('effort', hType, wakeChoice.effort || '', 'default', wakeChoice.model)}</select>
     </div>` : ''}`;
 
   $('#f-comment').oninput = (e) => { S.commentDraft = e.target.value; };
   if (canWake) {
-    $('#cw-type').onchange = () => renderActivity(body, S.data.tickets.find((x) => x.id === t.id) || t);
+    const syncWakeHarness = () => {
+      const h = normalizeHarnessChoice({ type: $('#cw-type').value, model: $('#cw-model').value, effort: $('#cw-effort').value }, {});
+      $('#cw-model').innerHTML = harnessOptions('model', h.type, h.model, 'default');
+      $('#cw-effort').innerHTML = harnessOptions('effort', h.type, h.effort, 'default', h.model);
+    };
+    $('#cw-type').onchange = syncWakeHarness;
     $('#cw-model').onchange = () => {
       if (!handleCustomModel($('#cw-model'))) return;
-      // refill efforts for the chosen model
-      $('#cw-effort').innerHTML = harnessOptions('effort', $('#cw-type').value, $('#cw-effort').value, 'default', $('#cw-model').value);
+      syncWakeHarness();
     };
   }
   $('#btn-comment').onclick = async () => {
@@ -861,8 +1108,9 @@ function appendTranscriptLine(ev, { box = $('#transcript'), preserveScroll = tru
 function renderColumnModal(draftOverride) {
   const c = S.data.board.columns.find((x) => x.id === S.modal.id);
   if (!c) return closeModal();
-  const h = draftOverride || c.harness;
-  const type = h.type || 'human';
+  const rawH = draftOverride || c.harness;
+  const type = rawH.type || 'human';
+  const h = type === 'human' ? rawH : normalizeHarnessChoice(rawH, {});
   shell(`PHASE CONFIG /// ${esc(c.name)}`, `
     <div class="panel-body">
       <label class="f">NAME</label><input id="c-name" value="${esc(draftOverride?._name ?? c.name)}">
@@ -909,7 +1157,7 @@ function renderColumnModal(draftOverride) {
   // switching harness re-renders with the matching model/effort/permission lists
   $('#c-type').onchange = () => {
     const d = collectDraft();
-    d.model = ''; d.effort = ''; d.permissions = '';
+    Object.assign(d, normalizeHarnessChoice({ type: d.type }, {}));
     renderColumnModal(d);
   };
   $('#c-model').onchange = () => { if (handleCustomModel($('#c-model'))) renderColumnModal(collectDraft()); }; // model change re-filters efforts
@@ -940,7 +1188,7 @@ function renderNewModal() {
       <label class="f">TITLE</label><input id="n-title" autofocus>
       <label class="f">DESCRIPTION / BRIEF</label><textarea id="n-desc" style="min-height:120px"></textarea>
       <label class="f">WORKSPACE (absolute path — the repo agents will work in)</label>
-      <input id="n-ws" value="${esc(S.data.board.settings.defaultWorkspace)}">
+      ${workspacePicker('n-ws', S.data.board.settings.defaultWorkspace)}
       <label class="f">START IN</label>
       <select id="n-col">${cols().map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
       <label class="f">SCHEDULE FOR (optional — leave blank for the next backlog sweep)</label>
@@ -960,6 +1208,7 @@ function renderNewModal() {
     S.newAttachments = (S.newAttachments || []).concat(await readUploads(files));
     renderStagedAttachments();
   });
+  wireWorkspacePicker('n-ws');
   $('#n-readonly').onchange = (e) => { $('#n-skip-wrap').hidden = !e.target.checked; };
   renderStagedAttachments();
   $('#n-create').onclick = () => {
@@ -1023,6 +1272,109 @@ function renderArchiveModal() {
   }
 }
 
+function secretSource(entry) {
+  if (entry.inFile && entry.inRuntime) return '.env + runtime';
+  if (entry.inFile) return '.env';
+  return 'runtime';
+}
+
+function secretRows(entries = []) {
+  if (!entries.length) return '<div class="secret-empty">NO ENVIRONMENT ENTRIES FOUND</div>';
+  return `<div class="secrets-grid">
+    <div class="h">KEY</div><div class="h">VALUE</div><div class="h">SOURCE</div><div class="h">ACTIONS</div>
+    ${entries.map((entry) => `<div class="secret-key">${esc(entry.key)}</div>
+      <div><input class="secret-value" type="password" value="${esc(entry.value)}" autocomplete="off" spellcheck="false"></div>
+      <div><span class="secret-source">${esc(secretSource(entry))}</span></div>
+      <div class="secret-actions" data-key="${esc(entry.key)}">
+        <button type="button" class="btn" data-secret-reveal>[ SHOW ]</button>
+        <button type="button" class="btn" data-secret-save>[ SAVE ]</button>
+        <button type="button" class="btn btn-danger" data-secret-delete ${entry.inFile ? '' : 'disabled title="runtime-only; save first to manage it in .env"'}>[ DELETE ]</button>
+      </div>`).join('')}
+  </div>`;
+}
+
+function renderSecretsPanel(data) {
+  const box = $('#s-secrets-panel');
+  if (!box) return;
+  box.innerHTML = `
+    <div class="secret-new">
+      <input id="s-secret-key" placeholder="NEW_SECRET_KEY" autocomplete="off" spellcheck="false">
+      <input id="s-secret-value" type="password" placeholder="value" autocomplete="off" spellcheck="false">
+      <button type="button" class="btn" id="s-secret-new-reveal">[ SHOW ]</button>
+      <button type="button" class="btn btn-accent" id="s-secret-add">[ ADD ]</button>
+    </div>
+    <div class="hint">FILE: <code>${esc(data.path || '.env')}</code>. Runtime-only keys are visible but delete is disabled until saved into .env.</div>
+    ${secretRows(data.entries || [])}`;
+  wireSecretsPanel();
+}
+
+function wireSecretsPanel() {
+  const toggle = (input, button) => {
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    button.textContent = showing ? '[ SHOW ]' : '[ HIDE ]';
+  };
+  const newValue = $('#s-secret-value');
+  $('#s-secret-new-reveal').onclick = () => toggle(newValue, $('#s-secret-new-reveal'));
+  $('#s-secret-add').onclick = async () => {
+    const key = $('#s-secret-key').value.trim();
+    const value = $('#s-secret-value').value;
+    try {
+      renderSecretsPanel(await api('/api/secrets', 'POST', { key, value }));
+      toast('SECRET SAVED');
+    } catch (e) { alertErr(e); }
+  };
+  for (const btn of document.querySelectorAll('[data-secret-reveal]')) {
+    btn.onclick = () => toggle(btn.closest('.secret-actions').previousElementSibling.previousElementSibling.querySelector('.secret-value'), btn);
+  }
+  for (const btn of document.querySelectorAll('[data-secret-save]')) {
+    btn.onclick = async () => {
+      const actions = btn.closest('.secret-actions');
+      const key = actions.dataset.key;
+      const value = actions.previousElementSibling.previousElementSibling.querySelector('.secret-value').value;
+      try {
+        renderSecretsPanel(await api('/api/secrets', 'POST', { key, value }));
+        toast('SECRET SAVED');
+      } catch (e) { alertErr(e); }
+    };
+  }
+  for (const btn of document.querySelectorAll('[data-secret-delete]')) {
+    btn.onclick = async () => {
+      const key = btn.closest('.secret-actions').dataset.key;
+      if (!confirm(`Delete ${key} from .env? Runtime-provided values may remain visible.`)) return;
+      try {
+        renderSecretsPanel(await api(`/api/secrets/${encodeURIComponent(key)}`, 'DELETE'));
+        toast('SECRET DELETED');
+      } catch (e) { alertErr(e); }
+    };
+  }
+}
+
+async function loadSecretsSettings() {
+  const box = $('#s-secrets-panel');
+  if (!box) return;
+  box.innerHTML = '<div class="secret-empty">LOADING ENVIRONMENT…</div>';
+  try { renderSecretsPanel(await api('/api/secrets')); }
+  catch (e) { box.innerHTML = `<div class="secret-empty bad">${esc(e.message)}</div>`; }
+}
+
+async function loadSystemPromptSettings() {
+  const textarea = $('#s-system-prompt');
+  const meta = $('#s-system-meta');
+  if (!textarea || !meta) return;
+  textarea.value = 'loading…';
+  textarea.disabled = true;
+  try {
+    const data = await api('/api/system-prompt');
+    textarea.value = data.content || '';
+    textarea.disabled = false;
+    meta.innerHTML = `FILE: <code>${esc(data.path)}</code>`;
+  } catch (e) {
+    textarea.value = '';
+    meta.textContent = e.message;
+  }
+}
+
 /* ---- settings modal ---- */
 function renderSettingsModal() {
   const s = S.data.board.settings;
@@ -1046,7 +1398,7 @@ function renderSettingsModal() {
       <label class="f">MAX CONCURRENT RUNS <output>${(s.maxConcurrent ?? 2) <= 0 ? 'paused' : ''}</output></label><input id="s-cap" type="number" min="0" max="8" value="${s.maxConcurrent ?? 2}">
       <div class="hint" style="margin-top:4px">0 = pause the engine (nothing new runs; queued work waits until you raise it).</div>
       <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
-      <label class="f">DEFAULT WORKSPACE</label><input id="s-ws" value="${esc(s.defaultWorkspace)}">
+      <label class="f">DEFAULT WORKSPACE</label>${workspacePicker('s-ws', s.defaultWorkspace)}
       <label class="f">STALL WATCHDOG (MINUTES — resume orphaned tickets after this dwell; 0 = off)</label>
       <input id="s-stall" type="number" min="0" value="${s.stallAfterMin ?? 10}">
       <label class="f">AUTO-DISPATCH BACKLOG</label>
@@ -1080,6 +1432,16 @@ function renderSettingsModal() {
       <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>
 
       <hr class="sep">
+      <div class="section-head">SECRETS <span>(repo .env + runtime)</span></div>
+      <div id="s-secrets-panel" class="secrets-panel"></div>
+
+      <hr class="sep">
+      <div class="section-head">SYSTEM PROMPT <span>(root SYSTEM.md)</span></div>
+      <div class="hint" id="s-system-meta">loading system prompt…</div>
+      <textarea id="s-system-prompt" class="system-prompt" spellcheck="false"></textarea>
+      <div class="disk-row"><span></span><button class="btn" id="s-system-save">[ SAVE SYSTEM.md ]</button></div>
+
+      <hr class="sep">
       <div class="section-head">NOTIFICATIONS <span>(telegram)</span></div>
       <label class="f">TELEGRAM ALERTS</label>
       <select id="s-tg-on"><option value="">off</option><option value="1" ${s.telegram?.enabled ? 'selected' : ''}>on</option></select>
@@ -1096,6 +1458,9 @@ function renderSettingsModal() {
     `<button class="btn btn-accent" id="s-save">[ SAVE ]</button>`);
 
   const fmtBytes = (n) => n == null ? '?' : n > 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e3).toFixed(0)} KB`;
+  wireWorkspacePicker('s-ws');
+  loadSecretsSettings();
+  loadSystemPromptSettings();
   api('/api/maintenance/usage').then((u) => { const el = $('#s-usage'); if (el) el.textContent = fmtBytes(u.bytes); }).catch(() => {});
   $('#s-prune').onclick = () => {
     $('#s-prune').textContent = '[ RECLAIMING… ]';
@@ -1132,6 +1497,16 @@ function renderSettingsModal() {
   $('#s-font').oninput = (e) => { savePrefs({ ...S.prefs, fontPx: Number(e.target.value) }); $('#s-font-val').textContent = `${e.target.value}px`; };
   $('#s-ui').oninput = (e) => { savePrefs({ ...S.prefs, uiScale: Number(e.target.value) }); $('#s-ui-val').textContent = `${Math.round(e.target.value * 100)}%`; };
   $('#s-appear-reset').onclick = () => { savePrefs({ ...DEFAULT_PREFS }); renderSettingsModal(); };
+  $('#s-system-save').onclick = async () => {
+    const btn = $('#s-system-save');
+    btn.textContent = '[ SAVING… ]';
+    try {
+      const data = await api('/api/system-prompt', 'PUT', { content: $('#s-system-prompt').value });
+      $('#s-system-meta').innerHTML = `FILE: <code>${esc(data.path)}</code>`;
+      toast('SYSTEM.md SAVED');
+    } catch (e) { alertErr(e); }
+    finally { btn.textContent = '[ SAVE SYSTEM.md ]'; }
+  };
 
   $('#s-save').onclick = async () => {
     const phaseDefaults = {};

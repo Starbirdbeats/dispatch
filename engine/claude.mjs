@@ -2,6 +2,7 @@
 // Sessions: first run mints a UUID via --session-id; later runs --resume it.
 // Output: --output-format stream-json, one JSON event per line.
 import crypto from 'node:crypto';
+import { CLAUDE_CONTEXT_WINDOW } from './limits.mjs';
 
 export function buildInvocation({ prompt, harness, sessionId, dataDir }) {
   // project,local only: user-level settings would fire Marcello's global hooks
@@ -37,9 +38,13 @@ export function parseLine(line, state) {
 
   if (obj.session_id) state.sessionId = obj.session_id;
 
-  if (obj.type === 'rate_limit_event' && obj.rate_limit_info?.status === 'rejected') {
-    state.rateLimitedUntil = (obj.rate_limit_info.resetsAt || 0) * 1000;
-    return { kind: 'error', text: `claude rate limit (${obj.rate_limit_info.rateLimitType}) — resets ${new Date(state.rateLimitedUntil).toLocaleString()}` };
+  if (obj.type === 'rate_limit_event' && obj.rate_limit_info) {
+    state.claudeRateLimit = { ...obj.rate_limit_info };
+    if (obj.rate_limit_info.status === 'rejected') {
+      state.rateLimitedUntil = (obj.rate_limit_info.resetsAt || 0) * 1000;
+      return { kind: 'error', text: `claude rate limit (${obj.rate_limit_info.rateLimitType}) — resets ${new Date(state.rateLimitedUntil).toLocaleString()}` };
+    }
+    return null;
   }
 
   switch (obj.type) {
@@ -47,6 +52,18 @@ export function parseLine(line, state) {
       if (obj.subtype === 'init') return { kind: 'system', text: `claude session ${obj.session_id} · model ${obj.model || '?'}` };
       return null;
     case 'assistant': {
+      const model = obj.message?.model || state.model || '';
+      if (model) state.model = model;
+      const u = obj.message?.usage;
+      if (u) {
+        const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+        state.usage = {
+          contextTokens: num(u.input_tokens) + num(u.cache_creation_input_tokens) + num(u.cache_read_input_tokens) + num(u.output_tokens),
+          windowTokens: CLAUDE_CONTEXT_WINDOW,
+          model,
+          at: new Date().toISOString(),
+        };
+      }
       const parts = obj.message?.content || [];
       const out = [];
       for (const p of parts) {

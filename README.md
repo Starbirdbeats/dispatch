@@ -12,7 +12,7 @@ Each phase (column) has a harness configuration (`claude` / `codex` / `human`) a
 
 ## Requirements
 
-- Node.js 20+  
+- Node.js 20+
 - Git
 - Optional providers:
   - [Claude Code CLI](https://claude.ai) (for Claude)

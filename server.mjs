@@ -34,7 +34,7 @@ const [{ Store, DATA_DIR }, { Runner }, notify, usage, registry] = await Promise
   import('./registry.mjs'),
 ]);
 const { telegramConfig, sendTelegram } = notify;
-const { USAGE, loadUsageCache, setProviderUsage } = usage;
+const { USAGE, codexRateLimitWindows, loadUsageCache, setProviderUsage } = usage;
 const { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe, readClaudeOAuthToken } = registry;
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
 
@@ -91,6 +91,14 @@ function readSystemPrompt() {
   }
 }
 
+function mapClaudeUsageWindow(win) {
+  if (!win) return null;
+  return {
+    usedPct: win.utilization,
+    resetsAt: win.resets_at,
+  };
+}
+
 async function probeClaudeUsage() {
   const at = new Date().toISOString();
   try {
@@ -107,8 +115,8 @@ async function probeClaudeUsage() {
     if (!res.ok) throw new Error(`usage API ${res.status}`);
     const body = await res.json();
     setProviderUsage('claude', {
-      fiveHour: body.five_hour ? { usedPct: body.five_hour.utilization, resetsAt: body.five_hour.resets_at } : null,
-      weekly: body.seven_day ? { usedPct: body.seven_day.utilization, resetsAt: body.seven_day.resets_at } : null,
+      fiveHour: mapClaudeUsageWindow(body.five_hour),
+      weekly: mapClaudeUsageWindow(body.seven_day),
       at,
       source: 'claude-oauth-usage',
     });
@@ -159,15 +167,25 @@ function mapCodexRateLimitWindow(win) {
   };
 }
 
+function mapCodexRateLimits(snap, at) {
+  const byDuration = codexRateLimitWindows(snap, { at });
+  if (byDuration.fiveHour || byDuration.weekly) return byDuration;
+  return {
+    fiveHour: mapCodexRateLimitWindow(snap?.primary),
+    weekly: mapCodexRateLimitWindow(snap?.secondary),
+  };
+}
+
 async function probeCodexUsage() {
   const at = new Date().toISOString();
   try {
     const body = await fetchCodexRateLimits();
     const snap = body?.rateLimitsByLimitId?.codex || body?.rateLimits;
     if (!snap) throw new Error('rate limits missing');
+    const windows = mapCodexRateLimits(snap, at);
     setProviderUsage('codex', {
-      fiveHour: mapCodexRateLimitWindow(snap.primary),
-      weekly: mapCodexRateLimitWindow(snap.secondary),
+      fiveHour: windows.fiveHour,
+      weekly: windows.weekly,
       at,
       source: 'codex-app-server',
     });

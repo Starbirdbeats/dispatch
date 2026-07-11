@@ -19,10 +19,10 @@ function atomicWrite(file, data) {
   fs.renameSync(tmp, file);
 }
 
-function normalizePct(n) {
+export function normalizePercent(n) {
   const num = Number(n);
   if (!Number.isFinite(num)) return null;
-  return clampPct(num <= 1 ? num * 100 : num);
+  return clampPct(num);
 }
 
 function normalizeReset(value, atMs = Date.now()) {
@@ -37,9 +37,9 @@ function normalizeReset(value, atMs = Date.now()) {
   return new Date((n < 10_000_000_000 ? n * 1000 : n)).toISOString();
 }
 
-function normalizeWindow(data, atMs = Date.now()) {
+export function normalizeUsageWindow(data, atMs = Date.now()) {
   if (!data) return null;
-  const usedPct = normalizePct(data.usedPct ?? data.used_percentage ?? data.used_percent ?? data.utilization ?? data.percent);
+  const usedPct = normalizePercent(data.usedPct ?? data.usedPercent ?? data.used_percentage ?? data.used_percent ?? data.percent);
   if (usedPct == null) return null;
   return {
     usedPct: Math.round(usedPct * 10) / 10,
@@ -54,8 +54,8 @@ export function loadUsageCache() {
     for (const provider of ['claude', 'codex']) {
       if (!cached[provider]) continue;
       USAGE[provider] = {
-        fiveHour: normalizeWindow(cached[provider].fiveHour) || null,
-        weekly: normalizeWindow(cached[provider].weekly) || null,
+        fiveHour: normalizeUsageWindow(cached[provider].fiveHour) || null,
+        weekly: normalizeUsageWindow(cached[provider].weekly) || null,
         at: cached[provider].at || null,
         source: cached[provider].source || null,
         ...(cached[provider].error ? { error: String(cached[provider].error) } : {}),
@@ -77,8 +77,8 @@ export function saveUsageCache() {
 export function setProviderUsage(provider, { fiveHour = null, weekly = null, at = new Date().toISOString(), source = 'unknown', error = null } = {}) {
   if (!USAGE[provider]) return false;
   const next = {
-    fiveHour: normalizeWindow(fiveHour) || null,
-    weekly: normalizeWindow(weekly) || null,
+    fiveHour: normalizeUsageWindow(fiveHour) || null,
+    weekly: normalizeUsageWindow(weekly) || null,
     at,
     source,
     ...(error ? { error: String(error).slice(0, 240) } : {}),
@@ -92,7 +92,7 @@ export function setProviderUsage(provider, { fiveHour = null, weekly = null, at 
 
 export function setProviderWindow(provider, window, data, { at = new Date().toISOString(), source = 'unknown' } = {}) {
   if (!USAGE[provider] || !['fiveHour', 'weekly'].includes(window)) return false;
-  const normalized = normalizeWindow(data);
+  const normalized = normalizeUsageWindow(data);
   if (!normalized) return false;
   const before = JSON.stringify(USAGE[provider]);
   USAGE[provider] = {
@@ -107,20 +107,29 @@ export function setProviderWindow(provider, window, data, { at = new Date().toIS
   return changed;
 }
 
-export function applyCodexRateLimits(rateLimits, { at = new Date().toISOString(), source = 'codex-stream' } = {}) {
-  if (!rateLimits || typeof rateLimits !== 'object') return false;
-  let changed = false;
+export function codexRateLimitWindows(rateLimits, { at = new Date().toISOString() } = {}) {
+  const out = {};
+  if (!rateLimits || typeof rateLimits !== 'object') return out;
   const atMs = Date.parse(at) || Date.now();
   for (const raw of Object.values(rateLimits)) {
     if (!raw || typeof raw !== 'object') continue;
-    const minutes = Number(raw.window_minutes ?? raw.windowMinutes ?? raw.window);
-    const usedPct = raw.used_percent ?? raw.used_percentage ?? raw.usedPct;
+    const minutes = Number(raw.window_minutes ?? raw.windowMinutes ?? raw.windowDurationMins ?? raw.window_duration_mins ?? raw.window);
+    const usedPct = raw.used_percent ?? raw.used_percentage ?? raw.usedPct ?? raw.usedPercent;
     if (!Number.isFinite(minutes) || usedPct == null) continue;
     const window = minutes <= 360 ? 'fiveHour' : 'weekly';
-    changed = setProviderWindow('codex', window, {
+    out[window] = {
       usedPct,
       resetsAt: raw.resets_at ?? raw.resetsAt ?? (raw.resets_in_seconds != null ? new Date(atMs + Number(raw.resets_in_seconds) * 1000).toISOString() : null),
-    }, { at, source }) || changed;
+    };
+  }
+  return out;
+}
+
+export function applyCodexRateLimits(rateLimits, { at = new Date().toISOString(), source = 'codex-stream' } = {}) {
+  const windows = codexRateLimitWindows(rateLimits, { at });
+  let changed = false;
+  for (const [window, data] of Object.entries(windows)) {
+    changed = setProviderWindow('codex', window, data, { at, source }) || changed;
   }
   return changed;
 }

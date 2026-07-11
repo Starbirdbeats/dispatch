@@ -5,6 +5,7 @@ const S = {
   data: null,          // /api/state payload
   modal: null,         // {type:'ticket'|'column'|'new'|'settings', id?, tab?}
   live: {},            // ticketId -> normalized run events (session-local)
+  transcript: null,    // current transcript tab view state
   commentDraft: '',
 };
 
@@ -13,7 +14,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 /* ---------- appearance prefs (device-local, not server state) ---------- */
 const PREFS_KEY = 'dispatch.appearance';
-const DEFAULT_PREFS = { theme: 'dark', fontPx: 20, uiScale: 1 };
+const DEFAULT_PREFS = { theme: 'dark', fontPx: 20, uiScale: 1, transcriptShowTools: true };
 function loadPrefs() {
   try { return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; }
   catch { return { ...DEFAULT_PREFS }; }
@@ -139,7 +140,9 @@ function connectWS() {
     if (msg.type === 'run-event') {
       (S.live[msg.ticketId] ||= []).push(msg.event);
       if (S.live[msg.ticketId].length > 800) S.live[msg.ticketId].shift();
-      if (S.modal?.type === 'ticket' && S.modal.id === msg.ticketId && S.modal.tab === 'transcript') {
+      const view = S.transcript?.ticketId === msg.ticketId ? S.transcript : null;
+      if (view) {
+        view.liveEvents.push(msg.event);
         appendTranscriptLine(msg.event);
       }
     }
@@ -382,7 +385,7 @@ function cardEl(t, c) {
 }
 
 /* ---------- modals ---------- */
-function closeModal() { S.modal = null; $('#modal-root').innerHTML = ''; }
+function closeModal() { S.modal = null; S.transcript = null; $('#modal-root').innerHTML = ''; }
 
 let toastTimer = null;
 function toast(text, isError = false) {
@@ -438,6 +441,56 @@ function renderDossier(t, { live = false } = {}) {
     el.innerHTML = renderMarkdown(txt);
     el.scrollTop = y;
   });
+}
+
+function transcriptShowTools() {
+  return S.prefs?.transcriptShowTools !== false;
+}
+
+function transcriptVisible(ev) {
+  return transcriptShowTools() || ev?.kind !== 'tool';
+}
+
+function transcriptEmptyText(view) {
+  if (!view?.loaded) return 'LOADING TRANSCRIPT…';
+  return transcriptShowTools()
+    ? 'NO TRANSCRIPT ENTRIES YET'
+    : 'NO MODEL TEXT IN THIS RUN WITH TOOLS HIDDEN';
+}
+
+function transcriptCurrentView(ticketId) {
+  return S.transcript?.ticketId === ticketId ? S.transcript : null;
+}
+
+function setTranscriptView(view) {
+  S.transcript = view;
+  return view;
+}
+
+function transcriptRenderCurrent() {
+  const view = S.transcript;
+  const box = $('#transcript');
+  if (!view || !box || view.ticketId !== S.modal?.id) return;
+  const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const prevTop = box.scrollTop;
+  const events = [...(view.baseEvents || []), ...(view.liveEvents || [])].filter(transcriptVisible);
+  box.innerHTML = '';
+  if (events.length) {
+    for (const ev of events) appendTranscriptLine(ev, { box, force: true, preserveScroll: false });
+  } else {
+    box.innerHTML = `<div class="transcript-empty">${esc(transcriptEmptyText(view))}</div>`;
+  }
+  if (pinned) box.scrollTop = box.scrollHeight;
+  else box.scrollTop = Math.min(prevTop, Math.max(0, box.scrollHeight - box.clientHeight));
+}
+
+function transcriptRecord(raw) {
+  let obj;
+  try { obj = JSON.parse(raw); } catch { return null; }
+  if (obj.meta) return { kind: 'system', text: `spawn: ${obj.meta.cmd} (${obj.meta.column})` };
+  if (obj.stderr) return { kind: 'error', text: obj.stderr.trim() };
+  if (obj.ev) return obj.ev;
+  return null;
 }
 
 /* ---- ticket modal ---- */
@@ -755,28 +808,50 @@ function renderWakePanel(t) {
 }
 
 function renderTranscript(body, t) {
-  body.innerHTML = `<div class="transcript" id="transcript"></div><div class="hint" id="tr-hint"></div>`;
+  const showTools = transcriptShowTools();
+  body.innerHTML = `
+    <div class="transcript-shell">
+      <div class="transcript-bar">
+        <label class="check-row inline transcript-toggle"><input type="checkbox" id="tr-tools" ${showTools ? 'checked' : ''}><span>show tool events</span></label>
+        <div class="hint" id="tr-hint">loading transcript…</div>
+      </div>
+      <div class="transcript" id="transcript"></div>
+    </div>`;
+
+  setTranscriptView({
+    ticketId: t.id,
+    file: '',
+    loaded: false,
+    baseEvents: [],
+    liveEvents: [...(S.live[t.id] || [])],
+  });
+
+  $('#tr-tools').onchange = (e) => {
+    savePrefs({ ...S.prefs, transcriptShowTools: e.target.checked });
+    transcriptRenderCurrent();
+  };
+  transcriptRenderCurrent();
+
   fetch(`/api/tickets/${t.id}/transcript`).then((r) => r.json()).then(({ file, lines }) => {
+    const current = transcriptCurrentView(t.id);
+    if (!current) return;
+    current.file = file || '';
+    current.baseEvents = (lines || []).map(transcriptRecord).filter(Boolean);
+    current.loaded = true;
     $('#tr-hint').textContent = file ? `FILE: ${file}` : 'NO RUNS YET';
-    for (const raw of lines || []) {
-      let obj; try { obj = JSON.parse(raw); } catch { continue; }
-      if (obj.meta) appendTranscriptLine({ kind: 'system', text: `spawn: ${obj.meta.cmd} (${obj.meta.column})` });
-      else if (obj.stderr) appendTranscriptLine({ kind: 'error', text: obj.stderr.trim() });
-      else if (obj.ev) appendTranscriptLine(obj.ev);
-    }
-    for (const ev of S.live[t.id] || []) appendTranscriptLine(ev);
+    transcriptRenderCurrent();
   });
 }
 
-function appendTranscriptLine(ev) {
-  const box = $('#transcript');
-  if (!box || !ev?.text) return;
-  const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+function appendTranscriptLine(ev, { box = $('#transcript'), preserveScroll = true, force = false } = {}) {
+  if (!box || !ev?.text || (!force && !transcriptVisible(ev))) return false;
+  const pinned = preserveScroll && box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   const div = document.createElement('div');
   div.className = `ln k-${ev.kind || 'text'}`;
   div.innerHTML = `<span class="tag">${esc(ev.kind || 'text')}</span>${esc(ev.text)}`;
   box.appendChild(div);
   if (pinned) box.scrollTop = box.scrollHeight;
+  return true;
 }
 
 /* ---- column config modal ---- */

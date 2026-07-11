@@ -18,6 +18,14 @@ const DEFAULT_BOARD = {
     autoDispatchEveryMin: 5,
     stallAfterMin: 10,           // stall watchdog: resume orphaned tickets after this dwell; 0 = off
     keepRunsPerTicket: 5,        // disk retention: run journals kept per ticket (older pruned)
+    providers: {
+      claude: { enabled: true },
+      codex: { enabled: true },
+    },
+    setup: {
+      completedAt: null,
+      lastPreset: 'both',
+    },
     telegram: { enabled: false, chatId: '', events: { completed: true, intervention: true } },
   },
   columns: [
@@ -84,6 +92,60 @@ function readJSON(file, fallback = null) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
 
+function normalizeProviderSettings(input) {
+  const provided = input || {};
+  return {
+    claude: { enabled: provided.claude?.enabled !== false },
+    codex: { enabled: provided.codex?.enabled !== false },
+  };
+}
+
+function normalizeSetupSettings(input) {
+  const provided = input || {};
+  return {
+    completedAt: provided.completedAt || null,
+    lastPreset: provided.lastPreset || 'both',
+  };
+}
+
+export function providerEnabled(settings = {}, type) {
+  const providers = settings.providers || {};
+  if (type === 'claude') return providers.claude?.enabled !== false;
+  if (type === 'codex') return providers.codex?.enabled !== false;
+  return true;
+}
+
+export function enabledProviders(settings = {}) {
+  const normalized = normalizeProviderSettings(settings.providers || {});
+  return Object.entries(normalized).filter(([, cfg]) => cfg.enabled !== false).map(([type]) => type);
+}
+
+function normalizeSettings(settings = {}) {
+  return {
+    ...DEFAULT_BOARD.settings,
+    ...settings,
+    providers: normalizeProviderSettings(settings.providers || {}),
+    setup: normalizeSetupSettings(settings.setup || {}),
+    telegram: {
+      ...DEFAULT_BOARD.settings.telegram,
+      ...(settings.telegram || {}),
+      events: {
+        ...DEFAULT_BOARD.settings.telegram.events,
+        ...((settings.telegram && settings.telegram.events) || {}),
+      },
+    },
+  };
+}
+
+function normalizeBoard(raw) {
+  return {
+    ...DEFAULT_BOARD,
+    ...raw,
+    settings: normalizeSettings(raw?.settings || {}),
+    columns: Array.isArray(raw?.columns) && raw.columns.length ? raw.columns : structuredClone(DEFAULT_BOARD.columns),
+  };
+}
+
 // Reduce an untrusted upload name to a safe basename: no directories, no control
 // chars, no leading dots (blocks "..", hidden files, and path traversal).
 function sanitizeName(name) {
@@ -139,8 +201,11 @@ export class Store {
 
   constructor() {
     fs.mkdirSync(TICKETS_DIR, { recursive: true });
-    this.board = readJSON(BOARD_FILE) || structuredClone(DEFAULT_BOARD);
-    if (!readJSON(BOARD_FILE)) this.saveBoard();
+    const persisted = readJSON(BOARD_FILE);
+    this.board = normalizeBoard(persisted || DEFAULT_BOARD);
+    if (!persisted || JSON.stringify(this.board) !== JSON.stringify(persisted)) {
+      this.saveBoard();
+    }
     this.tickets = new Map();
     for (const id of fs.readdirSync(TICKETS_DIR)) {
       const t = readJSON(path.join(TICKETS_DIR, id, 'ticket.json'));
@@ -160,6 +225,10 @@ export class Store {
       this.tickets.set(t.id, t);
     }
   }
+
+  // Provider configuration API (with safe fallbacks if older board files are present).
+  providerEnabled(type) { return providerEnabled(this.board.settings, type); }
+  enabledProviders() { return enabledProviders(this.board.settings); }
 
   saveBoard() { atomicWrite(BOARD_FILE, JSON.stringify(this.board, null, 2)); }
   saveQueue(queue) { atomicWrite(QUEUE_FILE, JSON.stringify(queue, null, 2)); }

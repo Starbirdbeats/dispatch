@@ -232,6 +232,7 @@ const STUCK_HEADLINES = {
   'flag-human': 'The agent asked for your input',
   'timeout': 'The run timed out',
   'run-failed': 'The run crashed',
+  'provider-disabled': 'Setup has this provider disabled',
 };
 function fmtDur(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -336,6 +337,152 @@ function usageProviderHTML(provider) {
   </div>`;
 }
 
+const PROVIDER_ORDER = ['claude', 'codex'];
+
+function providerStatusLabel(type) {
+  if (type === 'claude') return 'Claude Code';
+  if (type === 'codex') return 'Codex';
+  return type;
+}
+
+function setupPresetLabel(preset) {
+  return {
+    both: 'Both',
+    'claude only': 'Claude only',
+    claude: 'Claude only',
+    'codex only': 'Codex only',
+    codex: 'Codex only',
+  }[preset] || 'Custom';
+}
+
+function setupInfo() {
+  return S.data?.setup || { providers: {}, enabledTypes: PROVIDER_ORDER, completedAt: null, lastPreset: 'manual' };
+}
+
+function setupEnabledTypes() {
+  const list = Array.isArray(setupInfo().enabledTypes) ? setupInfo().enabledTypes : [];
+  const out = list.filter((type) => PROVIDER_ORDER.includes(type));
+  return out.length ? out : PROVIDER_ORDER.slice();
+}
+
+function isProviderEnabled(type) {
+  if (type === 'human' || type === '') return true;
+  return setupInfo().providers?.[type]?.enabled !== false;
+}
+
+function setupNotice() {
+  const s = setupInfo();
+  const enabled = PROVIDER_ORDER.filter((type) => setupInfo().providers?.[type]?.enabled !== false);
+  const hasEnabled = enabled.length > 0;
+  const hasAuth = enabled.some((type) => Boolean(s.providers?.[type]?.authenticated));
+  const hasInstall = enabled.some((type) => Boolean(s.providers?.[type]?.installed));
+  const messages = [];
+  if (!s.completedAt) messages.push('setup not completed');
+  if (!hasEnabled) messages.push('no provider enabled');
+  if (hasEnabled && !hasInstall) messages.push('no provider installed');
+  if (hasEnabled && !hasAuth && hasInstall) messages.push('no authenticated provider');
+  return messages;
+}
+
+function providerStatusText(type) {
+  const state = setupInfo().providers?.[type] || {};
+  if (state.authenticated) return `authenticated${state.authDetail ? ` · ${state.authDetail}` : ''}`;
+  if (state.installed) return `installed${state.error ? ` · ${state.authDetail || state.error}` : ''} · not authenticated`;
+  return state.error ? `offline (${state.error})` : 'not installed';
+}
+
+function setupStatusClass(type) {
+  const state = setupInfo().providers?.[type] || {};
+  if (state.authenticated) return 'ok';
+  if (state.installed) return 'warn';
+  return 'bad';
+}
+
+function providerTypeOptions(selected, { includeHuman = false, includeCurrent = true, disabledOk = false, showWarnings = false } = {}) {
+  const enabled = new Set(setupEnabledTypes());
+  const options = [];
+  const seen = new Set();
+
+  const emit = (type) => {
+    if (seen.has(type)) return;
+    seen.add(type);
+    const isHuman = type === 'human';
+    const enabledType = isHuman || enabled.has(type);
+    const isSelected = type === selected;
+    if (!enabledType && !disabledOk && !isSelected) return;
+    const disabled = !isHuman && !enabledType;
+    const disabledLabel = disabled && showWarnings ? ' (disabled in setup)' : '';
+    const label = isHuman ? 'HUMAN' : type.toUpperCase() + disabledLabel;
+    const optionSelected = type === selected ? ' selected' : '';
+    const optionDisabled = disabled && !disabledOk ? ' disabled' : '';
+    options.push(`<option value="${type}"${optionSelected}${optionDisabled}>${label}</option>`);
+  };
+
+  if (includeHuman) emit('human');
+  for (const type of PROVIDER_ORDER) emit(type);
+
+  // Always keep selected type visible, even if it is disabled.
+  if (selected && !seen.has(selected) && !includeCurrent) {
+    const label = selected === 'human' ? 'HUMAN' : `${selected.toUpperCase()} (disabled in setup)`;
+    options.unshift(`<option value="${selected}" selected>${label}</option>`);
+  }
+
+  return options.join('');
+}
+
+function setupCardInfo(type) {
+  const state = setupInfo().providers?.[type] || {};
+  const installed = state.installed ? 'installed' : 'not installed';
+  return {
+    enabled: state.enabled !== false,
+    installed,
+    status: setupStatusClass(type),
+    text: providerStatusText(type),
+    authDetail: state.authDetail || '',
+    version: state.version || '',
+    error: state.error || '',
+  };
+}
+
+function providerCommands(type) {
+  if (type === 'claude') {
+    return [
+      'claude --version',
+      'claude login',
+    ];
+  }
+  return [
+    'codex --version',
+    'codex login',
+  ];
+}
+
+function setupCardsHTML() {
+  return PROVIDER_ORDER.map((type) => {
+    const state = setupInfo().providers?.[type] || {};
+    const info = setupCardInfo(type);
+    const status = setupStatusClass(type);
+    const stateClass = info.enabled ? 'ok' : 'warn';
+    return `<div class="setup-card">
+      <div class="setup-card-head">
+        <div class="setup-card-title">${providerStatusLabel(type)} ${info.enabled ? 'ENABLED' : 'DISABLED'}</div>
+        <div class="setup-card-status ${stateClass}">${esc(info.installed ? 'installed' : 'offline')}</div>
+      </div>
+      <div class="setup-prompt">${esc(providerStatusText(type))}</div>
+      <label class="check-row inline"><input id="s-${type}-enabled" type="checkbox" ${info.enabled ? 'checked' : ''}><span>use provider in automation</span></label>
+      <label class="check-row inline"><input id="s-${type}-authed" type="checkbox" ${state.authenticated ? 'checked' : ''} disabled><span>authenticated</span></label>
+      <div class="setup-auth-note">
+        ${esc(state.version || 'not detected')}${info.text ? ` · ${esc(info.text)}` : ''}
+      </div>
+      <div class="cmd">${providerCommands(type).map((cmd) => `<span>${esc(cmd)}</span>`).join('<br>')}</div>
+      <div class="setup-actions">
+        <button class="btn" data-probe="${type}">[ RE-CHECK ]</button>
+        <button class="btn" data-copy="${type}">[ COPY PRIMARY CMD ]</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function usageStripHTML() {
   return `${usageProviderHTML('claude')}${usageProviderHTML('codex')}`;
 }
@@ -422,6 +569,16 @@ function renderTopbar() {
   }
   const archived = S.data.tickets.filter((t) => t.archived).length;
   $('#btn-archive').textContent = archived ? `[ ARCHIVE ${String(archived).padStart(2, '0')} ]` : '[ ARCHIVE ]';
+
+  const notice = $('#setup-notice');
+  if (notice) {
+    const reasons = setupNotice();
+    notice.innerHTML = reasons.length
+      ? `<span class="warn">SETUP REQUIRED — ${reasons.join(' • ')}. <button class="btn btn-accent" id="s-open-setup">[ OPEN SETUP ]</button></span>`
+      : '<span class="muted">SETUP READY</span>';
+  }
+  const openNotice = $('#s-open-setup');
+  if (openNotice) openNotice.onclick = () => { S.modal = { type: 'settings' }; renderModal(); };
 }
 
 function renderBoard() {
@@ -431,6 +588,8 @@ function renderBoard() {
     .map((el) => [el.dataset.colId, $('.col-body', el)?.scrollTop || 0]));
   board.innerHTML = '';
   for (const c of cols()) {
+    const activeType = c.harness?.type;
+    const disabledType = activeType !== 'human' && !isProviderEnabled(activeType);
     const col = document.createElement('section');
     col.className = 'column';
     col.dataset.colId = c.id;
@@ -440,6 +599,7 @@ function renderBoard() {
         <div class="col-title"><h2>${esc(c.name)}</h2><span class="count">${String(tickets.length).padStart(2, '0')}</span></div>
         <div class="col-harness">
           <span>[ ${esc(harnessLabel(c.harness))} ]${c.autoRun ? ' <span class="auto">AUTO</span>' : ''}</span>
+          ${disabledType ? '<span class="col-warn">PROVIDER DISABLED IN SETUP</span>' : ''}
           <button class="cfg" data-cfg="${c.id}">CFG &gt;&gt;</button>
         </div>
         ${c.role === 'intake' && S.data.scheduler?.autoDispatch
@@ -471,13 +631,17 @@ function cardEl(t, c) {
   const el = document.createElement('article');
   const running = S.data.runs.running.includes(t.id);
   const status = running ? 'running' : (S.data.runs.queued.includes(t.id) ? 'queued' : (c.role === 'terminal' ? 'done' : t.status));
+  const eff = effective(t, c);
+  const disabledHarness = eff.type !== 'human' && !isProviderEnabled(eff.type);
   el.className = `card status-${status}`;
   el.draggable = true;
   const last = [...t.activity].reverse().find((a) => a.kind !== 'run');
   const dx = diagnose(t, c);
   el.innerHTML = `
     <div class="t"><span class="led ${status}"></span><span class="title">${esc(t.title)}</span>${t.readOnly ? '<span class="ro-tag" title="Read-only ticket">RO</span>' : ''}${c.role === 'terminal' ? `<button class="arch" title="Archive ticket">[ ARCH ]</button>` : ''}</div>
-    <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span><span class="badge tone-${dx.tone}">${dx.tone === 'stuck' ? '⚠ ' : ''}${esc(dx.label)}</span></div>
+    <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span>
+      <span class="meta-badges">${disabledHarness ? '<span class="badge tone-stuck">PROVIDER DISABLED</span>' : ''}<span class="badge tone-${dx.tone}">${dx.tone === 'stuck' ? '⚠ ' : ''}${esc(dx.label)}</span></span>
+    </div>
     ${t.completedAt && t.durationMs != null
       ? `<div class="timing done">✓ took ${esc(fmtDur(t.durationMs))} · ${esc(fmtTs(t.completedAt))}</div>`
       : (t.startedAt ? `<div class="timing">${isClockPaused(t) ? '⏸ paused' : '⏱ active'} ${activeClockSpan(t)}</div>` : '')}
@@ -875,16 +1039,18 @@ function renderOverview(body, t) {
           setOverrideDraft(draft, c.id, { ...o, model: n.model, effort: n.effort, permissions: n.permissions });
         }
         const effType = n.type;
+        const rowType = o.type || c.harness.type;
         const sameHarnessType = !o.type || o.type === c.harness.type;
         const defaultModelLabel = sameHarnessType ? `default (${c.harness.model || '—'})` : 'default';
         const defaultEffortLabel = sameHarnessType ? `default (${c.harness.effort || '—'})` : 'default';
         const defaultPermsLabel = sameHarnessType ? `default (${c.harness.permissions || '—'})` : 'default';
+        const disabledWarning = effType !== 'human' && !isProviderEnabled(effType) && o.type
+          ? '<div class="setup-pill warn">disabled in setup</div>'
+          : '';
         return `<div>${esc(c.name)}</div>
-          <div><select data-ov="${c.id}:type">
+          <div><select data-ov="${c.id}:type">${providerTypeOptions(o.type, { includeHuman: false, includeCurrent: true })}
             <option value="">default (${esc(c.harness.type)})</option>
-            <option value="claude" ${o.type === 'claude' ? 'selected' : ''}>claude</option>
-            <option value="codex" ${o.type === 'codex' ? 'selected' : ''}>codex</option>
-          </select></div>
+          </select>${disabledWarning}</div>
           <div class="model-cell"><select data-ov="${c.id}:model">${harnessOptions('model', effType, n.model || '', defaultModelLabel)}</select>${refreshBtn()}</div>
           <div><select data-ov="${c.id}:effort">${harnessOptions('effort', effType, n.effort || '', defaultEffortLabel, n.model || (sameHarnessType ? c.harness.model : ''))}</select></div>
           <div><select data-ov="${c.id}:permissions">${harnessOptions('permissions', effType, n.permissions || '', defaultPermsLabel)}</select></div>`;
@@ -991,7 +1157,7 @@ function renderActivity(body, t) {
     </div>
     ${canWake ? `<div class="wake-harness">
       <span class="wake-lbl">picked up by</span>
-      <select id="cw-type">${['claude', 'codex'].map((x) => `<option ${x === hType ? 'selected' : ''}>${x}</option>`).join('')}</select>
+      <select id="cw-type">${providerTypeOptions(hType, { includeHuman: false, disabledOk: false, showWarnings: true })}</select>
       <select id="cw-model">${harnessOptions('model', hType, wakeChoice.model || '', 'default')}</select>${refreshBtn()}
       <select id="cw-effort">${harnessOptions('effort', hType, wakeChoice.effort || '', 'default', wakeChoice.model)}</select>
     </div>` : ''}`;
@@ -1111,13 +1277,16 @@ function renderColumnModal(draftOverride) {
   const rawH = draftOverride || c.harness;
   const type = rawH.type || 'human';
   const h = type === 'human' ? rawH : normalizeHarnessChoice(rawH, {});
+  const phaseTypeWarning = h.type !== 'human' && !isProviderEnabled(h.type)
+    ? '<div class="setup-pill warn" style="margin:6px 0">PROVIDER disabled in setup</div>'
+    : '';
   shell(`PHASE CONFIG /// ${esc(c.name)}`, `
     <div class="panel-body">
       <label class="f">NAME</label><input id="c-name" value="${esc(draftOverride?._name ?? c.name)}">
       <label class="f">ROLE</label>
       <select id="c-role">${['intake', 'agent', 'human-gate', 'terminal'].map((r) => `<option ${r === (draftOverride?._role ?? c.role) ? 'selected' : ''}>${r}</option>`).join('')}</select>
       <label class="f">HARNESS</label>
-      <select id="c-type">${['human', 'claude', 'codex'].map((r) => `<option ${r === type ? 'selected' : ''}>${r}</option>`).join('')}</select>
+      <select id="c-type">${providerTypeOptions(type, { includeHuman: true, disabledOk: false, showWarnings: true })}</select>${phaseTypeWarning}
       <label class="f">MODEL</label>
       <div class="model-cell"><select id="c-model" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('model', type, h.model || '', '—')}</select>${refreshBtn()}</div>
       <label class="f">EFFORT</label>
@@ -1394,6 +1563,19 @@ function renderSettingsModal() {
       <button class="btn" id="s-appear-reset" style="margin-top:8px">[ RESET APPEARANCE ]</button>
       <hr class="sep">
 
+      <div class="section-head">SETUP</div>
+      <div class="setup-cards">${setupCardsHTML()}</div>
+      <label class="f">PROVIDER PRESETS</label>
+      <select id="s-preset">
+        <option value="both" ${((s.setup?.lastPreset || 'both') === 'both' || (s.setup?.lastPreset || 'both') === 'manual') ? 'selected' : ''}>Both (planning: Claude, build: Codex)</option>
+        <option value="claude" ${s.setup?.lastPreset === 'claude' || s.setup?.lastPreset === 'claude only' ? 'selected' : ''}>Claude only</option>
+        <option value="codex" ${s.setup?.lastPreset === 'codex' || s.setup?.lastPreset === 'codex only' ? 'selected' : ''}>Codex only</option>
+      </select>
+      <button class="btn" id="s-preset-apply">[ APPLY PRESET ]</button>
+      <button class="btn" id="s-setup-complete">[ MARK SETUP COMPLETE ]</button>
+      <div class="hint">Apply a preset to update Planning/Build/Review harnesses without editing JSON. You can still fine-tune each phase in CFG.</div>
+      <div class="hint">Choose provider toggles here before running the pipeline. Disabled providers are preserved on existing columns but won’t be auto-run.</div>
+
       <div class="section-head">ENGINE</div>
       <label class="f">MAX CONCURRENT RUNS <output>${(s.maxConcurrent ?? 2) <= 0 ? 'paused' : ''}</output></label><input id="s-cap" type="number" min="0" max="8" value="${s.maxConcurrent ?? 2}">
       <div class="hint" style="margin-top:4px">0 = pause the engine (nothing new runs; queued work waits until you raise it).</div>
@@ -1453,7 +1635,7 @@ function renderSettingsModal() {
       <div class="disk-row"><span></span><button class="btn" id="s-tg-test">[ SEND TEST ]</button></div>
       <div class="hint">bot token comes from the <code>TELEGRAM_BOT_TOKEN</code> env var (kept out of the data dir). set it in the service unit / dispatch.env. reuses your existing Claude-hook bot.</div>
 
-      <div class="hint" style="margin-top:14px">claude auth: subscription oauth on starbird · codex auth: chatgpt login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
+      <div class="hint" style="margin-top:14px">claude auth depends on local Claude CLI credentials · codex auth depends on local chatgpt/codex login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
     </div>`,
     `<button class="btn btn-accent" id="s-save">[ SAVE ]</button>`);
 
@@ -1473,9 +1655,55 @@ function renderSettingsModal() {
   $('#s-tg-test').onclick = () => {
     $('#s-tg-test').textContent = '[ SENDING... ]';
     api('/api/notify/test', 'POST', { chatId: $('#s-tg-chat').value.trim() })
-      .then(() => toast('TEST SENT — check your phone'))
-      .catch(alertErr)
-      .finally(() => { $('#s-tg-test').textContent = '[ SEND TEST ]'; });
+    .then(() => toast('TEST SENT — check your phone'))
+    .catch(alertErr)
+    .finally(() => { $('#s-tg-test').textContent = '[ SEND TEST ]'; });
+  };
+
+  // Setup controls: provider enablement, preset assignment, re-check, copy login command, setup completion.
+  for (const type of PROVIDER_ORDER) {
+    const enabledEl = $(`#s-${type}-enabled`);
+    const probeBtn = document.querySelector(`[data-probe="${type}"]`);
+    const copyBtn = document.querySelector(`[data-copy="${type}"]`);
+    const firstCmd = providerCommands(type)[1] || '';
+    probeBtn?.addEventListener('click', async () => {
+      probeBtn.textContent = '[ CHECKING… ]';
+      try {
+        await api('/api/probe', 'POST', {});
+        loadState().then(renderSettingsModal);
+        toast('CLI STATUS REFRESHED');
+      } catch (e) { alertErr(e); }
+      probeBtn.textContent = '[ RE-CHECK ]';
+    });
+    copyBtn?.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard?.writeText(firstCmd || '');
+        toast('copied to clipboard');
+      } catch {
+        prompt('copy this command', firstCmd || '');
+      }
+    });
+  }
+  $('#s-preset-apply').onclick = async () => {
+    const preset = $('#s-preset').value;
+    try {
+      $('#s-preset-apply').textContent = '[ APPLYING… ]';
+      await api('/api/setup/preset', 'POST', { preset });
+      await loadState();
+      renderSettingsModal();
+      toast(`PRESET APPLIED: ${setupPresetLabel(preset.toLowerCase())}`);
+    } catch (e) { alertErr(e); }
+    finally { $('#s-preset-apply').textContent = '[ APPLY PRESET ]'; }
+  };
+  $('#s-setup-complete').onclick = async () => {
+    try {
+      $('#s-setup-complete').textContent = '[ SAVING… ]';
+      await api('/api/setup/complete', 'POST', {});
+      await loadState();
+      renderSettingsModal();
+      toast('SETUP MARKED COMPLETE');
+    } catch (e) { alertErr(e); }
+    finally { $('#s-setup-complete').textContent = '[ MARK SETUP COMPLETE ]'; }
   };
 
   for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => {
@@ -1509,36 +1737,58 @@ function renderSettingsModal() {
   };
 
   $('#s-save').onclick = async () => {
+    const btn = $('#s-save');
+    const claudeEnabled = $('#s-claude-enabled');
+    const codexEnabled = $('#s-codex-enabled');
     const phaseDefaults = {};
+    btn.textContent = '[ SAVING… ]';
     for (const el of document.querySelectorAll('[data-pd]')) {
       const [colId, key] = el.dataset.pd.split(':');
       (phaseDefaults[colId] ||= {})[key] = el.value.trim();
     }
-    await Promise.all(agentCols.map((c) => {
-      const d = phaseDefaults[c.id];
-      if (!d || (!d.model && !d.effort)) return null;
-      const harness = { ...c.harness };
-      if (d.model) harness.model = d.model;
-      if (d.effort) harness.effort = d.effort;
-      return api(`/api/columns/${c.id}`, 'PATCH', { harness });
-    }).filter(Boolean));
-    await api('/api/settings', 'PATCH', {
-      maxConcurrent: Number.isFinite(+$('#s-cap').value) ? Math.max(0, Math.min(8, +$('#s-cap').value)) : 2,
-      runTimeoutMin: Number($('#s-to').value) || 30,
-      defaultWorkspace: $('#s-ws').value.trim(),
-      autoDispatch: Boolean($('#s-auto').value),
-      autoDispatchEveryMin: Number($('#s-every').value) || 5,
-      stallAfterMin: Number($('#s-stall').value),
-      keepRunsPerTicket: Math.max(1, Number($('#s-keepruns').value) || 5),
-      telegram: {
-        enabled: Boolean($('#s-tg-on').value),
-        chatId: $('#s-tg-chat').value.trim(),
-        events: {
-          completed: $('#s-tg-done').checked,
-          intervention: $('#s-tg-stuck').checked,
+    try {
+      await Promise.all(agentCols.map((c) => {
+        const d = phaseDefaults[c.id];
+        if (!d || (!d.model && !d.effort)) return null;
+        const harness = { ...c.harness };
+        if (d.model) harness.model = d.model;
+        if (d.effort) harness.effort = d.effort;
+        return api(`/api/columns/${c.id}`, 'PATCH', { harness });
+      }).filter(Boolean));
+      const preset = $('#s-preset')?.value;
+      const setupPayload = {
+        providers: {
+          ...(claudeEnabled ? { claude: { enabled: Boolean(claudeEnabled.checked) } } : {}),
+          ...(codexEnabled ? { codex: { enabled: Boolean(codexEnabled.checked) } } : {}),
         },
-      },
-    }).then(() => { toast('SETTINGS SAVED'); closeAndReload(); }).catch(alertErr);
+        preset,
+        completedAt: true,
+      };
+      await api('/api/setup/providers', 'PATCH', setupPayload);
+      await api('/api/settings', 'PATCH', {
+        maxConcurrent: Number.isFinite(+$('#s-cap').value) ? Math.max(0, Math.min(8, +$('#s-cap').value)) : 2,
+        runTimeoutMin: Number($('#s-to').value) || 30,
+        defaultWorkspace: $('#s-ws').value.trim(),
+        autoDispatch: Boolean($('#s-auto').value),
+        autoDispatchEveryMin: Number($('#s-every').value) || 5,
+        stallAfterMin: Number($('#s-stall').value),
+        keepRunsPerTicket: Math.max(1, Number($('#s-keepruns').value) || 5),
+        telegram: {
+          enabled: Boolean($('#s-tg-on').value),
+          chatId: $('#s-tg-chat').value.trim(),
+          events: {
+            completed: $('#s-tg-done').checked,
+            intervention: $('#s-tg-stuck').checked,
+          },
+        },
+      });
+      toast('SETTINGS SAVED');
+      closeAndReload();
+    } catch (e) {
+      alertErr(e);
+    } finally {
+      btn.textContent = '[ SAVE ]';
+    }
   };
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
 }

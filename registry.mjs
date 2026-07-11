@@ -113,9 +113,18 @@ function fetchCodexAppServerModels({ timeoutMs = 20000 } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn('codex', ['app-server'], { stdio: ['pipe', 'pipe', 'ignore'] });
     const rl = readline.createInterface({ input: proc.stdout });
-    const send = (o) => proc.stdin.write(JSON.stringify(o) + '\n');
     const models = [];
     let settled = false;
+    const safeSend = (o) => {
+      if (!proc.stdin || proc.stdin.destroyed || proc.stdin.writableEnded) return false;
+      try {
+        proc.stdin.write(JSON.stringify(o) + '\n');
+        return true;
+      } catch (e) {
+        finish(e);
+        return false;
+      }
+    };
     const finish = (err, val) => {
       if (settled) return;
       settled = true;
@@ -125,15 +134,15 @@ function fetchCodexAppServerModels({ timeoutMs = 20000 } = {}) {
     };
     const timer = setTimeout(() => finish(new Error('app-server timeout')), timeoutMs);
     proc.on('error', (e) => finish(e));
+    proc.stdin.on('error', (e) => finish(e));
     proc.on('exit', () => { if (!settled) finish(new Error('app-server exited early')); });
     let reqId = 1;
-    const list = (cursor) => send({ jsonrpc: '2.0', id: ++reqId, method: 'model/list', params: { includeHidden: false, cursor: cursor ?? null } });
+    const list = (cursor) => safeSend({ jsonrpc: '2.0', id: ++reqId, method: 'model/list', params: { includeHidden: false, cursor: cursor ?? null } });
     rl.on('line', (l) => {
       let m; try { m = JSON.parse(l); } catch { return; }
       if (m.id === 1) { // initialize response
         if (m.error) return finish(new Error(`initialize: ${m.error.message}`));
-        send({ jsonrpc: '2.0', method: 'initialized' });
-        list();
+        if (safeSend({ jsonrpc: '2.0', method: 'initialized' })) list();
       } else if (m.id >= 2) {
         if (m.error) return finish(new Error(`model/list: ${m.error.message}`));
         for (const mod of m.result?.data || []) {
@@ -149,7 +158,7 @@ function fetchCodexAppServerModels({ timeoutMs = 20000 } = {}) {
         else models.length ? finish(null, models) : finish(new Error('model/list returned empty'));
       }
     });
-    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'dispatch', title: 'Dispatch', version: '0.1.0' } } });
+    safeSend({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'dispatch', title: 'Dispatch', version: '0.1.0' } } });
   });
 }
 
@@ -159,6 +168,31 @@ const DOCS_SOURCES = {
   claude: 'https://platform.claude.com/docs/en/docs/about-claude/models/overview',
   codex: 'https://developers.openai.com/codex/models',
 };
+
+function truncate(value, max = 180) {
+  const v = String(value || '').trim().replace(/[\r\n]+/g, ' ');
+  return v.length > max ? `${v.slice(0, max)}…` : v;
+}
+
+function normalizeProbeError(e, fallback = 'command failed') {
+  if (!e) return fallback;
+  if (typeof e === 'string') return truncate(e);
+  if (e.message) return truncate(e.message);
+  return fallback;
+}
+
+function parseCodexAuth(stdout) {
+  const raw = String(stdout || '').trim();
+  const lower = raw.toLowerCase();
+  if (!raw) return { authenticated: null, detail: '' };
+  if (/not logged|not authenticated|please log ?in|requires login|login required|signed out|expired/.test(lower)) {
+    return { authenticated: false, detail: truncate(raw) };
+  }
+  if (/error|denied|failed/.test(lower)) {
+    return { authenticated: null, detail: truncate(raw) };
+  }
+  return { authenticated: true, detail: truncate(raw) };
+}
 
 // lookahead (?!\d) rejects truncated slugs like "claude-opus-47" (would-be "claude-opus-4")
 export function parseModelIds(type, html) {
@@ -270,16 +304,40 @@ export function loadCodexDefaults() {
 }
 
 export async function probe() {
-  const result = { claude: { ok: false }, codex: { ok: false } };
+  const result = {
+    claude: { ok: false, installed: false, authenticated: false, authDetail: '', version: null, error: null },
+    codex: { ok: false, installed: false, authenticated: false, authDetail: '', version: null, error: null },
+  };
+
+  // Claude: installed status from `claude --version`, auth status from local OAuth token file.
   try {
     const { stdout } = await run('claude', ['--version'], { timeout: 15000 });
-    result.claude = { ok: true, version: stdout.trim() };
-  } catch (e) { result.claude.error = e.message; }
+    result.claude.installed = true;
+    result.claude.ok = true;
+    result.claude.version = truncate(stdout, 60);
+  } catch (e) { result.claude.error = normalizeProbeError(e); }
+  try {
+    readClaudeOAuthToken();
+    result.claude.authenticated = true;
+    result.claude.authDetail = 'authenticated';
+  } catch (e) {
+    result.claude.authenticated = false;
+    result.claude.authDetail = normalizeProbeError(e.message || e, 'not authenticated');
+  }
+
+  // Codex: installed status from `codex --version`, auth status from `codex login status`.
   try {
     const { stdout } = await run('codex', ['--version'], { timeout: 15000 });
-    result.codex = { ok: true, version: stdout.trim() };
-    const { stdout: auth } = await run('codex', ['login', 'status'], { timeout: 15000 });
-    result.codex.auth = auth.trim();
-  } catch (e) { result.codex.error = e.message; }
+    result.codex.installed = true;
+    result.codex.ok = true;
+    result.codex.version = truncate(stdout, 60);
+    const { stdout: authRaw } = await run('codex', ['login', 'status'], { timeout: 15000 });
+    const parsed = parseCodexAuth(authRaw);
+    result.codex.authenticated = Boolean(parsed.authenticated);
+    result.codex.authDetail = parsed.detail || (parsed.authenticated === false ? 'not authenticated' : '');
+  } catch (e) {
+    result.codex.error = normalizeProbeError(e);
+  }
+
   return result;
 }

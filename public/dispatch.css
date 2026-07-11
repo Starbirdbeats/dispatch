@@ -83,6 +83,7 @@ body {
   flex: 0 0 auto;
 }
 #topbar > * { background: var(--bg); padding: 10px 14px; display: flex; align-items: center; gap: 14px; }
+#setup-notice { padding: 8px 12px; background: var(--bg-1); color: var(--fg-dim); border-bottom: 1px solid var(--line); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
 .brand { font-weight: 800; font-size: 18px; letter-spacing: -0.02em; }
 .brand .rev { color: var(--fg-faint); font-weight: 400; font-size: 10px; letter-spacing: 0.1em; margin-left: 10px; }
 .health, .queueinfo { font-size: 10px; text-transform: uppercase; color: var(--fg-dim); }
@@ -165,6 +166,33 @@ label.f output { color: var(--fg); float: right; font-variant-numeric: tabular-n
 .skip-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-faint); }
 .skip-note { font-size: 10px; color: var(--fg-faint); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
 .ro-tag { font-size: 8px; font-weight: 800; letter-spacing: 0.1em; color: var(--bg); background: #4fd0e6; padding: 1px 4px; margin-left: 2px; align-self: center; }
+
+/* ---------- setup cards ---------- */
+.setup-cards { display: grid; gap: 10px; }
+.setup-card { border: 1px solid var(--line); background: var(--bg-1); padding: 8px 10px; }
+.setup-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.setup-card-title { color: var(--fg); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; }
+.setup-card-status { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; }
+.setup-card-status.ok { color: var(--green); }
+.setup-card-status.warn { color: #e0a030; }
+.setup-card-status.bad { color: var(--red); }
+.setup-card .cmd {
+  margin: 8px 0;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  font-size: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg-dim);
+}
+.setup-card .setup-actions { margin-top: 7px; display: flex; gap: 6px; flex-wrap: wrap; }
+.setup-card .setup-actions .btn { white-space: nowrap; }
+.setup-pill { display: inline-block; border: 1px solid var(--line); color: var(--fg-faint); text-transform: uppercase; font-size: 9px; letter-spacing: 0.09em; padding: 3px 6px; margin: 0 6px 6px 0; }
+.setup-pill.ok { border-color: var(--green); color: var(--green); }
+.setup-pill.warn { border-color: #e0a030; color: #e0a030; }
+.setup-pill.bad { border-color: var(--red); color: var(--red); }
+.setup-auth-note { margin-top: 6px; color: var(--fg-faint); font-size: 9px; line-height: 1.4; }
 
 /* ---- appearance controls ---- */
 .section-head { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg); margin: 4px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--line); }

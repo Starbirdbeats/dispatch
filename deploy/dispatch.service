@@ -1,16 +1,22 @@
 [Unit]
 Description=Dispatch — kanban agent OS
 After=network.target
+ConditionPathExists=%h/dispatch/server.mjs
 
 [Service]
-ExecStart=/usr/bin/env node /home/Starbird/git/dispatch/server.mjs
-WorkingDirectory=/home/Starbird/git/dispatch
+# Edit WorkingDirectory and EnvironmentFile for your machine.
+WorkingDirectory=%h/dispatch
+ExecStart=/usr/bin/env node %h/dispatch/server.mjs
 Restart=on-failure
 RestartSec=5
 KillMode=process
+EnvironmentFile=-%h/.config/dispatch/dispatch.env
+Environment=NODE_ENV=production
 Environment=DISPATCH_PORT=4400
-EnvironmentFile=-/home/Starbird/dispatch-data/dispatch.env
-Environment=PATH=/home/Starbird/.npm-global/bin:/home/Starbird/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=DISPATCH_DATA=%h/dispatch-data
+# Optional for machine-specific URLs:
+# Environment=DISPATCH_PUBLIC_URL=https://dispatch.example.com
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target

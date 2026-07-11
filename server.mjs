@@ -19,14 +19,14 @@ import {
 } from './engine/envfile.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ENV_FILE = path.join(__dirname, '.env');
+const ENV_FILE = path.resolve(process.env.DISPATCH_ENV_FILE || path.join(__dirname, '.env'));
 const SYSTEM_FILE = path.join(__dirname, 'SYSTEM.md');
 const SYSTEM_LIMIT_BYTES = 256 * 1024;
 
 ensureEnvFile(ENV_FILE);
 loadEnvFile(ENV_FILE);
 
-const [{ Store, DATA_DIR }, { Runner }, notify, usage, registry] = await Promise.all([
+const [{ Store, DATA_DIR, providerEnabled, enabledProviders }, { Runner }, notify, usage, registry] = await Promise.all([
   import('./store.mjs'),
   import('./engine/runner.mjs'),
   import('./engine/notify.mjs'),
@@ -43,8 +43,35 @@ const store = new Store();
 loadCodexDefaults();
 loadModelsCache(); // merge any previously-refreshed model list
 loadUsageCache(); // merge last known account usage windows
-let health = { claude: { ok: false }, codex: { ok: false } };
+let health = {
+  claude: { ok: false, installed: false, authenticated: false, version: null, authDetail: '', error: null },
+  codex: { ok: false, installed: false, authenticated: false, version: null, authDetail: '', error: null },
+};
 probe().then((h) => { health = h; broadcast({ type: 'state-changed' }); });
+
+// Keep setup status consistent across state refreshes and settings screens.
+function setupStatus() {
+  const settings = store?.board?.settings || {};
+  const providers = {};
+  for (const type of ['claude', 'codex']) {
+    const h = health[type] || {};
+    providers[type] = {
+      enabled: providerEnabled(settings, type),
+      installed: Boolean(h.installed),
+      authenticated: Boolean(h.authenticated),
+      version: h.version || null,
+      authDetail: h.authDetail || '',
+      error: h.error || null,
+      ok: Boolean(h.ok),
+    };
+  }
+  return {
+    providers,
+    enabledTypes: enabledProviders(settings),
+    completedAt: settings.setup?.completedAt || null,
+    lastPreset: settings.setup?.lastPreset || 'manual',
+  };
+}
 
 const app = express();
 // Attachments ride in as base64 on the ticket JSON, so the body limit must clear the
@@ -52,6 +79,90 @@ const app = express();
 const MAX_ATTACH_MB = 16;
 app.use(express.json({ limit: '48mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+const VALID_PROVIDERS = new Set(['claude', 'codex']);
+const VALID_HARNESSES = new Set(['human', 'claude', 'codex']);
+
+function validateProviderState(raw) {
+  const providers = {};
+  const input = raw || {};
+  for (const type of VALID_PROVIDERS) {
+    const enabled = input[type]?.enabled;
+    if (enabled === undefined) continue;
+    if (typeof enabled !== 'boolean') throw new Error(`providers.${type}.enabled must be boolean`);
+    providers[type] = { enabled };
+  }
+  const extra = Object.keys(input).filter((k) => !VALID_PROVIDERS.has(k));
+  if (extra.length) throw new Error(`unknown provider(s): ${extra.join(', ')}`);
+  return providers;
+}
+
+function normalizeHarnessPayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.type && !VALID_HARNESSES.has(payload.type)) {
+    throw new Error(`invalid harness type: ${payload.type}`);
+  }
+  return payload;
+}
+
+function normalizePreset(preset) {
+  const value = String(preset || '').trim().toLowerCase();
+  return ['both', 'claude only', 'claude', 'codex only', 'codex'].includes(value)
+    ? value
+    : 'manual';
+}
+
+function applyPresetAssignments(preset) {
+  const normalized = normalizePreset(preset);
+  const agents = store.board.columns.filter((c) => c.role === 'agent');
+  if (!agents.length) return;
+
+  const mappedByPreset = {
+    both: ['claude', 'codex', 'claude'],
+    'claude only': ['claude', 'claude', 'claude'],
+    claude: ['claude', 'claude', 'claude'],
+    'codex only': ['codex', 'codex', 'codex'],
+    codex: ['codex', 'codex', 'codex'],
+  }[normalized] || ['claude', 'codex', 'claude'];
+  const byId = {
+    'col-planning': mappedByPreset[0],
+    'col-build': mappedByPreset[1],
+    'col-review': mappedByPreset[2],
+  };
+
+  const orderedAgents = [...agents].sort((a, b) => a.order - b.order);
+  const presetByRole = {
+    both: { planning: 'claude', build: 'codex', review: 'claude' },
+    'claude only': { planning: 'claude', build: 'claude', review: 'claude' },
+    codex: { planning: 'codex', build: 'codex', review: 'codex' },
+    'codex only': { planning: 'codex', build: 'codex', review: 'codex' },
+    claude: { planning: 'claude', build: 'claude', review: 'claude' },
+  }[normalized] || { planning: mappedByPreset[0], build: mappedByPreset[1], review: mappedByPreset[2] };
+  const roleOrder = ['col-planning', 'col-build', 'col-review'];
+  const byRole = {
+    planning: orderedAgents.find((c) => c.id === roleOrder[0]) || orderedAgents[0],
+    build: orderedAgents.find((c) => c.id === roleOrder[1]) || orderedAgents[1],
+    review: orderedAgents.find((c) => c.id === roleOrder[2]) || orderedAgents[2],
+  };
+
+  for (const col of orderedAgents) {
+    let next = byId[col.id];
+    if (!next) {
+      if (col === byRole.planning) next = presetByRole.planning;
+      else if (col === byRole.build) next = presetByRole.build;
+      else if (col === byRole.review) next = presetByRole.review;
+      else next = mappedByPreset[orderedAgents.indexOf(col)] || mappedByPreset[0];
+    }
+    col.harness = { ...col.harness, type: next };
+  }
+
+  if (store.board.settings) {
+    store.board.settings.setup = {
+      ...(store.board.settings.setup || {}),
+      lastPreset: normalized,
+      completedAt: new Date().toISOString(),
+    };
+  }
+}
 
 // Validate an incoming attachment list ([{name, type, dataB64}]). Returns {ok, files?, error?, status?}.
 function checkAttachments(list) {
@@ -140,9 +251,18 @@ function fetchCodexRateLimits({ timeoutMs = 8000 } = {}) {
       try { proc.kill(); } catch {}
       err ? reject(err) : resolve(val);
     };
-    const send = (o) => proc.stdin.write(JSON.stringify(o) + '\n');
+    const send = (o) => {
+      if (!proc.stdin || proc.stdin.destroyed || proc.stdin.writableEnded) return false;
+      try {
+        return proc.stdin.write(JSON.stringify(o) + '\n');
+      } catch (err) {
+        finish(err);
+        return false;
+      }
+    };
     const timer = setTimeout(() => finish(new Error('app-server timeout')), timeoutMs);
     proc.on('error', (e) => finish(e));
+    proc.stdin.on('error', (e) => finish(e));
     proc.on('exit', () => { if (!settled) finish(new Error('app-server exited early')); });
     rl.on('line', (line) => {
       let msg; try { msg = JSON.parse(line); } catch { return; }
@@ -359,6 +479,7 @@ app.get('/api/state', (_req, res) => {
     tickets: [...store.tickets.values()],
     registry: REGISTRY,
     health,
+    setup: setupStatus(),
     usage: USAGE,
     runs: runner.snapshot(),
     scheduler: {
@@ -374,6 +495,63 @@ app.post('/api/probe', async (_req, res) => {
   health = nextHealth;
   broadcast({ type: 'state-changed' });
   res.json(health);
+});
+
+app.get('/api/setup/status', (_req, res) => {
+  res.json(setupStatus());
+});
+
+app.patch('/api/setup/providers', (req, res) => {
+  try {
+    const providers = validateProviderState(req.body?.providers);
+    const patch = {
+      ...store.board.settings,
+      providers: {
+        claude: { enabled: true },
+        codex: { enabled: true },
+        ...(store.board.settings.providers || {}),
+        ...providers,
+      },
+      setup: {
+        ...(store.board.settings.setup || {}),
+        completedAt: req.body?.completedAt === true ? new Date().toISOString() : (store.board.settings.setup?.completedAt || null),
+      },
+    };
+    if (req.body?.preset) patch.setup.lastPreset = normalizePreset(req.body.preset);
+    store.board.settings = patch;
+    store.saveBoard();
+    runner.pump();
+    broadcast({ type: 'state-changed' });
+    res.json(setupStatus());
+  } catch (e) {
+    res.status(400).json({ error: e.message || 'invalid provider config' });
+  }
+});
+
+app.post('/api/setup/preset', (req, res) => {
+  try {
+    const preset = normalizePreset(req.body?.preset);
+    applyPresetAssignments(preset);
+    store.saveBoard();
+    runner.pump();
+    broadcast({ type: 'state-changed' });
+    res.json(setupStatus());
+  } catch (e) {
+    res.status(400).json({ error: e.message || 'failed to apply preset' });
+  }
+});
+
+app.post('/api/setup/complete', (_req, res) => {
+  store.board.settings = {
+    ...store.board.settings,
+    setup: {
+      ...(store.board.settings.setup || {}),
+      completedAt: new Date().toISOString(),
+    },
+  };
+  store.saveBoard();
+  broadcast({ type: 'state-changed' });
+  res.json(setupStatus());
 });
 
 app.post('/api/notify/test', async (req, res) => {
@@ -605,6 +783,12 @@ app.post('/api/tickets/:id/run', (req, res) => {
   if (!t) return res.status(404).json({ error: 'not found' });
   const col = store.column(t.columnId);
   const h = store.effectiveHarness(t, col);
+  if (h.type !== 'human' && !store.providerEnabled(h.type)) {
+    return res.status(409).json({
+      queued: false,
+      reason: `${h.type} is disabled in Setup. Open Setup to enable it first.`,
+    });
+  }
   // RUN from a human column means "start the pipeline": advance to the next agent phase.
   if (h.type === 'human') {
     const next = store.nextAgentColumn(col.id, t);
@@ -672,12 +856,13 @@ app.get('/api/tickets/:id/attachments/:attId', (req, res) => {
 
 // ---- columns / board ----
 app.post('/api/columns', (req, res) => {
+  const harness = normalizeHarnessPayload(req.body?.harness) || { type: 'claude', model: 'claude-sonnet-5', effort: 'high', permissions: 'auto' };
   const col = {
     id: `col-${crypto.randomBytes(4).toString('hex')}`,
     name: req.body.name || 'New Phase',
     order: store.board.columns.length,
     role: req.body.role || 'agent',
-    harness: req.body.harness || { type: 'claude', model: 'claude-sonnet-5', effort: 'high', permissions: 'auto' },
+    harness,
     phasePrompt: req.body.phasePrompt || '',
     autoRun: req.body.autoRun ?? false,
     exitCriteria: req.body.exitCriteria || '',
@@ -691,6 +876,11 @@ app.post('/api/columns', (req, res) => {
 app.patch('/api/columns/:id', (req, res) => {
   const col = store.column(req.params.id);
   if (!col) return res.status(404).json({ error: 'not found' });
+  if (req.body?.harness) {
+    const harness = normalizeHarnessPayload(req.body.harness);
+    if (!harness) return res.status(400).json({ error: 'invalid harness payload' });
+    req.body = { ...req.body, harness };
+  }
   for (const k of ['name', 'role', 'harness', 'phasePrompt', 'autoRun', 'exitCriteria', 'order']) {
     if (k in req.body) col[k] = req.body[k];
   }

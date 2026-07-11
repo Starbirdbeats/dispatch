@@ -173,6 +173,11 @@ export class Runner {
     if (!column) return false;
     const harness = this.harnessFor(ticket, column);
     if (harness.type === 'human') return false;
+    if (!this.store.providerEnabled(harness.type)) {
+      this._parkDisabledProvider(ticket, harness.type);
+      this.broadcast({ type: 'state-changed' });
+      return false;
+    }
     if (ticket.activeRun || this.running.has(ticketId) || this.queue.some((j) => j.ticketId === ticketId)) return false;
 
     ticket.status = 'queued';
@@ -183,6 +188,20 @@ export class Runner {
     this.broadcast({ type: 'state-changed' });
     this._pump();
     return true;
+  }
+
+  _providerDisplayName(type) {
+    return type === 'claude' ? 'Claude' : type === 'codex' ? 'Codex' : type;
+  }
+
+  _parkDisabledProvider(ticket, type) {
+    const msg = `${this._providerDisplayName(type)} is disabled in Settings. Enable it in Setup to run this phase.`;
+    ticket.status = 'awaiting-human';
+    ticket.stuckReason = { kind: 'provider-disabled', at: nowIso(), detail: msg, provider: type };
+    ticket.scheduledAt = ticket.scheduledAt || null;
+    this.store.appendActivity(ticket.id, { kind: 'system', by: 'engine', text: msg });
+    this._maybeNotify(ticket, { by: 'engine' });
+    this.store.saveTicket(ticket.id);
   }
 
   stop(ticketId) {
@@ -315,6 +334,11 @@ export class Runner {
     const column = store.column(ticket.columnId);
     if (!column) throw new Error(`column missing: ${ticket.columnId}`);
     const harness = this.harnessFor(ticket, column);
+    if (!store.providerEnabled(harness.type)) {
+      this._parkDisabledProvider(ticket, harness.type);
+      this._closeEntry(ticketId);
+      return;
+    }
     if (ticket.oneShotHarness) { delete ticket.oneShotHarness; store.saveTicket(ticketId); }
     const adapter = ADAPTERS[harness.type];
     if (!adapter) throw new Error(`unknown harness ${harness.type}`);

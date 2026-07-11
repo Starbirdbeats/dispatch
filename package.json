@@ -4,12 +4,18 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "start": "node server.mjs",
+    "test:e2e": "node scripts/e2e/setup-ui.mjs",
+    "screenshots": "node scripts/e2e/capture-readme-screenshots.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
+  "devDependencies": {
+    "puppeteer": "^24.15.0"
+  },
   "dependencies": {
     "express": "^5.2.1",
     "ws": "^8.21.0"

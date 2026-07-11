@@ -20,7 +20,7 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
   // .git is kept read-only inside workspace-write unless listed as a writable root,
   // which would block the "commit your work" contract of Build-style phases.
   const gitDir = path.join(workspace, '.git');
-  const roots = JSON.stringify(resume ? [dataDir, gitDir] : [gitDir]);
+  const roots = JSON.stringify([dataDir, gitDir]);
   if (resume) {
     // `exec resume` has no --sandbox/-C/--add-dir flags; config overrides cover it.
     args.push('-c', `sandbox_mode="${sandbox}"`);

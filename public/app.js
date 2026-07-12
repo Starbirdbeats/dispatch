@@ -1677,6 +1677,7 @@ function renderSettingsModal() {
       <select id="s-tg-on"><option value="">off</option><option value="1" ${s.telegram?.enabled ? 'selected' : ''}>on</option></select>
       <label class="f">CHAT ID</label>
       <input id="s-tg-chat" value="${esc(s.telegram?.chatId || '')}" placeholder="e.g. 123456789">
+      <div class="hint">no bot yet? message <code>@BotFather</code> → <code>/newbot</code> for a token, then <code>@userinfobot</code> for your numeric chat ID. full walkthrough in the README's "Notifications (Telegram)" section.</div>
       <label class="f">PING ON</label>
       <label class="check-row inline"><input type="checkbox" id="s-tg-done" ${s.telegram?.events?.completed !== false ? 'checked' : ''}> <span>ticket completed</span></label>
       <label class="check-row inline"><input type="checkbox" id="s-tg-stuck" ${s.telegram?.events?.intervention !== false ? 'checked' : ''}> <span>needs my intervention</span></label>

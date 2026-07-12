@@ -8,6 +8,8 @@ const S = {
   liveContext: {},     // ticketId -> latest live context snapshot
   transcript: null,    // current transcript tab view state
   commentDraft: '',
+  mobilePhase: 0,      // <760px board: which phase (column index) is on screen
+  railExpanded: {},    // desktop rail: colId -> showing all chips past the +N cap
 };
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -15,13 +17,13 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 /* ---------- appearance prefs (device-local, not server state) ---------- */
 const PREFS_KEY = 'dispatch.appearance';
-const DEFAULT_PREFS = { theme: 'dark', fontPx: 20, uiScale: 1, transcriptShowTools: true };
+const DEFAULT_PREFS = { fontPx: 20, uiScale: 1, transcriptShowTools: true };
 function loadPrefs() {
   try { return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; }
   catch { return { ...DEFAULT_PREFS }; }
 }
 function applyPrefs(p) {
-  document.body.dataset.theme = p.theme;
+  // Single paper palette — no theme switch. Font size + UI scale stay device-local.
   document.documentElement.style.setProperty('--base-font', `${p.fontPx}px`);
   document.documentElement.style.zoom = String(p.uiScale);
 }
@@ -168,7 +170,6 @@ const ticketsIn = (colId) => S.data.tickets.filter((t) => t.columnId === colId &
   .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
 const archivedTickets = () => S.data.tickets.filter((t) => t.archived)
   .sort((a, b) => ((a.archivedAt || '') < (b.archivedAt || '') ? 1 : -1)); // newest first
-const harnessLabel = (h) => h.type === 'human' ? 'HUMAN' : `${h.type} · ${h.model || 'default'} · ${h.effort || 'default'}`;
 const BY_LABEL = { claude: 'CLAUDE CODE', codex: 'CODEX', human: 'YOU', engine: 'ENGINE' };
 // ↻ button placed beside model dropdowns — fetches the latest model releases into the registry
 const refreshBtn = () => '<button type="button" class="refresh-models" title="Fetch latest model releases from the provider"><span>↻</span></button>';
@@ -243,6 +244,8 @@ function fmtDur(ms) {
 }
 // human-readable local timestamp for completion display
 function fmtTs(iso) { try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); } catch { return iso || ''; } }
+// display number for a ticket — "DSP-039"; falls back to the raw id for pre-seq tickets
+const ticketNo = (t) => Number.isFinite(t?.seq) ? `DSP-${String(t.seq).padStart(3, '0')}` : (t?.id || '');
 const activeElapsed = (t) => (t.activeMs || 0) + (t.activeSince ? Date.now() - t.activeSince : 0);
 const activeClockSpan = (t) => `<span data-active-base="${t.activeMs || 0}" data-active-since="${t.activeSince || ''}">${esc(fmtDur(activeElapsed(t)))}</span>`;
 const isClockPaused = (t) => Boolean(t.startedAt) && !t.completedAt && !t.activeSince;
@@ -312,28 +315,68 @@ function liveContextHTML(t) {
   return `<div class="diag-context">${contextLineHTML(runningType, ctx, { live: true })}</div>`;
 }
 
-function usageWindowHTML(label, win, provider) {
+// "2H14M" remaining-until-reset countdown from an ISO timestamp (compact, no seconds).
+function fmtResetIn(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const s = Math.max(0, Math.round((t - Date.now()) / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}H${String(m).padStart(2, '0')}M` : `${m}M`;
+}
+// Weekly reset as weekday + HH:MM in local time, e.g. "SUN 00:00".
+function fmtResetDay(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const wd = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'][d.getDay()];
+  return `${wd} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+// Auth-source badge derived from the usage source string (tier isn't in the data model).
+function usageSourceLabel(source) {
+  const s = String(source || '').toLowerCase();
+  if (s.includes('oauth')) return 'OAUTH';
+  if (s.includes('api')) return 'API';
+  return '';
+}
+
+// One usage window: "5H ▓▓▓░ 62%" — the number is % USED; the 5H meter takes its
+// tone from what's left (green → amber → red), the weekly meter stays muted ink.
+function usageWindowHTML(label, win, provider, kind) {
   if (!win || !Number.isFinite(Number(win.usedPct))) {
-    return `<span class="usage-window missing"><span class="usage-key">${label}</span><b>—</b></span>`;
+    return `<span class="usage-window w${kind} missing"><span class="usage-key">${label}</span><b>—</b></span>`;
   }
-  const remaining = clamp(100 - Number(win.usedPct));
+  const used = clamp(win.usedPct);
+  const remaining = clamp(100 - used);
+  const tone = kind === '7d' ? 'muted' : meterTone(remaining);
   const title = [
-    `${provider} ${label}: ${pctText(remaining)} remaining`,
-    `${pctText(win.usedPct)} used`,
+    `${provider} ${label}: ${pctText(used)} used`,
+    `${pctText(remaining)} remaining`,
     win.resetsAt ? `resets ${fmtTs(win.resetsAt)}` : '',
   ].filter(Boolean).join(' · ');
-  return `<span class="usage-window tone-${meterTone(remaining)}" title="${esc(title)}">
-    <span class="usage-key">${label}</span>${meterHTML(remaining, remaining)}<b>${pctText(remaining)}</b>
+  return `<span class="usage-window w${kind} tone-${tone}" title="${esc(title)}">
+    <span class="usage-key">${label}</span><span class="meter tone-${tone}" style="--pct:${used}%"><span></span></span><b>${pctText(used)}</b>
   </span>`;
 }
 
 function usageProviderHTML(provider) {
   const u = S.data.usage?.[provider] || {};
   const title = [u.source, u.at ? `updated ${fmtTs(u.at)}` : '', u.error ? `error: ${u.error}` : ''].filter(Boolean).join(' · ');
+  // "MAX·OAUTH" / "PLUS·OAUTH" when the CLI auth file exposes a tier; source-derived otherwise
+  const plan = u.plan ? String(u.plan).toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ')[0] : '';
+  const src = plan ? `${plan}·OAUTH` : usageSourceLabel(u.source);
+  // dot echoes the 5H tone (green = headroom, amber = running low, red = nearly spent)
+  const tone5 = Number.isFinite(Number(u.fiveHour?.usedPct)) ? meterTone(clamp(100 - u.fiveHour.usedPct)) : 'muted';
+  const rst5 = u.fiveHour?.resetsAt ? fmtResetIn(u.fiveHour.resetsAt) : '';
+  const rstWk = u.weekly?.resetsAt ? fmtResetDay(u.weekly.resetsAt) : '';
+  // .usage-src + .usage-reset are surfaced on mobile (rich cards); desktop keeps the strip compact.
+  const reset = (rst5 || rstWk)
+    ? `<div class="usage-reset"><span>${rst5 ? `RST ${rst5}` : ''}</span><span>${rstWk ? `WK · ${rstWk}` : ''}</span></div>`
+    : '';
   return `<div class="usage-provider" title="${esc(title)}">
-    <span class="usage-name">${provider}</span>
-    ${usageWindowHTML('5H', u.fiveHour, provider)}
-    ${usageWindowHTML('7D', u.weekly, provider)}
+    <div class="usage-top"><span class="usage-dot tone-${tone5}"></span><span class="usage-name">${provider}</span>${src ? `<span class="usage-src">${esc(src)}</span>` : ''}</div>
+    ${usageWindowHTML('5H', u.fiveHour, provider, '5h')}
+    ${usageWindowHTML('7D', u.weekly, provider, '7d')}
+    ${reset}
   </div>`;
 }
 
@@ -552,16 +595,19 @@ function render() {
 
 function renderTopbar() {
   const h = S.data.health;
-  $('#health').innerHTML =
-    `<span class="${h.claude?.ok ? 'ok' : 'bad'}">CLAUDE ${h.claude?.ok ? (h.claude.version || 'OK') : 'OFFLINE'}</span>` +
-    ` &nbsp;///&nbsp; <span class="${h.codex?.ok ? 'ok' : 'bad'}">CODEX ${h.codex?.ok ? (h.codex.version || 'OK') : 'OFFLINE'}</span>`;
+  // Paper look: liveness lives in the usage meters. Only surface health when a harness is DOWN.
+  const down = [];
+  if (!h.claude?.ok) down.push('CLAUDE');
+  if (!h.codex?.ok) down.push('CODEX');
+  $('#health').innerHTML = down.map((n) => `<span class="bad">${n} OFFLINE</span>`).join(' &nbsp;///&nbsp; ');
   $('#usage').innerHTML = usageStripHTML();
   const r = S.data.runs;
   const cap = S.data.board.settings.maxConcurrent ?? 2;
   const paused = cap <= 0;
   $('#queueinfo').innerHTML = paused
-    ? `<span class="paused-flag">⏸ PAUSED</span> / RUNNING <b>${r.running.length}</b> / QUEUED <b>${r.queued.length}</b>`
-    : `RUNNING <b>${r.running.length}</b> / QUEUED <b>${r.queued.length}</b> / CAP <b>${cap}</b>`;
+    ? `<span class="paused-flag">⏸ PAUSED</span> · RUN <b>${r.running.length}</b> · Q <b>${r.queued.length}</b>`
+    : `RUN <b>${r.running.length}</b> · QUEUE <b>${r.queued.length}</b> · CAP <b>${cap}</b>`;
+  $('#btn-new').textContent = mqMobile.matches ? '+ TICKET' : '[ + TICKET ]';  // mobile bar drops the brackets
   const pauseBtn = $('#btn-pause');
   if (pauseBtn) {
     pauseBtn.textContent = paused ? '[ ▶ RESUME ]' : '[ ⏸ PAUSE ]';
@@ -581,79 +627,283 @@ function renderTopbar() {
   if (openNotice) openNotice.onclick = () => pushModal({ type: 'settings', tab: 'providers' });
 }
 
-function renderBoard() {
-  const board = $('#board');
-  const savedX = board.scrollLeft;
-  const savedY = new Map([...board.querySelectorAll('.column')]
-    .map((el) => [el.dataset.colId, $('.col-body', el)?.scrollTop || 0]));
-  board.innerHTML = '';
-  for (const c of cols()) {
-    const activeType = c.harness?.type;
-    const disabledType = activeType !== 'human' && !isProviderEnabled(activeType);
-    const col = document.createElement('section');
-    col.className = 'column';
-    col.dataset.colId = c.id;
-    const tickets = ticketsIn(c.id);
-    col.innerHTML = `
-      <div class="col-head">
-        <div class="col-title"><h2>${esc(c.name)}</h2><span class="count">${String(tickets.length).padStart(2, '0')}</span></div>
-        <div class="col-harness">
-          <span>[ ${esc(harnessLabel(c.harness))} ]${c.autoRun ? ' <span class="auto">AUTO</span>' : ''}</span>
-          ${disabledType ? '<span class="col-warn">PROVIDER DISABLED IN SETUP</span>' : ''}
-          <button class="cfg" data-cfg="${c.id}">CFG &gt;&gt;</button>
-        </div>
-        ${c.role === 'intake' && S.data.scheduler?.autoDispatch
-          ? `<div class="col-sweep">AUTO SWEEP <span data-sweep>T-—:——</span></div>` : ''}
-      </div>
-      <div class="col-body"></div>`;
-    const body = $('.col-body', col);
-    for (const t of tickets) body.appendChild(cardEl(t, c));
-    // drag & drop
-    col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('dragover'); });
-    col.addEventListener('dragleave', () => col.classList.remove('dragover'));
-    col.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      col.classList.remove('dragover');
-      const id = e.dataTransfer.getData('text/ticket');
-      if (id) await api(`/api/tickets/${id}/move`, 'POST', { columnId: c.id }).catch(alertErr);
-    });
-    $('.cfg', col).onclick = () => pushModal({ type: 'column', id: c.id });
-    board.appendChild(col);
-  }
-  board.scrollLeft = savedX;
-  for (const colEl of board.querySelectorAll('.column')) {
-    const y = savedY.get(colEl.dataset.colId);
-    if (y) $('.col-body', colEl).scrollTop = y;
-  }
+/* Board = design 3a: desktop (≥760px) is the 1c pipeline rail + in-flight tracker;
+   mobile (<760px) is the 2a one-phase-per-screen swipe view. */
+const mqMobile = window.matchMedia('(max-width: 760px)');
+mqMobile.addEventListener('change', () => { if (S.data) render(); }); // topbar labels + board layout both flip
+
+// Phase/harness accent for a column: intake=red, terminal=faint, else the harness type colour.
+function stationAccent(c) {
+  if (c.role === 'intake') return 'var(--red)';
+  if (c.role === 'terminal') return 'var(--fg-faint)';
+  if (c.harness?.type === 'claude') return 'var(--claude)';
+  if (c.harness?.type === 'codex') return 'var(--codex)';
+  return 'var(--red)'; // human agent phase
 }
 
-function cardEl(t, c) {
-  const el = document.createElement('article');
-  const running = S.data.runs.running.includes(t.id);
-  const status = running ? 'running' : (S.data.runs.queued.includes(t.id) ? 'queued' : (c.role === 'terminal' ? 'done' : t.status));
-  const eff = effective(t, c);
-  const disabledHarness = eff.type !== 'human' && !isProviderEnabled(eff.type);
-  el.className = `card status-${status}`;
-  el.draggable = true;
-  const last = [...t.activity].reverse().find((a) => a.kind !== 'run');
-  const dx = diagnose(t, c);
+function ticketStatus(t, c) {
+  if (S.data.runs.running.includes(t.id)) return 'running';
+  if (S.data.runs.queued.includes(t.id)) return 'queued';
+  if (c.role === 'terminal') return 'done';
+  return t.status;
+}
+
+// Compact harness label for a station/row, e.g. "CLAUDE·FABLE-5·HIGH", "HUMAN · INTAKE".
+function stationHarnessLabel(c) {
+  if (c.role === 'intake') return 'HUMAN · INTAKE';
+  if (c.role === 'terminal') return 'TERMINAL · GATE';
+  const h = c.harness || {};
+  if (h.type === 'human') return 'HUMAN';
+  // strip the redundant type prefix from the model id: claude-fable-5 → FABLE-5
+  const model = String(h.model || '').replace(new RegExp(`^${h.type}[-_]`, 'i'), '');
+  return [h.type, model, h.effort].filter(Boolean).join('·').toUpperCase();
+}
+
+// 4-char phase tag for the tracker progress bar (data-driven from the column name).
+function phaseAbbrev(name) {
+  return String(name || '').replace(/[^a-z0-9]/gi, '').slice(0, 4).toUpperCase() || '—';
+}
+
+function queuePos(id) {
+  const i = (S.data.runs.queued || []).indexOf(id);
+  return i < 0 ? '?' : i + 1;
+}
+
+function renderBoard() {
+  const board = $('#board');
+  board.innerHTML = '';
+  board.classList.toggle('mobile', mqMobile.matches);
+  if (mqMobile.matches) renderMobileBoard(board);
+  else renderRailBoard(board);
+}
+
+/* ---- desktop: pipeline rail + in-flight tracker ---- */
+function renderRailBoard(board) {
+  const rail = document.createElement('div');
+  rail.className = 'rail';
+  const list = cols();
+  list.forEach((c, i) => {
+    rail.appendChild(stationEl(c));
+    if (i < list.length - 1) {
+      const arr = document.createElement('div');
+      arr.className = 'rail-arrow';
+      arr.textContent = '▸';
+      rail.appendChild(arr);
+    }
+  });
+  board.appendChild(rail);
+  board.appendChild(inflightEl());
+}
+
+function stationEl(c) {
+  const tickets = ticketsIn(c.id);
+  const accent = stationAccent(c);
+  const runningHere = tickets.some((t) => S.data.runs.running.includes(t.id));
+  const disabledType = c.harness?.type && c.harness.type !== 'human' && !isProviderEnabled(c.harness.type);
+  const el = document.createElement('div');
+  el.className = 'station';
+  el.style.setProperty('--accent', accent);
   el.innerHTML = `
-    <div class="t"><span class="led ${status}"></span><span class="title">${esc(t.title)}</span>${t.readOnly ? '<span class="ro-tag" title="Read-only ticket">RO</span>' : ''}${c.role === 'terminal' ? `<button class="arch" title="Archive ticket">[ ARCH ]</button>` : ''}</div>
-    <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span>
-      <span class="meta-badges">${disabledHarness ? '<span class="badge tone-stuck">PROVIDER DISABLED</span>' : ''}<span class="badge tone-${dx.tone}">${dx.tone === 'stuck' ? '⚠ ' : ''}${esc(dx.label)}</span></span>
+    <div class="station-head">
+      <div class="sh-top">
+        <span class="station-name">${esc(c.name)}</span>
+        <span style="display:inline-flex;gap:6px;align-items:center">
+          ${runningHere ? '<span class="run-badge">★ RUN</span>' : ''}
+          <span class="station-count">${String(tickets.length).padStart(2, '0')}</span>
+        </span>
+      </div>
+      <div class="station-harness"><span class="dot"></span>${esc(stationHarnessLabel(c))}${c.role === 'agent' && !c.autoRun ? ' · MANUAL' : ''}<button class="cfg" data-cfg="${c.id}" title="Configure phase">CFG</button></div>
+      ${disabledType ? '<div class="station-sweep" style="color:var(--red);border-color:var(--red)">PROVIDER DISABLED IN SETUP</div>' : ''}
+      ${c.role === 'intake' && S.data.scheduler?.autoDispatch
+        ? '<div class="station-sweep">AUTO SWEEP <span data-sweep>T-—:——</span></div>' : ''}
     </div>
-    ${t.completedAt && t.durationMs != null
-      ? `<div class="timing done">✓ took ${esc(fmtDur(t.durationMs))} · ${esc(fmtTs(t.completedAt))}</div>`
-      : (t.startedAt ? `<div class="timing">${isClockPaused(t) ? '⏸ paused' : '⏱ active'} ${activeClockSpan(t)}</div>` : '')}
-    ${t.scheduledAt ? `<div class="last">SCHED ${esc(t.scheduledAt.replace('T', ' '))}</div>` : ''}
-    ${last ? `<div class="last">&gt; ${esc(last.text)}</div>` : ''}`;
+    <div class="station-body"></div>`;
+  const body = $('.station-body', el);
+  const CAP = 4;
+  const expanded = S.railExpanded[c.id];
+  const shown = expanded ? tickets : tickets.slice(0, CAP);
+  for (const t of shown) body.appendChild(chipEl(t, c));
+  if (tickets.length > CAP) {
+    const btn = document.createElement('button');
+    btn.className = 'chip-more';
+    btn.textContent = expanded ? 'SHOW LESS' : `+${tickets.length - CAP} MORE`;
+    btn.onclick = () => { S.railExpanded[c.id] = !expanded; renderBoard(); };
+    body.appendChild(btn);
+  }
+  if (c.role === 'intake') {
+    const drop = document.createElement('div');
+    drop.className = 'chip-drop';
+    drop.textContent = '· · · DROP TICKET · · ·';
+    body.appendChild(drop);
+  }
+  $('.cfg', el).onclick = (e) => { e.stopPropagation(); pushModal({ type: 'column', id: c.id }); };
+  // drag & drop a ticket onto a station = move it to that column
+  el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('dragover'); });
+  el.addEventListener('dragleave', () => el.classList.remove('dragover'));
+  el.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    el.classList.remove('dragover');
+    const id = e.dataTransfer.getData('text/ticket');
+    if (id) await api(`/api/tickets/${id}/move`, 'POST', { columnId: c.id }).catch(alertErr);
+  });
+  return el;
+}
+
+function chipEl(t, c) {
+  const el = document.createElement('div');
+  const st = ticketStatus(t, c);
+  el.className = `chip card status-${st}`;
+  el.dataset.id = t.id;
+  el.draggable = true;
+  el.innerHTML = `<span class="led ${st}"></span><span class="title">${esc(t.title)}</span>`;
   el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/ticket', t.id); el.classList.add('dragging'); });
   el.addEventListener('dragend', () => el.classList.remove('dragging'));
-  const archBtn = $('.arch', el);
-  if (archBtn) archBtn.onclick = (e) => {
-    e.stopPropagation(); // don't open the ticket modal
-    api(`/api/tickets/${t.id}/archive`, 'POST', {}).then(() => toast('ARCHIVED')).catch(alertErr);
+  el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
+  return el;
+}
+
+function inflightEl() {
+  const running = S.data.runs.running || [];
+  const queued = S.data.runs.queued || [];
+  const wrap = document.createElement('div');
+  wrap.className = 'inflight';
+  wrap.innerHTML = `<div class="inflight-head"><span class="dot"></span>IN FLIGHT · ${running.length} RUNNING · ${queued.length} QUEUED</div>`;
+  const track = document.createElement('div');
+  track.className = 'track';
+  const ids = [...running, ...queued.filter((id) => !running.includes(id))];
+  const rows = ids.map((id) => S.data.tickets.find((t) => t.id === id)).filter(Boolean);
+  if (!rows.length) {
+    track.innerHTML = '<div class="inflight-empty">NO RUNS IN FLIGHT — queue a ticket and watch it move down the line</div>';
+  } else {
+    for (const t of rows) track.appendChild(trackRowEl(t));
+  }
+  wrap.appendChild(track);
+  return wrap;
+}
+
+function trackRowEl(t) {
+  const list = cols();
+  const cur = list.findIndex((col) => col.id === t.columnId);
+  const c = list[cur] || {};
+  const isRun = S.data.runs.running.includes(t.id);
+  const isQ = S.data.runs.queued.includes(t.id);
+  const accent = stationAccent(c);
+  const segs = list.map((col, i) => {
+    if (i < cur) return `<span class="seg passed" style="background:${stationAccent(col)}"></span>`;
+    if (i === cur) {
+      if (isRun) return `<span class="seg passed current-run" style="background:${accent}"></span>`;
+      if (isQ) return '<span class="seg current-queue"></span>';
+      return `<span class="seg passed" style="background:${accent}"></span>`;
+    }
+    return '<span class="seg"></span>';
+  }).join('');
+  const labels = list.map((col, i) => `<span class="${i === cur ? 'here' : ''}">${esc(phaseAbbrev(col.name))}</span>`).join('');
+  const startMs = t.startedAt ? Date.parse(t.startedAt) : null;
+  const row = document.createElement('div');
+  row.className = 'track-row card';
+  row.dataset.id = t.id;
+  row.innerHTML = `
+    <div style="min-width:0">
+      <div class="track-title">${esc(t.title)}</div>
+      <div class="track-sub"><span class="dot" style="background:${accent}"></span>${esc(ticketNo(t))} · ${esc(stationHarnessLabel(c))}</div>
+    </div>
+    <div><div class="seg-row">${segs}</div><div class="seg-labels">${labels}</div></div>
+    <div class="track-phase${isQ ? ' queued' : ''}">${isQ ? `Queued · pos ${queuePos(t.id)}` : `▸ ${esc(c.name || '?')}`}</div>
+    ${isRun && startMs ? `<div class="track-elapsed" data-tplus="${startMs}">T+00:00</div>` : '<div class="track-elapsed none">—</div>'}`;
+  row.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
+  return row;
+}
+
+/* ---- mobile: one phase per screen, swipe/tap between phases ---- */
+function renderMobileBoard(board) {
+  const list = cols();
+  if (!list.length) return;
+  S.mobilePhase = Math.max(0, Math.min(S.mobilePhase, list.length - 1));
+  const idx = S.mobilePhase;
+  const c = list[idx];
+  const tickets = ticketsIn(c.id);
+  const accent = stationAccent(c);
+  const runningHere = tickets.some((t) => S.data.runs.running.includes(t.id));
+
+  // run/queue/cap ledger (queueinfo is hidden on mobile; this restates it above the phase pager)
+  const rr = S.data.runs;
+  const cap = S.data.board.settings.maxConcurrent ?? 2;
+  const strip = document.createElement('div');
+  strip.className = 'mrunstrip';
+  strip.innerHTML = cap <= 0
+    ? `<span class="paused-flag">⏸ PAUSED</span> · RUN ${rr.running.length} · Q ${rr.queued.length}`
+    : `RUN ${rr.running.length} · Q ${rr.queued.length} · CAP ${cap}`;
+  board.appendChild(strip);
+
+  const nav = document.createElement('div');
+  nav.className = 'mphase-nav';
+  nav.innerHTML = `
+    <button class="mprev" ${idx === 0 ? 'disabled' : ''} aria-label="previous phase">‹</button>
+    <div class="mphase-title">
+      <div class="n">${esc(c.name)}</div>
+      <div class="h">${runningHere ? '<span class="run-badge">★ RUN</span>' : ''}<span class="dot" style="background:${accent}"></span>${esc(stationHarnessLabel(c))}</div>
+    </div>
+    <button class="mnext" ${idx === list.length - 1 ? 'disabled' : ''} aria-label="next phase">›</button>`;
+  board.appendChild(nav);
+
+  const dots = document.createElement('div');
+  dots.className = 'mdots';
+  dots.innerHTML = list.map((_, i) => `<span class="${i === idx ? 'on' : ''}"></span>`).join('');
+  board.appendChild(dots);
+
+  const body = document.createElement('div');
+  body.className = 'mbody';
+  if (tickets.length) {
+    for (const t of tickets) body.appendChild(mcardEl(t, c));
+  } else {
+    const empty = document.createElement('div');
+    empty.className = 'chip-drop';
+    empty.textContent = '· · · NO TICKETS IN THIS PHASE · · ·';
+    body.appendChild(empty);
+  }
+  // every phase gets a drop target on mobile; tapping it opens the new-ticket form
+  const drop = document.createElement('div');
+  drop.className = 'chip-drop';
+  drop.textContent = '· · · DROP TICKET · · ·';
+  drop.onclick = () => { S.newAttachments = []; pushModal({ type: 'new' }); };
+  body.appendChild(drop);
+  const prevN = idx > 0 ? list[idx - 1].name : '';
+  const nextN = idx < list.length - 1 ? list[idx + 1].name : '';
+  const hint = document.createElement('div');
+  hint.className = 'mswipe-hint';
+  hint.innerHTML = `${prevN ? '‹ ' : ''}SWIPE · ${[prevN && esc(prevN), nextN && esc(nextN)].filter(Boolean).join('&nbsp;&nbsp;|&nbsp;&nbsp;')}${nextN ? ' ›' : ''}`;
+  body.appendChild(hint);
+  board.appendChild(body);
+
+  const go = (d) => { const n = idx + d; if (n >= 0 && n < list.length) { S.mobilePhase = n; renderBoard(); } };
+  $('.mprev', nav).onclick = () => go(-1);
+  $('.mnext', nav).onclick = () => go(1);
+  let x0 = null;
+  board.ontouchstart = (e) => { x0 = e.touches[0].clientX; };
+  board.ontouchend = (e) => {
+    if (x0 == null) return;
+    const dx = e.changedTouches[0].clientX - x0;
+    if (Math.abs(dx) > 45) go(dx < 0 ? 1 : -1);
+    x0 = null;
   };
+}
+
+function mcardEl(t, c) {
+  const el = document.createElement('div');
+  const st = ticketStatus(t, c);
+  el.className = `mcard card status-${st}`;
+  el.dataset.id = t.id;
+  const last = [...t.activity].reverse().find((a) => a.kind !== 'run');
+  const startMs = t.startedAt ? Date.parse(t.startedAt) : null;
+  const foot = st === 'running' && startMs
+    ? `<span class="t run"><span data-tplus="${startMs}">T+00:00</span> · RUNNING</span>`
+    : `<span class="t">${esc(st.toUpperCase())}</span>`;
+  el.innerHTML = `
+    <div class="mc-top"><span class="led ${st}"></span><span class="title">${esc(t.title)}</span></div>
+    <div class="mc-meta"><span>${esc(ticketNo(t))}</span><span>${esc(t.workspace.split('/').pop())}</span></div>
+    <div class="mc-harness"><span class="dot" style="background:${stationAccent(c)}"></span>${esc(stationHarnessLabel(c))}</div>
+    ${last ? `<div class="mc-last">▸ ${esc(last.text)}</div>` : ''}
+    <div class="mc-foot">${foot}<span class="tap">tap to open ▸</span></div>`;
   el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
   return el;
 }
@@ -1712,7 +1962,14 @@ function renderSettingsModal() {
         <span>DATA DIR: <b id="s-usage">…</b></span>
         <button class="btn" id="s-prune">[ RECLAIM DISK SPACE ]</button>
       </div>
-      <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>`)}
+      <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>
+
+      <hr class="sep">
+      <div class="section-head">ARCHIVE</div>
+      <div class="disk-row">
+        <span>ARCHIVED TICKETS: <b>${S.data.tickets.filter((t) => t.archived).length}</b></span>
+        <button class="btn" id="s-open-archive">[ OPEN ARCHIVE ]</button>
+      </div>`)}
 
       ${pane('providers', `
       <div class="section-head">PROVIDERS <span>(claude code + codex)</span></div>
@@ -1771,10 +2028,6 @@ function renderSettingsModal() {
 
       ${pane('appearance', `
       <div class="section-head">APPEARANCE <span>(this device only)</span></div>
-      <label class="f">THEME</label>
-      <div class="theme-row">
-        ${['dark', 'light', 'sepia'].map((th) => `<button class="theme-swatch th-${th} ${p.theme === th ? 'sel' : ''}" data-theme-pick="${th}">${th}</button>`).join('')}
-      </div>
       <label class="f">FONT SIZE <output id="s-font-val">${p.fontPx}px</output></label>
       <input id="s-font" type="range" min="12" max="32" step="1" value="${p.fontPx}">
       <label class="f">UI SIZE <output id="s-ui-val">${Math.round(p.uiScale * 100)}%</output></label>
@@ -1798,6 +2051,7 @@ function renderSettingsModal() {
   loadSecretsSettings();
   loadSystemPromptSettings();
   api('/api/maintenance/usage').then((u) => { const el = $('#s-usage'); if (el) el.textContent = fmtBytes(u.bytes); }).catch(() => {});
+  $('#s-open-archive').onclick = () => pushModal({ type: 'archive' });
   $('#s-prune').onclick = () => {
     $('#s-prune').textContent = '[ RECLAIMING… ]';
     api('/api/maintenance/prune', 'POST', {}).then((r) => {
@@ -1870,12 +2124,6 @@ function renderSettingsModal() {
   };
 
   // Appearance — device-local, applies live and persists immediately (no server round-trip).
-  for (const btn of document.querySelectorAll('[data-theme-pick]')) {
-    btn.onclick = () => {
-      savePrefs({ ...S.prefs, theme: btn.dataset.themePick });
-      for (const b of document.querySelectorAll('[data-theme-pick]')) b.classList.toggle('sel', b === btn);
-    };
-  }
   $('#s-font').oninput = (e) => { savePrefs({ ...S.prefs, fontPx: Number(e.target.value) }); $('#s-font-val').textContent = `${e.target.value}px`; };
   $('#s-ui').oninput = (e) => { savePrefs({ ...S.prefs, uiScale: Number(e.target.value) }); $('#s-ui-val').textContent = `${Math.round(e.target.value * 100)}%`; };
   $('#s-appear-reset').onclick = () => { savePrefs({ ...DEFAULT_PREFS }); renderSettingsModal(); };
@@ -1970,6 +2218,11 @@ setInterval(() => {
   for (const el of document.querySelectorAll('[data-liveclock]')) {
     el.textContent = fmtDur(now - Number(el.dataset.liveclock));
   }
+  for (const el of document.querySelectorAll('[data-tplus]')) {
+    const ms = Math.max(0, now - Number(el.dataset.tplus));
+    const m = Math.floor(ms / 60000), s = Math.floor((ms % 60000) / 1000);
+    el.textContent = `T+${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
   for (const el of document.querySelectorAll('[data-active-base]')) {
     const base = Number(el.dataset.activeBase) || 0;
     const since = Number(el.dataset.activeSince) || 0;
@@ -1990,10 +2243,46 @@ $('#btn-pause').onclick = () => {
     .then(() => toast(next === 0 ? 'ENGINE PAUSED — nothing new will run' : `ENGINE RESUMED — cap ${next}`))
     .catch(alertErr);
 };
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') requestCloseModal(); });
-document.addEventListener('click', (e) => { if (e.target.closest('.refresh-models')) { e.preventDefault(); refreshModelRegistry(); } });
+/* ---- mobile overflow menu (≡): folds Pause / Archive / Settings off the top bar ---- */
+function buildTopMenu() {
+  const cap = S.data?.board?.settings?.maxConcurrent ?? 2;
+  const paused = cap <= 0;
+  const archived = S.data?.tickets?.filter((t) => t.archived).length || 0;
+  return [
+    { id: 'btn-pause', label: paused ? '▶ RESUME ENGINE' : '⏸ PAUSE ENGINE', danger: paused },
+    { id: 'btn-archive', label: archived ? `ARCHIVE · ${String(archived).padStart(2, '0')}` : 'ARCHIVE' },
+    { id: 'btn-settings', label: 'SETTINGS' },
+  ].map((it) => `<button class="topmenu-item${it.danger ? ' danger' : ''}" data-act="${it.id}">${it.label}</button>`).join('');
+}
+function closeTopMenu() {
+  const m = $('#topmenu');
+  if (!m || m.hidden) return;
+  m.hidden = true;
+  $('#btn-menu')?.setAttribute('aria-expanded', 'false');
+}
+function toggleTopMenu() {
+  const m = $('#topmenu');
+  if (!m) return;
+  if (!m.hidden) { closeTopMenu(); return; }
+  m.innerHTML = buildTopMenu();
+  const bar = $('#topbar')?.getBoundingClientRect();
+  if (bar) { m.style.top = `${bar.bottom}px`; m.style.right = `${Math.max(8, window.innerWidth - bar.right + 8)}px`; }
+  m.hidden = false;
+  $('#btn-menu')?.setAttribute('aria-expanded', 'true');
+  // items just re-trigger the real (hidden) top-bar buttons so wiring stays in one place
+  for (const b of m.querySelectorAll('[data-act]')) {
+    b.onclick = () => { closeTopMenu(); $(`#${b.dataset.act}`)?.click(); };
+  }
+}
+$('#btn-menu').onclick = (e) => { e.stopPropagation(); toggleTopMenu(); };
 
-savePrefs(loadPrefs()); // apply saved theme / font / UI scale before first paint
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeTopMenu(); requestCloseModal(); } });
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.refresh-models')) { e.preventDefault(); refreshModelRegistry(); }
+  if (!e.target.closest('#topmenu') && !e.target.closest('#btn-menu')) closeTopMenu();
+});
+
+savePrefs(loadPrefs()); // apply saved font size / UI scale before first paint
 loadState()
   .then(() => { initHistoryFromLocation(); connectWS(); }) // needs S.data loaded first, to validate a deep-linked ticket/column id
   .catch((e) => { document.body.innerHTML = `<pre style="color:#ff2a2a;padding:20px">DISPATCH FAILED TO LOAD: ${esc(e.message)}</pre>`; });

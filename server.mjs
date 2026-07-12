@@ -34,7 +34,7 @@ const [{ Store, DATA_DIR, providerEnabled, enabledProviders }, { Runner }, notif
   import('./registry.mjs'),
 ]);
 const { telegramConfig, sendTelegram } = notify;
-const { USAGE, codexRateLimitWindows, loadUsageCache, setProviderUsage } = usage;
+const { USAGE, codexRateLimitWindows, loadUsageCache, setProviderUsage, setProviderPlan } = usage;
 const { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe, readClaudeOAuthToken } = registry;
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
 
@@ -210,6 +210,28 @@ function mapClaudeUsageWindow(win) {
   };
 }
 
+// Subscription tier for the usage strip ("MAX·OAUTH" / "PLUS·OAUTH"). Both read
+// local CLI auth files — display-only, best-effort, never logged.
+function readClaudePlan() {
+  try {
+    const creds = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8'));
+    return (creds.claudeAiOauth || creds).subscriptionType || null;
+  } catch { return null; }
+}
+function readCodexPlan() {
+  try {
+    const auth = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.codex', 'auth.json'), 'utf8'));
+    const idToken = auth?.tokens?.id_token;
+    // decode-only (no verify): we just want the plan claim for display
+    const payload = JSON.parse(Buffer.from(idToken.split('.')[1], 'base64url').toString('utf8'));
+    return payload?.['https://api.openai.com/auth']?.chatgpt_plan_type || null;
+  } catch { return null; }
+}
+function refreshProviderPlans() {
+  setProviderPlan('claude', readClaudePlan());
+  setProviderPlan('codex', readCodexPlan());
+}
+
 async function probeClaudeUsage() {
   const at = new Date().toISOString();
   try {
@@ -322,8 +344,10 @@ async function probeCodexUsage() {
   }
 }
 
+refreshProviderPlans();
 Promise.allSettled([probeClaudeUsage(), probeCodexUsage()]).then(() => broadcast({ type: 'usage-update', usage: USAGE })).catch(() => {});
 setInterval(() => {
+  refreshProviderPlans();
   Promise.allSettled([probeClaudeUsage(), probeCodexUsage()]).then(() => broadcast({ type: 'usage-update', usage: USAGE })).catch(() => {});
 }, 5 * 60 * 1000);
 
@@ -491,6 +515,7 @@ app.get('/api/state', (_req, res) => {
 });
 
 app.post('/api/probe', async (_req, res) => {
+  refreshProviderPlans();
   const [nextHealth] = await Promise.all([probe(), probeClaudeUsage(), probeCodexUsage()]);
   health = nextHealth;
   broadcast({ type: 'state-changed' });

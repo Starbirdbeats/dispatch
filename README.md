@@ -52,7 +52,7 @@ Optional:
 
 ## Setup for First Run
 
-When you run Dispatch the first time, open **SETTINGS** → **SETUP** and complete three decisions:
+When you run Dispatch the first time, open **SETTINGS** → **PROVIDERS** and complete three decisions:
 
 1. **Enable providers**
    - Turn `Claude Code` on/off
@@ -94,6 +94,16 @@ If a phase uses a disabled provider, Dispatch will pause that phase and ask for 
   - `.env` (repo working directory or `DISPATCH_ENV_FILE`)
   - Environment variables injected by your service definition
 - Secrets are never committed.
+
+## Notifications (Telegram)
+
+Dispatch can ping you on ticket completion or when a ticket needs intervention. Set it up once:
+
+1. **Create a bot.** Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`, and follow the prompts. It replies with a bot token that looks like `123456789:AAExampleTokenString`.
+2. **Set the token.** Add it as `TELEGRAM_BOT_TOKEN` in your `.env` (or the service unit's environment) — the token is never entered in the Dispatch UI, only read from the environment.
+3. **Start a chat with your bot.** Search for its username in Telegram and send `/start`. Bots can't message you until you've messaged them first.
+4. **Get your chat ID.** Easiest path: message [@userinfobot](https://t.me/userinfobot) and it replies with your numeric ID. Alternatively, send your new bot any message, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser and read `message.chat.id` from the JSON response.
+5. **Wire it up in Dispatch.** Open **SETTINGS** → **NOTIFY**, paste the chat ID into **CHAT ID** (or set `TELEGRAM_CHAT_ID` as an env var instead — the env var wins if both are set), toggle **TELEGRAM ALERTS** on, pick which events to ping on, and hit **[ SEND TEST ]** to confirm delivery.
 
 ## Deployment examples
 

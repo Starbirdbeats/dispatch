@@ -578,7 +578,7 @@ function renderTopbar() {
       : '<span class="muted">SETUP READY</span>';
   }
   const openNotice = $('#s-open-setup');
-  if (openNotice) openNotice.onclick = () => { S.modal = { type: 'settings' }; renderModal(); };
+  if (openNotice) openNotice.onclick = () => { S.modal = { type: 'settings', tab: 'providers' }; renderModal(); };
 }
 
 function renderBoard() {
@@ -685,7 +685,7 @@ function shell(title, bodyHTML, footHTML = '') {
         ${footHTML ? `<div class="panel-foot">${footHTML}</div>` : ''}
       </div>
     </div>`;
-  $('#modal-close').onclick = closeModal;
+  $('#modal-close').onclick = requestCloseModal;
   $('#overlay').onclick = (e) => { if (e.target.id === 'overlay') closeModal(); };
 }
 
@@ -1454,7 +1454,7 @@ function secretRows(entries = []) {
     <div class="h">KEY</div><div class="h">VALUE</div><div class="h">SOURCE</div><div class="h">ACTIONS</div>
     ${entries.map((entry) => `<div class="secret-key">${esc(entry.key)}</div>
       <div><input class="secret-value" type="password" value="${esc(entry.value)}" autocomplete="off" spellcheck="false"></div>
-      <div><span class="secret-source">${esc(secretSource(entry))}</span></div>
+      <div><span class="secret-source ${entry.inFile ? (entry.inRuntime ? 'src-both' : 'src-file') : 'src-runtime'}">${esc(secretSource(entry))}</span></div>
       <div class="secret-actions" data-key="${esc(entry.key)}">
         <button type="button" class="btn" data-secret-reveal>[ SHOW ]</button>
         <button type="button" class="btn" data-secret-save>[ SAVE ]</button>
@@ -1473,7 +1473,8 @@ function renderSecretsPanel(data) {
       <button type="button" class="btn" id="s-secret-new-reveal">[ SHOW ]</button>
       <button type="button" class="btn btn-accent" id="s-secret-add">[ ADD ]</button>
     </div>
-    <div class="hint">FILE: <code>${esc(data.path || '.env')}</code>. Runtime-only keys are visible but delete is disabled until saved into .env.</div>
+    <div class="hint" id="s-secret-msg"></div>
+    <div class="hint"><code>${esc(data.path || '.env')}</code> · each row's [ SAVE ] writes straight to this file · runtime-only keys have no <code>.env</code> line to delete yet.</div>
     ${secretRows(data.entries || [])}`;
   wireSecretsPanel();
 }
@@ -1486,9 +1487,32 @@ function wireSecretsPanel() {
   };
   const newValue = $('#s-secret-value');
   $('#s-secret-new-reveal').onclick = () => toggle(newValue, $('#s-secret-new-reveal'));
-  $('#s-secret-add').onclick = async () => {
-    const key = $('#s-secret-key').value.trim();
-    const value = $('#s-secret-value').value;
+
+  // Add-row key validation: block ADD until the key is a valid env name; warn on overwrite.
+  const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  const keyInput = $('#s-secret-key');
+  const addBtn = $('#s-secret-add');
+  const msg = $('#s-secret-msg');
+  const existingKeys = new Set([...document.querySelectorAll('.secret-key')].map((el) => el.textContent));
+  const validateKey = () => {
+    const k = keyInput.value.trim();
+    if (!k) { addBtn.disabled = true; msg.textContent = ''; msg.className = 'hint'; return; }
+    if (!KEY_RE.test(k)) {
+      addBtn.disabled = true;
+      msg.textContent = 'KEY MUST BE LETTERS, DIGITS OR _ AND NOT START WITH A DIGIT';
+      msg.className = 'hint bad';
+      return;
+    }
+    addBtn.disabled = false;
+    if (existingKeys.has(k)) { msg.textContent = `${k} ALREADY EXISTS — SAVING WILL OVERWRITE IT`; msg.className = 'hint warn'; }
+    else { msg.textContent = ''; msg.className = 'hint'; }
+  };
+  keyInput.addEventListener('input', validateKey);
+  validateKey();
+
+  addBtn.onclick = async () => {
+    const key = keyInput.value.trim();
+    const value = newValue.value;
     try {
       renderSecretsPanel(await api('/api/secrets', 'POST', { key, value }));
       toast('SECRET SAVED');
@@ -1518,6 +1542,29 @@ function wireSecretsPanel() {
       } catch (e) { alertErr(e); }
     };
   }
+  // Mark a row's [ SAVE ] as unsaved once its value diverges from what's on disk.
+  // The panel re-renders after every save, so defaultValue re-syncs and the flag clears.
+  for (const input of document.querySelectorAll('.secret-value')) {
+    input.addEventListener('input', () => {
+      const saveBtn = input.closest('div').nextElementSibling?.nextElementSibling?.querySelector('[data-secret-save]');
+      if (saveBtn) saveBtn.classList.toggle('dirty', input.value !== input.defaultValue);
+    });
+  }
+}
+
+// True when the secrets panel has value edits that were never saved to .env.
+function unsavedSecretCount() {
+  if (S.modal?.type !== 'settings') return 0;
+  let n = 0;
+  for (const input of document.querySelectorAll('.secret-value')) if (input.value !== input.defaultValue) n++;
+  return n;
+}
+
+// Guarded close: warn before discarding unsaved secret edits (each row saves on its own).
+function requestCloseModal() {
+  const n = unsavedSecretCount();
+  if (n && !confirm(`${n} secret ${n > 1 ? 'values have' : 'value has'} unsaved edits. Close without saving? Use each row's [ SAVE ] to keep changes.`)) return;
+  closeModal();
 }
 
 async function loadSecretsSettings() {
@@ -1546,25 +1593,44 @@ async function loadSystemPromptSettings() {
 }
 
 /* ---- settings modal ---- */
+const SETTINGS_TABS = ['engine', 'providers', 'environment', 'system', 'notify', 'appearance'];
+
 function renderSettingsModal() {
   const s = S.data.board.settings;
   const agentCols = cols().filter((c) => c.role === 'agent');
   const p = S.prefs;
+  const tab = SETTINGS_TABS.includes(S.modal.tab) ? S.modal.tab : 'engine';
+  // Every pane stays in the DOM; tabs only toggle visibility. [ SAVE SETTINGS ] reads
+  // inputs across all panes and the unsaved-secrets guard scans them, so hiding (not
+  // re-rendering) keeps both working and preserves unsaved edits across tab switches.
+  const pane = (id, html) => `<div class="s-pane ${id === tab ? 'active' : ''}" data-pane="${id}">${html}</div>`;
   shell('SETTINGS', `
+    <div class="tabs">${SETTINGS_TABS.map((id) => `<button data-tab="${id}" class="${id === tab ? 'active' : ''}">${id}</button>`).join('')}</div>
     <div class="panel-body">
-      <div class="section-head">APPEARANCE <span>(this device only)</span></div>
-      <label class="f">THEME</label>
-      <div class="theme-row">
-        ${['dark', 'light', 'sepia'].map((th) => `<button class="theme-swatch th-${th} ${p.theme === th ? 'sel' : ''}" data-theme-pick="${th}">${th}</button>`).join('')}
-      </div>
-      <label class="f">FONT SIZE <output id="s-font-val">${p.fontPx}px</output></label>
-      <input id="s-font" type="range" min="12" max="32" step="1" value="${p.fontPx}">
-      <label class="f">UI SIZE <output id="s-ui-val">${Math.round(p.uiScale * 100)}%</output></label>
-      <input id="s-ui" type="range" min="0.7" max="1.6" step="0.05" value="${p.uiScale}">
-      <button class="btn" id="s-appear-reset" style="margin-top:8px">[ RESET APPEARANCE ]</button>
-      <hr class="sep">
+      ${pane('engine', `
+      <div class="section-head">ENGINE</div>
+      <label class="f">MAX CONCURRENT RUNS <output>${(s.maxConcurrent ?? 2) <= 0 ? 'paused' : ''}</output></label><input id="s-cap" type="number" min="0" max="8" value="${s.maxConcurrent ?? 2}">
+      <div class="hint" style="margin-top:4px">0 = pause the engine (nothing new runs; queued work waits until you raise it).</div>
+      <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
+      <label class="f">DEFAULT WORKSPACE</label>${workspacePicker('s-ws', s.defaultWorkspace)}
+      <label class="f">STALL WATCHDOG (MINUTES — resume orphaned tickets after this dwell; 0 = off)</label>
+      <input id="s-stall" type="number" min="0" value="${s.stallAfterMin ?? 10}">
+      <label class="f">AUTO-DISPATCH BACKLOG</label>
+      <select id="s-auto"><option value="">off</option><option value="1" ${s.autoDispatch !== false ? 'selected' : ''}>on</option></select>
+      <label class="f">SWEEP INTERVAL (MINUTES)</label><input id="s-every" type="number" min="1" value="${s.autoDispatchEveryMin || 5}">
 
-      <div class="section-head">SETUP</div>
+      <hr class="sep">
+      <div class="section-head">DISK</div>
+      <label class="f">RUN JOURNALS KEPT PER TICKET (older ones pruned)</label>
+      <input id="s-keepruns" type="number" min="1" max="50" value="${s.keepRunsPerTicket ?? 5}">
+      <div class="disk-row">
+        <span>DATA DIR: <b id="s-usage">…</b></span>
+        <button class="btn" id="s-prune">[ RECLAIM DISK SPACE ]</button>
+      </div>
+      <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>`)}
+
+      ${pane('providers', `
+      <div class="section-head">PROVIDERS <span>(claude code + codex)</span></div>
       <div class="setup-cards">${setupCardsHTML()}</div>
       <label class="f">PROVIDER PRESETS</label>
       <select id="s-preset">
@@ -1577,18 +1643,8 @@ function renderSettingsModal() {
       <div class="hint">Apply a preset to update Planning/Build/Review harnesses without editing JSON. You can still fine-tune each phase in CFG.</div>
       <div class="hint">Choose provider toggles here before running the pipeline. Disabled providers are preserved on existing columns but won’t be auto-run.</div>
 
-      <div class="section-head">ENGINE</div>
-      <label class="f">MAX CONCURRENT RUNS <output>${(s.maxConcurrent ?? 2) <= 0 ? 'paused' : ''}</output></label><input id="s-cap" type="number" min="0" max="8" value="${s.maxConcurrent ?? 2}">
-      <div class="hint" style="margin-top:4px">0 = pause the engine (nothing new runs; queued work waits until you raise it).</div>
-      <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
-      <label class="f">DEFAULT WORKSPACE</label>${workspacePicker('s-ws', s.defaultWorkspace)}
-      <label class="f">STALL WATCHDOG (MINUTES — resume orphaned tickets after this dwell; 0 = off)</label>
-      <input id="s-stall" type="number" min="0" value="${s.stallAfterMin ?? 10}">
-      <label class="f">AUTO-DISPATCH BACKLOG</label>
-      <select id="s-auto"><option value="">off</option><option value="1" ${s.autoDispatch !== false ? 'selected' : ''}>on</option></select>
-      <label class="f">SWEEP INTERVAL (MINUTES)</label><input id="s-every" type="number" min="1" value="${s.autoDispatchEveryMin || 5}">
-
-      <label class="f">PHASE DEFAULTS — MODEL &amp; EFFORT PER COLUMN</label>
+      <hr class="sep">
+      <div class="section-head">PHASE DEFAULTS <span>(model &amp; effort per column)</span></div>
       <div class="overrides-wrap"><div class="overrides-grid" style="grid-template-columns:110px 90px 1fr 1fr">
         <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div>
         ${agentCols.map((c) => `
@@ -1603,28 +1659,19 @@ function renderSettingsModal() {
         const age = m.fetchedAt ? fmtDur(Date.now() - Date.parse(m.fetchedAt)) + ' ago' : 'never';
         return `${ty}: ${esc(m.source || 'seed')} · ${age}`;
       }).join(' &nbsp;///&nbsp; ')} — models auto-refresh daily; ↻ forces it now.</div>
+      <div class="hint" style="margin-top:14px">claude auth depends on local Claude CLI credentials · codex auth depends on local chatgpt/codex login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>`)}
 
-      <hr class="sep">
-      <div class="section-head">DISK</div>
-      <label class="f">RUN JOURNALS KEPT PER TICKET (older ones pruned)</label>
-      <input id="s-keepruns" type="number" min="1" max="50" value="${s.keepRunsPerTicket ?? 5}">
-      <div class="disk-row">
-        <span>DATA DIR: <b id="s-usage">…</b></span>
-        <button class="btn" id="s-prune">[ RECLAIM DISK SPACE ]</button>
-      </div>
-      <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>
+      ${pane('environment', `
+      <div class="section-head">ENVIRONMENT VARIABLES <span>(repo .env + runtime)</span></div>
+      <div id="s-secrets-panel" class="secrets-panel"></div>`)}
 
-      <hr class="sep">
-      <div class="section-head">SECRETS <span>(repo .env + runtime)</span></div>
-      <div id="s-secrets-panel" class="secrets-panel"></div>
-
-      <hr class="sep">
+      ${pane('system', `
       <div class="section-head">SYSTEM PROMPT <span>(root SYSTEM.md)</span></div>
       <div class="hint" id="s-system-meta">loading system prompt…</div>
       <textarea id="s-system-prompt" class="system-prompt" spellcheck="false"></textarea>
-      <div class="disk-row"><span></span><button class="btn" id="s-system-save">[ SAVE SYSTEM.md ]</button></div>
+      <div class="disk-row"><span></span><button class="btn" id="s-system-save">[ SAVE SYSTEM.md ]</button></div>`)}
 
-      <hr class="sep">
+      ${pane('notify', `
       <div class="section-head">NOTIFICATIONS <span>(telegram)</span></div>
       <label class="f">TELEGRAM ALERTS</label>
       <select id="s-tg-on"><option value="">off</option><option value="1" ${s.telegram?.enabled ? 'selected' : ''}>on</option></select>
@@ -1634,11 +1681,30 @@ function renderSettingsModal() {
       <label class="check-row inline"><input type="checkbox" id="s-tg-done" ${s.telegram?.events?.completed !== false ? 'checked' : ''}> <span>ticket completed</span></label>
       <label class="check-row inline"><input type="checkbox" id="s-tg-stuck" ${s.telegram?.events?.intervention !== false ? 'checked' : ''}> <span>needs my intervention</span></label>
       <div class="disk-row"><span></span><button class="btn" id="s-tg-test">[ SEND TEST ]</button></div>
-      <div class="hint">bot token comes from the <code>TELEGRAM_BOT_TOKEN</code> env var (kept out of the data dir). set it in the service unit / dispatch.env. reuses your existing Claude-hook bot.</div>
+      <div class="hint">bot token comes from the <code>TELEGRAM_BOT_TOKEN</code> env var (kept out of the data dir). set it in the service unit / dispatch.env. reuses your existing Claude-hook bot.</div>`)}
 
-      <div class="hint" style="margin-top:14px">claude auth depends on local Claude CLI credentials · codex auth depends on local chatgpt/codex login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
+      ${pane('appearance', `
+      <div class="section-head">APPEARANCE <span>(this device only)</span></div>
+      <label class="f">THEME</label>
+      <div class="theme-row">
+        ${['dark', 'light', 'sepia'].map((th) => `<button class="theme-swatch th-${th} ${p.theme === th ? 'sel' : ''}" data-theme-pick="${th}">${th}</button>`).join('')}
+      </div>
+      <label class="f">FONT SIZE <output id="s-font-val">${p.fontPx}px</output></label>
+      <input id="s-font" type="range" min="12" max="32" step="1" value="${p.fontPx}">
+      <label class="f">UI SIZE <output id="s-ui-val">${Math.round(p.uiScale * 100)}%</output></label>
+      <input id="s-ui" type="range" min="0.7" max="1.6" step="0.05" value="${p.uiScale}">
+      <button class="btn" id="s-appear-reset" style="margin-top:8px">[ RESET APPEARANCE ]</button>`)}
     </div>`,
-    `<button class="btn btn-accent" id="s-save">[ SAVE ]</button>`);
+    `<button class="btn btn-accent" id="s-save">[ SAVE SETTINGS ]</button>`);
+
+  // Tab switching toggles visibility only — no re-render, so in-progress edits survive.
+  for (const b of document.querySelectorAll('.tabs [data-tab]')) {
+    b.onclick = () => {
+      S.modal.tab = b.dataset.tab;
+      for (const x of document.querySelectorAll('.tabs [data-tab]')) x.classList.toggle('active', x === b);
+      for (const el of document.querySelectorAll('.s-pane')) el.classList.toggle('active', el.dataset.pane === S.modal.tab);
+    };
+  }
 
   const fmtBytes = (n) => n == null ? '?' : n > 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e3).toFixed(0)} KB`;
   wireWorkspacePicker('s-ws');
@@ -1788,7 +1854,7 @@ function renderSettingsModal() {
     } catch (e) {
       alertErr(e);
     } finally {
-      btn.textContent = '[ SAVE ]';
+      btn.textContent = '[ SAVE SETTINGS ]';
     }
   };
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
@@ -1837,7 +1903,7 @@ $('#btn-pause').onclick = () => {
     .then(() => toast(next === 0 ? 'ENGINE PAUSED — nothing new will run' : `ENGINE RESUMED — cap ${next}`))
     .catch(alertErr);
 };
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') requestCloseModal(); });
 document.addEventListener('click', (e) => { if (e.target.closest('.refresh-models')) { e.preventDefault(); refreshModelRegistry(); } });
 
 savePrefs(loadPrefs()); // apply saved theme / font / UI scale before first paint

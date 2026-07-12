@@ -246,6 +246,17 @@ hr.sep { border: none; border-top: 1px solid var(--line); margin: 20px 0 4px; }
   letter-spacing: 0.08em;
 }
 .secret-empty.bad { color: var(--red); }
+/* Source badge distinction: file-backed keys read bold, runtime-only stays dim. */
+.secret-source.src-file, .secret-source.src-both { color: var(--fg); border-color: var(--fg-dim); }
+.secret-source.src-runtime { color: var(--fg-dim); }
+/* Unsaved edit: the row's own [ SAVE ] flags itself until written to .env. */
+.secret-actions .btn.dirty { border-color: var(--red); color: var(--red); }
+.secret-actions .btn.dirty::after { content: ' \2022'; }
+/* Disabled DELETE keeps a visible outline so it still reads as a (blocked) control. */
+.secret-actions .btn:disabled { border-color: var(--line); }
+/* Add-row validation feedback. */
+.hint.bad { color: var(--red); }
+.hint.warn { color: var(--fg); }
 .system-prompt { min-height: 220px; line-height: 1.45; }
 
 /* refresh-models button beside model dropdowns */
@@ -368,6 +379,10 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; background: v
   font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; padding: 9px 0; cursor: pointer;
 }
 .tabs button.active { background: var(--bg-2); color: var(--fg); }
+
+/* settings panes: all stay mounted so [ SAVE SETTINGS ] can read every input; tabs only toggle visibility */
+.s-pane { display: none; }
+.s-pane.active { display: block; }
 
 .kv { display: grid; grid-template-columns: 130px 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); margin-bottom: 14px; }
 .kv > div { background: var(--bg); padding: 7px 10px; font-size: 11px; word-break: break-all; }

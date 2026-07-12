@@ -578,7 +578,7 @@ function renderTopbar() {
       : '<span class="muted">SETUP READY</span>';
   }
   const openNotice = $('#s-open-setup');
-  if (openNotice) openNotice.onclick = () => { S.modal = { type: 'settings' }; renderModal(); };
+  if (openNotice) openNotice.onclick = () => { S.modal = { type: 'settings', tab: 'providers' }; renderModal(); };
 }
 
 function renderBoard() {
@@ -1593,25 +1593,44 @@ async function loadSystemPromptSettings() {
 }
 
 /* ---- settings modal ---- */
+const SETTINGS_TABS = ['engine', 'providers', 'environment', 'system', 'notify', 'appearance'];
+
 function renderSettingsModal() {
   const s = S.data.board.settings;
   const agentCols = cols().filter((c) => c.role === 'agent');
   const p = S.prefs;
+  const tab = SETTINGS_TABS.includes(S.modal.tab) ? S.modal.tab : 'engine';
+  // Every pane stays in the DOM; tabs only toggle visibility. [ SAVE SETTINGS ] reads
+  // inputs across all panes and the unsaved-secrets guard scans them, so hiding (not
+  // re-rendering) keeps both working and preserves unsaved edits across tab switches.
+  const pane = (id, html) => `<div class="s-pane ${id === tab ? 'active' : ''}" data-pane="${id}">${html}</div>`;
   shell('SETTINGS', `
+    <div class="tabs">${SETTINGS_TABS.map((id) => `<button data-tab="${id}" class="${id === tab ? 'active' : ''}">${id}</button>`).join('')}</div>
     <div class="panel-body">
-      <div class="section-head">APPEARANCE <span>(this device only)</span></div>
-      <label class="f">THEME</label>
-      <div class="theme-row">
-        ${['dark', 'light', 'sepia'].map((th) => `<button class="theme-swatch th-${th} ${p.theme === th ? 'sel' : ''}" data-theme-pick="${th}">${th}</button>`).join('')}
-      </div>
-      <label class="f">FONT SIZE <output id="s-font-val">${p.fontPx}px</output></label>
-      <input id="s-font" type="range" min="12" max="32" step="1" value="${p.fontPx}">
-      <label class="f">UI SIZE <output id="s-ui-val">${Math.round(p.uiScale * 100)}%</output></label>
-      <input id="s-ui" type="range" min="0.7" max="1.6" step="0.05" value="${p.uiScale}">
-      <button class="btn" id="s-appear-reset" style="margin-top:8px">[ RESET APPEARANCE ]</button>
-      <hr class="sep">
+      ${pane('engine', `
+      <div class="section-head">ENGINE</div>
+      <label class="f">MAX CONCURRENT RUNS <output>${(s.maxConcurrent ?? 2) <= 0 ? 'paused' : ''}</output></label><input id="s-cap" type="number" min="0" max="8" value="${s.maxConcurrent ?? 2}">
+      <div class="hint" style="margin-top:4px">0 = pause the engine (nothing new runs; queued work waits until you raise it).</div>
+      <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
+      <label class="f">DEFAULT WORKSPACE</label>${workspacePicker('s-ws', s.defaultWorkspace)}
+      <label class="f">STALL WATCHDOG (MINUTES — resume orphaned tickets after this dwell; 0 = off)</label>
+      <input id="s-stall" type="number" min="0" value="${s.stallAfterMin ?? 10}">
+      <label class="f">AUTO-DISPATCH BACKLOG</label>
+      <select id="s-auto"><option value="">off</option><option value="1" ${s.autoDispatch !== false ? 'selected' : ''}>on</option></select>
+      <label class="f">SWEEP INTERVAL (MINUTES)</label><input id="s-every" type="number" min="1" value="${s.autoDispatchEveryMin || 5}">
 
-      <div class="section-head">SETUP</div>
+      <hr class="sep">
+      <div class="section-head">DISK</div>
+      <label class="f">RUN JOURNALS KEPT PER TICKET (older ones pruned)</label>
+      <input id="s-keepruns" type="number" min="1" max="50" value="${s.keepRunsPerTicket ?? 5}">
+      <div class="disk-row">
+        <span>DATA DIR: <b id="s-usage">…</b></span>
+        <button class="btn" id="s-prune">[ RECLAIM DISK SPACE ]</button>
+      </div>
+      <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>`)}
+
+      ${pane('providers', `
+      <div class="section-head">PROVIDERS <span>(claude code + codex)</span></div>
       <div class="setup-cards">${setupCardsHTML()}</div>
       <label class="f">PROVIDER PRESETS</label>
       <select id="s-preset">
@@ -1624,18 +1643,8 @@ function renderSettingsModal() {
       <div class="hint">Apply a preset to update Planning/Build/Review harnesses without editing JSON. You can still fine-tune each phase in CFG.</div>
       <div class="hint">Choose provider toggles here before running the pipeline. Disabled providers are preserved on existing columns but won’t be auto-run.</div>
 
-      <div class="section-head">ENGINE</div>
-      <label class="f">MAX CONCURRENT RUNS <output>${(s.maxConcurrent ?? 2) <= 0 ? 'paused' : ''}</output></label><input id="s-cap" type="number" min="0" max="8" value="${s.maxConcurrent ?? 2}">
-      <div class="hint" style="margin-top:4px">0 = pause the engine (nothing new runs; queued work waits until you raise it).</div>
-      <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
-      <label class="f">DEFAULT WORKSPACE</label>${workspacePicker('s-ws', s.defaultWorkspace)}
-      <label class="f">STALL WATCHDOG (MINUTES — resume orphaned tickets after this dwell; 0 = off)</label>
-      <input id="s-stall" type="number" min="0" value="${s.stallAfterMin ?? 10}">
-      <label class="f">AUTO-DISPATCH BACKLOG</label>
-      <select id="s-auto"><option value="">off</option><option value="1" ${s.autoDispatch !== false ? 'selected' : ''}>on</option></select>
-      <label class="f">SWEEP INTERVAL (MINUTES)</label><input id="s-every" type="number" min="1" value="${s.autoDispatchEveryMin || 5}">
-
-      <label class="f">PHASE DEFAULTS — MODEL &amp; EFFORT PER COLUMN</label>
+      <hr class="sep">
+      <div class="section-head">PHASE DEFAULTS <span>(model &amp; effort per column)</span></div>
       <div class="overrides-wrap"><div class="overrides-grid" style="grid-template-columns:110px 90px 1fr 1fr">
         <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div>
         ${agentCols.map((c) => `
@@ -1650,28 +1659,19 @@ function renderSettingsModal() {
         const age = m.fetchedAt ? fmtDur(Date.now() - Date.parse(m.fetchedAt)) + ' ago' : 'never';
         return `${ty}: ${esc(m.source || 'seed')} · ${age}`;
       }).join(' &nbsp;///&nbsp; ')} — models auto-refresh daily; ↻ forces it now.</div>
+      <div class="hint" style="margin-top:14px">claude auth depends on local Claude CLI credentials · codex auth depends on local chatgpt/codex login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>`)}
 
-      <hr class="sep">
-      <div class="section-head">DISK</div>
-      <label class="f">RUN JOURNALS KEPT PER TICKET (older ones pruned)</label>
-      <input id="s-keepruns" type="number" min="1" max="50" value="${s.keepRunsPerTicket ?? 5}">
-      <div class="disk-row">
-        <span>DATA DIR: <b id="s-usage">…</b></span>
-        <button class="btn" id="s-prune">[ RECLAIM DISK SPACE ]</button>
-      </div>
-      <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>
+      ${pane('environment', `
+      <div class="section-head">ENVIRONMENT VARIABLES <span>(repo .env + runtime)</span></div>
+      <div id="s-secrets-panel" class="secrets-panel"></div>`)}
 
-      <hr class="sep">
-      <div class="section-head">SECRETS <span>(repo .env + runtime)</span></div>
-      <div id="s-secrets-panel" class="secrets-panel"></div>
-
-      <hr class="sep">
+      ${pane('system', `
       <div class="section-head">SYSTEM PROMPT <span>(root SYSTEM.md)</span></div>
       <div class="hint" id="s-system-meta">loading system prompt…</div>
       <textarea id="s-system-prompt" class="system-prompt" spellcheck="false"></textarea>
-      <div class="disk-row"><span></span><button class="btn" id="s-system-save">[ SAVE SYSTEM.md ]</button></div>
+      <div class="disk-row"><span></span><button class="btn" id="s-system-save">[ SAVE SYSTEM.md ]</button></div>`)}
 
-      <hr class="sep">
+      ${pane('notify', `
       <div class="section-head">NOTIFICATIONS <span>(telegram)</span></div>
       <label class="f">TELEGRAM ALERTS</label>
       <select id="s-tg-on"><option value="">off</option><option value="1" ${s.telegram?.enabled ? 'selected' : ''}>on</option></select>
@@ -1681,11 +1681,30 @@ function renderSettingsModal() {
       <label class="check-row inline"><input type="checkbox" id="s-tg-done" ${s.telegram?.events?.completed !== false ? 'checked' : ''}> <span>ticket completed</span></label>
       <label class="check-row inline"><input type="checkbox" id="s-tg-stuck" ${s.telegram?.events?.intervention !== false ? 'checked' : ''}> <span>needs my intervention</span></label>
       <div class="disk-row"><span></span><button class="btn" id="s-tg-test">[ SEND TEST ]</button></div>
-      <div class="hint">bot token comes from the <code>TELEGRAM_BOT_TOKEN</code> env var (kept out of the data dir). set it in the service unit / dispatch.env. reuses your existing Claude-hook bot.</div>
+      <div class="hint">bot token comes from the <code>TELEGRAM_BOT_TOKEN</code> env var (kept out of the data dir). set it in the service unit / dispatch.env. reuses your existing Claude-hook bot.</div>`)}
 
-      <div class="hint" style="margin-top:14px">claude auth depends on local Claude CLI credentials · codex auth depends on local chatgpt/codex login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
+      ${pane('appearance', `
+      <div class="section-head">APPEARANCE <span>(this device only)</span></div>
+      <label class="f">THEME</label>
+      <div class="theme-row">
+        ${['dark', 'light', 'sepia'].map((th) => `<button class="theme-swatch th-${th} ${p.theme === th ? 'sel' : ''}" data-theme-pick="${th}">${th}</button>`).join('')}
+      </div>
+      <label class="f">FONT SIZE <output id="s-font-val">${p.fontPx}px</output></label>
+      <input id="s-font" type="range" min="12" max="32" step="1" value="${p.fontPx}">
+      <label class="f">UI SIZE <output id="s-ui-val">${Math.round(p.uiScale * 100)}%</output></label>
+      <input id="s-ui" type="range" min="0.7" max="1.6" step="0.05" value="${p.uiScale}">
+      <button class="btn" id="s-appear-reset" style="margin-top:8px">[ RESET APPEARANCE ]</button>`)}
     </div>`,
     `<button class="btn btn-accent" id="s-save">[ SAVE SETTINGS ]</button>`);
+
+  // Tab switching toggles visibility only — no re-render, so in-progress edits survive.
+  for (const b of document.querySelectorAll('.tabs [data-tab]')) {
+    b.onclick = () => {
+      S.modal.tab = b.dataset.tab;
+      for (const x of document.querySelectorAll('.tabs [data-tab]')) x.classList.toggle('active', x === b);
+      for (const el of document.querySelectorAll('.s-pane')) el.classList.toggle('active', el.dataset.pane === S.modal.tab);
+    };
+  }
 
   const fmtBytes = (n) => n == null ? '?' : n > 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e3).toFixed(0)} KB`;
   wireWorkspacePicker('s-ws');

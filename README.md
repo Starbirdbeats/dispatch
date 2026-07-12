@@ -165,8 +165,24 @@ npm run screenshots
 - Disabled-provider warning behavior in phase CFG
 - URL-state routing: every modal/tab is reflected in `location.hash`, a hard refresh
   restores it, and Back/Forward walk modal history without ever navigating out of the app
+- Responsive board: at ≥760px the board is a pipeline rail of phase "stations" (capped at
+  4 chips + "+N more") with an in-flight tracker below; at <760px it collapses to one phase
+  per screen with prev/next + dot pager + swipe
 
 `npm run screenshots` regenerates `docs/screenshots/*.png` for the README setup flow.
+
+## Responsive board
+
+The board adapts at a **760px** breakpoint:
+
+- **Desktop (≥760px)** — a horizontal *pipeline rail*: each phase is a station (accent-coloured
+  by role/harness) showing its ticket chips, connected by `▸`. Below it, an *in-flight tracker*
+  lists running/queued tickets with a per-ticket phase-progress bar and live `T+` elapsed.
+- **Mobile (<760px)** — one phase per screen with `‹ ›` controls, a dot pager, and swipe to move
+  along the line; tickets render as full-width cards.
+
+Both views share the same click/drag wiring: clicking a chip, card, or tracker row opens the
+ticket modal (and updates the URL), and station `CFG` opens the phase config.
 
 ## Layout
 

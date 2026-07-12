@@ -8,6 +8,8 @@ const S = {
   liveContext: {},     // ticketId -> latest live context snapshot
   transcript: null,    // current transcript tab view state
   commentDraft: '',
+  mobilePhase: 0,      // <760px board: which phase (column index) is on screen
+  railExpanded: {},    // desktop rail: colId -> showing all chips past the +N cap
 };
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -168,7 +170,6 @@ const ticketsIn = (colId) => S.data.tickets.filter((t) => t.columnId === colId &
   .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
 const archivedTickets = () => S.data.tickets.filter((t) => t.archived)
   .sort((a, b) => ((a.archivedAt || '') < (b.archivedAt || '') ? 1 : -1)); // newest first
-const harnessLabel = (h) => h.type === 'human' ? 'HUMAN' : `${h.type} · ${h.model || 'default'} · ${h.effort || 'default'}`;
 const BY_LABEL = { claude: 'CLAUDE CODE', codex: 'CODEX', human: 'YOU', engine: 'ENGINE' };
 // ↻ button placed beside model dropdowns — fetches the latest model releases into the registry
 const refreshBtn = () => '<button type="button" class="refresh-models" title="Fetch latest model releases from the provider"><span>↻</span></button>';
@@ -581,79 +582,271 @@ function renderTopbar() {
   if (openNotice) openNotice.onclick = () => pushModal({ type: 'settings', tab: 'providers' });
 }
 
-function renderBoard() {
-  const board = $('#board');
-  const savedX = board.scrollLeft;
-  const savedY = new Map([...board.querySelectorAll('.column')]
-    .map((el) => [el.dataset.colId, $('.col-body', el)?.scrollTop || 0]));
-  board.innerHTML = '';
-  for (const c of cols()) {
-    const activeType = c.harness?.type;
-    const disabledType = activeType !== 'human' && !isProviderEnabled(activeType);
-    const col = document.createElement('section');
-    col.className = 'column';
-    col.dataset.colId = c.id;
-    const tickets = ticketsIn(c.id);
-    col.innerHTML = `
-      <div class="col-head">
-        <div class="col-title"><h2>${esc(c.name)}</h2><span class="count">${String(tickets.length).padStart(2, '0')}</span></div>
-        <div class="col-harness">
-          <span>[ ${esc(harnessLabel(c.harness))} ]${c.autoRun ? ' <span class="auto">AUTO</span>' : ''}</span>
-          ${disabledType ? '<span class="col-warn">PROVIDER DISABLED IN SETUP</span>' : ''}
-          <button class="cfg" data-cfg="${c.id}">CFG &gt;&gt;</button>
-        </div>
-        ${c.role === 'intake' && S.data.scheduler?.autoDispatch
-          ? `<div class="col-sweep">AUTO SWEEP <span data-sweep>T-—:——</span></div>` : ''}
-      </div>
-      <div class="col-body"></div>`;
-    const body = $('.col-body', col);
-    for (const t of tickets) body.appendChild(cardEl(t, c));
-    // drag & drop
-    col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('dragover'); });
-    col.addEventListener('dragleave', () => col.classList.remove('dragover'));
-    col.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      col.classList.remove('dragover');
-      const id = e.dataTransfer.getData('text/ticket');
-      if (id) await api(`/api/tickets/${id}/move`, 'POST', { columnId: c.id }).catch(alertErr);
-    });
-    $('.cfg', col).onclick = () => pushModal({ type: 'column', id: c.id });
-    board.appendChild(col);
-  }
-  board.scrollLeft = savedX;
-  for (const colEl of board.querySelectorAll('.column')) {
-    const y = savedY.get(colEl.dataset.colId);
-    if (y) $('.col-body', colEl).scrollTop = y;
-  }
+/* Board = design 3a: desktop (≥760px) is the 1c pipeline rail + in-flight tracker;
+   mobile (<760px) is the 2a one-phase-per-screen swipe view. */
+const mqMobile = window.matchMedia('(max-width: 760px)');
+mqMobile.addEventListener('change', () => { if (S.data) renderBoard(); });
+
+// Phase/harness accent for a column: intake=red, terminal=faint, else the harness type colour.
+function stationAccent(c) {
+  if (c.role === 'intake') return 'var(--red)';
+  if (c.role === 'terminal') return 'var(--fg-faint)';
+  if (c.harness?.type === 'claude') return 'var(--claude)';
+  if (c.harness?.type === 'codex') return 'var(--codex)';
+  return 'var(--red)'; // human agent phase
 }
 
-function cardEl(t, c) {
-  const el = document.createElement('article');
-  const running = S.data.runs.running.includes(t.id);
-  const status = running ? 'running' : (S.data.runs.queued.includes(t.id) ? 'queued' : (c.role === 'terminal' ? 'done' : t.status));
-  const eff = effective(t, c);
-  const disabledHarness = eff.type !== 'human' && !isProviderEnabled(eff.type);
-  el.className = `card status-${status}`;
-  el.draggable = true;
-  const last = [...t.activity].reverse().find((a) => a.kind !== 'run');
-  const dx = diagnose(t, c);
+function ticketStatus(t, c) {
+  if (S.data.runs.running.includes(t.id)) return 'running';
+  if (S.data.runs.queued.includes(t.id)) return 'queued';
+  if (c.role === 'terminal') return 'done';
+  return t.status;
+}
+
+// Compact harness label for a station/row, e.g. "CLAUDE·FABLE·HIGH", "HUMAN · INTAKE".
+function stationHarnessLabel(c) {
+  if (c.role === 'intake') return 'HUMAN · INTAKE';
+  if (c.role === 'terminal') return 'TERMINAL · GATE';
+  const h = c.harness || {};
+  if (h.type === 'human') return 'HUMAN';
+  return [h.type, h.model, h.effort].filter(Boolean).join('·').toUpperCase();
+}
+
+// 4-char phase tag for the tracker progress bar (data-driven from the column name).
+function phaseAbbrev(name) {
+  return String(name || '').replace(/[^a-z0-9]/gi, '').slice(0, 4).toUpperCase() || '—';
+}
+
+function queuePos(id) {
+  const i = (S.data.runs.queued || []).indexOf(id);
+  return i < 0 ? '?' : i + 1;
+}
+
+function renderBoard() {
+  const board = $('#board');
+  board.innerHTML = '';
+  board.classList.toggle('mobile', mqMobile.matches);
+  if (mqMobile.matches) renderMobileBoard(board);
+  else renderRailBoard(board);
+}
+
+/* ---- desktop: pipeline rail + in-flight tracker ---- */
+function renderRailBoard(board) {
+  const rail = document.createElement('div');
+  rail.className = 'rail';
+  const list = cols();
+  list.forEach((c, i) => {
+    rail.appendChild(stationEl(c));
+    if (i < list.length - 1) {
+      const arr = document.createElement('div');
+      arr.className = 'rail-arrow';
+      arr.textContent = '▸';
+      rail.appendChild(arr);
+    }
+  });
+  board.appendChild(rail);
+  board.appendChild(inflightEl());
+}
+
+function stationEl(c) {
+  const tickets = ticketsIn(c.id);
+  const accent = stationAccent(c);
+  const runningHere = tickets.some((t) => S.data.runs.running.includes(t.id));
+  const disabledType = c.harness?.type && c.harness.type !== 'human' && !isProviderEnabled(c.harness.type);
+  const el = document.createElement('div');
+  el.className = 'station';
+  el.style.setProperty('--accent', accent);
   el.innerHTML = `
-    <div class="t"><span class="led ${status}"></span><span class="title">${esc(t.title)}</span>${t.readOnly ? '<span class="ro-tag" title="Read-only ticket">RO</span>' : ''}${c.role === 'terminal' ? `<button class="arch" title="Archive ticket">[ ARCH ]</button>` : ''}</div>
-    <div class="meta"><span>${esc(t.workspace.split('/').pop())}</span>
-      <span class="meta-badges">${disabledHarness ? '<span class="badge tone-stuck">PROVIDER DISABLED</span>' : ''}<span class="badge tone-${dx.tone}">${dx.tone === 'stuck' ? '⚠ ' : ''}${esc(dx.label)}</span></span>
+    <div class="station-head">
+      <div class="sh-top">
+        <span class="station-name">${esc(c.name)}</span>
+        <span style="display:inline-flex;gap:6px;align-items:center">
+          ${runningHere ? '<span class="run-badge">● RUN</span>' : ''}
+          <span class="station-count">${String(tickets.length).padStart(2, '0')}</span>
+        </span>
+      </div>
+      <div class="station-harness"><span class="dot"></span>${esc(stationHarnessLabel(c))}${c.autoRun ? ' · AUTO' : ''}<button class="cfg" data-cfg="${c.id}" title="Configure phase">CFG</button></div>
+      ${disabledType ? '<div class="station-sweep" style="color:var(--red);border-color:var(--red)">PROVIDER DISABLED IN SETUP</div>' : ''}
+      ${c.role === 'intake' && S.data.scheduler?.autoDispatch
+        ? '<div class="station-sweep">AUTO SWEEP <span data-sweep>T-—:——</span></div>' : ''}
     </div>
-    ${t.completedAt && t.durationMs != null
-      ? `<div class="timing done">✓ took ${esc(fmtDur(t.durationMs))} · ${esc(fmtTs(t.completedAt))}</div>`
-      : (t.startedAt ? `<div class="timing">${isClockPaused(t) ? '⏸ paused' : '⏱ active'} ${activeClockSpan(t)}</div>` : '')}
-    ${t.scheduledAt ? `<div class="last">SCHED ${esc(t.scheduledAt.replace('T', ' '))}</div>` : ''}
-    ${last ? `<div class="last">&gt; ${esc(last.text)}</div>` : ''}`;
+    <div class="station-body"></div>`;
+  const body = $('.station-body', el);
+  const CAP = 4;
+  const expanded = S.railExpanded[c.id];
+  const shown = expanded ? tickets : tickets.slice(0, CAP);
+  for (const t of shown) body.appendChild(chipEl(t, c));
+  if (tickets.length > CAP) {
+    const btn = document.createElement('button');
+    btn.className = 'chip-more';
+    btn.textContent = expanded ? 'SHOW LESS' : `+${tickets.length - CAP} MORE`;
+    btn.onclick = () => { S.railExpanded[c.id] = !expanded; renderBoard(); };
+    body.appendChild(btn);
+  }
+  if (c.role === 'intake') {
+    const drop = document.createElement('div');
+    drop.className = 'chip-drop';
+    drop.textContent = '· · · DROP TICKET · · ·';
+    body.appendChild(drop);
+  }
+  $('.cfg', el).onclick = (e) => { e.stopPropagation(); pushModal({ type: 'column', id: c.id }); };
+  // drag & drop a ticket onto a station = move it to that column
+  el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('dragover'); });
+  el.addEventListener('dragleave', () => el.classList.remove('dragover'));
+  el.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    el.classList.remove('dragover');
+    const id = e.dataTransfer.getData('text/ticket');
+    if (id) await api(`/api/tickets/${id}/move`, 'POST', { columnId: c.id }).catch(alertErr);
+  });
+  return el;
+}
+
+function chipEl(t, c) {
+  const el = document.createElement('div');
+  const st = ticketStatus(t, c);
+  el.className = `chip card status-${st}`;
+  el.dataset.id = t.id;
+  el.draggable = true;
+  el.innerHTML = `<span class="led ${st}"></span><span class="title">${esc(t.title)}</span>`;
   el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/ticket', t.id); el.classList.add('dragging'); });
   el.addEventListener('dragend', () => el.classList.remove('dragging'));
-  const archBtn = $('.arch', el);
-  if (archBtn) archBtn.onclick = (e) => {
-    e.stopPropagation(); // don't open the ticket modal
-    api(`/api/tickets/${t.id}/archive`, 'POST', {}).then(() => toast('ARCHIVED')).catch(alertErr);
+  el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
+  return el;
+}
+
+function inflightEl() {
+  const running = S.data.runs.running || [];
+  const queued = S.data.runs.queued || [];
+  const wrap = document.createElement('div');
+  wrap.className = 'inflight';
+  wrap.innerHTML = `<div class="inflight-head"><span class="dot"></span>IN FLIGHT · ${running.length} RUNNING · ${queued.length} QUEUED</div>`;
+  const track = document.createElement('div');
+  track.className = 'track';
+  const ids = [...running, ...queued.filter((id) => !running.includes(id))];
+  const rows = ids.map((id) => S.data.tickets.find((t) => t.id === id)).filter(Boolean);
+  if (!rows.length) {
+    track.innerHTML = '<div class="inflight-empty">NO RUNS IN FLIGHT — queue a ticket and watch it move down the line</div>';
+  } else {
+    for (const t of rows) track.appendChild(trackRowEl(t));
+  }
+  wrap.appendChild(track);
+  return wrap;
+}
+
+function trackRowEl(t) {
+  const list = cols();
+  const cur = list.findIndex((col) => col.id === t.columnId);
+  const c = list[cur] || {};
+  const isRun = S.data.runs.running.includes(t.id);
+  const isQ = S.data.runs.queued.includes(t.id);
+  const accent = stationAccent(c);
+  const segs = list.map((col, i) => {
+    if (i < cur) return `<span class="seg passed" style="background:${stationAccent(col)}"></span>`;
+    if (i === cur) {
+      if (isRun) return `<span class="seg passed current-run" style="background:${accent}"></span>`;
+      if (isQ) return '<span class="seg current-queue"></span>';
+      return `<span class="seg passed" style="background:${accent}"></span>`;
+    }
+    return '<span class="seg"></span>';
+  }).join('');
+  const labels = list.map((col, i) => `<span class="${i === cur ? 'here' : ''}">${esc(phaseAbbrev(col.name))}</span>`).join('');
+  const startMs = t.startedAt ? Date.parse(t.startedAt) : null;
+  const row = document.createElement('div');
+  row.className = 'track-row card';
+  row.dataset.id = t.id;
+  row.innerHTML = `
+    <div style="min-width:0">
+      <div class="track-title">${esc(t.title)}</div>
+      <div class="track-sub"><span class="dot" style="background:${accent}"></span>${esc(t.id)} · ${esc(stationHarnessLabel(c))}</div>
+    </div>
+    <div><div class="seg-row">${segs}</div><div class="seg-labels">${labels}</div></div>
+    <div class="track-phase${isQ ? ' queued' : ''}">${isQ ? `Queued · pos ${queuePos(t.id)}` : `▸ ${esc(c.name || '?')}`}</div>
+    ${isRun && startMs ? `<div class="track-elapsed" data-tplus="${startMs}">T+00:00</div>` : '<div class="track-elapsed none">—</div>'}`;
+  row.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
+  return row;
+}
+
+/* ---- mobile: one phase per screen, swipe/tap between phases ---- */
+function renderMobileBoard(board) {
+  const list = cols();
+  if (!list.length) return;
+  S.mobilePhase = Math.max(0, Math.min(S.mobilePhase, list.length - 1));
+  const idx = S.mobilePhase;
+  const c = list[idx];
+  const tickets = ticketsIn(c.id);
+  const accent = stationAccent(c);
+  const runningHere = tickets.some((t) => S.data.runs.running.includes(t.id));
+
+  const nav = document.createElement('div');
+  nav.className = 'mphase-nav';
+  nav.innerHTML = `
+    <button class="mprev" ${idx === 0 ? 'disabled' : ''} aria-label="previous phase">‹</button>
+    <div class="mphase-title">
+      <div class="n">${esc(c.name)}</div>
+      <div class="h">${runningHere ? '<span class="run-badge">● RUN</span>' : ''}<span class="dot" style="background:${accent}"></span>${esc(stationHarnessLabel(c))}</div>
+    </div>
+    <button class="mnext" ${idx === list.length - 1 ? 'disabled' : ''} aria-label="next phase">›</button>`;
+  board.appendChild(nav);
+
+  const dots = document.createElement('div');
+  dots.className = 'mdots';
+  dots.innerHTML = list.map((_, i) => `<span class="${i === idx ? 'on' : ''}"></span>`).join('');
+  board.appendChild(dots);
+
+  const body = document.createElement('div');
+  body.className = 'mbody';
+  if (tickets.length) {
+    for (const t of tickets) body.appendChild(mcardEl(t, c));
+  } else {
+    const empty = document.createElement('div');
+    empty.className = 'chip-drop';
+    empty.textContent = '· · · NO TICKETS IN THIS PHASE · · ·';
+    body.appendChild(empty);
+  }
+  if (c.role === 'intake') {
+    const drop = document.createElement('div');
+    drop.className = 'chip-drop';
+    drop.textContent = '· · · DROP TICKET · · ·';
+    body.appendChild(drop);
+  }
+  const prevN = idx > 0 ? list[idx - 1].name : '';
+  const nextN = idx < list.length - 1 ? list[idx + 1].name : '';
+  const hint = document.createElement('div');
+  hint.className = 'mswipe-hint';
+  hint.innerHTML = [prevN ? `‹ ${esc(prevN)}` : '', nextN ? `${esc(nextN)} ›` : ''].filter(Boolean).join('&nbsp;&nbsp;|&nbsp;&nbsp;');
+  body.appendChild(hint);
+  board.appendChild(body);
+
+  const go = (d) => { const n = idx + d; if (n >= 0 && n < list.length) { S.mobilePhase = n; renderBoard(); } };
+  $('.mprev', nav).onclick = () => go(-1);
+  $('.mnext', nav).onclick = () => go(1);
+  let x0 = null;
+  board.ontouchstart = (e) => { x0 = e.touches[0].clientX; };
+  board.ontouchend = (e) => {
+    if (x0 == null) return;
+    const dx = e.changedTouches[0].clientX - x0;
+    if (Math.abs(dx) > 45) go(dx < 0 ? 1 : -1);
+    x0 = null;
   };
+}
+
+function mcardEl(t, c) {
+  const el = document.createElement('div');
+  const st = ticketStatus(t, c);
+  el.className = `mcard card status-${st}`;
+  el.dataset.id = t.id;
+  const last = [...t.activity].reverse().find((a) => a.kind !== 'run');
+  const startMs = t.startedAt ? Date.parse(t.startedAt) : null;
+  const foot = st === 'running' && startMs
+    ? `<span class="t run"><span data-tplus="${startMs}">T+00:00</span> · RUNNING</span>`
+    : `<span class="t">${esc(st.toUpperCase())}</span>`;
+  el.innerHTML = `
+    <div class="mc-top"><span class="led ${st}"></span><span class="title">${esc(t.title)}</span></div>
+    <div class="mc-meta"><span>${esc(t.id)}</span><span>${esc(t.workspace.split('/').pop())}</span></div>
+    <div class="mc-harness"><span class="dot" style="background:${stationAccent(c)}"></span>${esc(stationHarnessLabel(c))}</div>
+    ${last ? `<div class="mc-last">▸ ${esc(last.text)}</div>` : ''}
+    <div class="mc-foot">${foot}<span class="tap">tap to open ▸</span></div>`;
   el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
   return el;
 }
@@ -1969,6 +2162,11 @@ setInterval(() => {
   }
   for (const el of document.querySelectorAll('[data-liveclock]')) {
     el.textContent = fmtDur(now - Number(el.dataset.liveclock));
+  }
+  for (const el of document.querySelectorAll('[data-tplus]')) {
+    const ms = Math.max(0, now - Number(el.dataset.tplus));
+    const m = Math.floor(ms / 60000), s = Math.floor((ms % 60000) / 1000);
+    el.textContent = `T+${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   }
   for (const el of document.querySelectorAll('[data-active-base]')) {
     const base = Number(el.dataset.activeBase) || 0;

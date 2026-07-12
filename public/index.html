@@ -10,17 +10,20 @@
 <div id="scanlines" aria-hidden="true"></div>
 
 <header id="topbar">
-  <div class="brand">DISPATCH<span class="rev">/// AGENT OS · REV 0.1</span></div>
+  <div class="brand">DISPATCH<span class="rev">/// AGENT OS</span></div>
   <div id="health" class="health"></div>
   <div id="usage" class="usage-strip"></div>
   <div id="queueinfo" class="queueinfo"></div>
   <div class="actions">
+    <button id="btn-menu" class="btn btn-menu" aria-label="menu" aria-haspopup="true" aria-expanded="false">≡</button>
     <button id="btn-pause" class="btn">[ ⏸ PAUSE ]</button>
     <button id="btn-archive" class="btn">[ ARCHIVE ]</button>
     <button id="btn-settings" class="btn">[ SETTINGS ]</button>
     <button id="btn-new" class="btn btn-accent">[ + TICKET ]</button>
   </div>
 </header>
+
+<div id="topmenu" class="topmenu" hidden></div>
 
 <div id="setup-notice" class="setup-notice"></div>
 

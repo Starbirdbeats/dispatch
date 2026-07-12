@@ -224,6 +224,15 @@ export class Store {
       if (!t.context) t.context = {};
       this.tickets.set(t.id, t);
     }
+    // Backfill display numbers (DSP-###) for tickets that predate them, oldest first,
+    // and make sure the counter never re-issues a number already on disk.
+    let maxSeq = this.board.ticketSeq || 0;
+    for (const t of this.tickets.values()) if (Number.isFinite(t.seq)) maxSeq = Math.max(maxSeq, t.seq);
+    const unnumbered = [...this.tickets.values()]
+      .filter((t) => !Number.isFinite(t.seq))
+      .sort((a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0));
+    for (const t of unnumbered) { t.seq = ++maxSeq; this.saveTicket(t.id); }
+    if ((this.board.ticketSeq || 0) !== maxSeq) { this.board.ticketSeq = maxSeq; this.saveBoard(); }
   }
 
   // Provider configuration API (with safe fallbacks if older board files are present).
@@ -273,8 +282,11 @@ export class Store {
 
   createTicket({ title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip }) {
     const id = `t-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+    this.board.ticketSeq = (this.board.ticketSeq || 0) + 1;
+    this.saveBoard();
     const ticket = {
       id, title, description: description || '',
+      seq: this.board.ticketSeq,   // human-facing number: shown as DSP-###
       workspace: workspace || this.board.settings.defaultWorkspace,
       columnId: columnId || this.board.columns.find((c) => c.role === 'intake')?.id || this.board.columns[0].id,
       createdAt: new Date().toISOString(),

@@ -58,6 +58,7 @@ export function loadUsageCache() {
         weekly: normalizeUsageWindow(cached[provider].weekly) || null,
         at: cached[provider].at || null,
         source: cached[provider].source || null,
+        ...(cached[provider].plan ? { plan: String(cached[provider].plan) } : {}),
         ...(cached[provider].error ? { error: String(cached[provider].error) } : {}),
       };
     }
@@ -81,6 +82,7 @@ export function setProviderUsage(provider, { fiveHour = null, weekly = null, at 
     weekly: normalizeUsageWindow(weekly) || null,
     at,
     source,
+    ...(USAGE[provider].plan ? { plan: USAGE[provider].plan } : {}),  // plan comes from local auth files, not the usage APIs — survive refreshes
     ...(error ? { error: String(error).slice(0, 240) } : {}),
   };
   const before = JSON.stringify(USAGE[provider]);
@@ -88,6 +90,17 @@ export function setProviderUsage(provider, { fiveHour = null, weekly = null, at 
   const changed = before !== JSON.stringify(next);
   if (changed) saveUsageCache();
   return changed;
+}
+
+// Subscription tier ("max", "plus", …) read from local CLI auth files — display-only.
+export function setProviderPlan(provider, plan) {
+  if (!USAGE[provider]) return false;
+  const next = plan ? String(plan).toLowerCase() : null;
+  if ((USAGE[provider].plan || null) === next) return false;
+  if (next) USAGE[provider].plan = next;
+  else delete USAGE[provider].plan;
+  saveUsageCache();
+  return true;
 }
 
 export function setProviderWindow(provider, window, data, { at = new Date().toISOString(), source = 'unknown' } = {}) {

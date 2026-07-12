@@ -17,13 +17,13 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 /* ---------- appearance prefs (device-local, not server state) ---------- */
 const PREFS_KEY = 'dispatch.appearance';
-const DEFAULT_PREFS = { theme: 'dark', fontPx: 20, uiScale: 1, transcriptShowTools: true };
+const DEFAULT_PREFS = { fontPx: 20, uiScale: 1, transcriptShowTools: true };
 function loadPrefs() {
   try { return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; }
   catch { return { ...DEFAULT_PREFS }; }
 }
 function applyPrefs(p) {
-  document.body.dataset.theme = p.theme;
+  // Single paper palette — no theme switch. Font size + UI scale stay device-local.
   document.documentElement.style.setProperty('--base-font', `${p.fontPx}px`);
   document.documentElement.style.zoom = String(p.uiScale);
 }
@@ -244,6 +244,8 @@ function fmtDur(ms) {
 }
 // human-readable local timestamp for completion display
 function fmtTs(iso) { try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); } catch { return iso || ''; } }
+// display number for a ticket — "DSP-039"; falls back to the raw id for pre-seq tickets
+const ticketNo = (t) => Number.isFinite(t?.seq) ? `DSP-${String(t.seq).padStart(3, '0')}` : (t?.id || '');
 const activeElapsed = (t) => (t.activeMs || 0) + (t.activeSince ? Date.now() - t.activeSince : 0);
 const activeClockSpan = (t) => `<span data-active-base="${t.activeMs || 0}" data-active-since="${t.activeSince || ''}">${esc(fmtDur(activeElapsed(t)))}</span>`;
 const isClockPaused = (t) => Boolean(t.startedAt) && !t.completedAt && !t.activeSince;
@@ -313,28 +315,68 @@ function liveContextHTML(t) {
   return `<div class="diag-context">${contextLineHTML(runningType, ctx, { live: true })}</div>`;
 }
 
-function usageWindowHTML(label, win, provider) {
+// "2H14M" remaining-until-reset countdown from an ISO timestamp (compact, no seconds).
+function fmtResetIn(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const s = Math.max(0, Math.round((t - Date.now()) / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}H${String(m).padStart(2, '0')}M` : `${m}M`;
+}
+// Weekly reset as weekday + HH:MM in local time, e.g. "SUN 00:00".
+function fmtResetDay(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const wd = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'][d.getDay()];
+  return `${wd} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+// Auth-source badge derived from the usage source string (tier isn't in the data model).
+function usageSourceLabel(source) {
+  const s = String(source || '').toLowerCase();
+  if (s.includes('oauth')) return 'OAUTH';
+  if (s.includes('api')) return 'API';
+  return '';
+}
+
+// One usage window: "5H ▓▓▓░ 62%" — the number is % USED; the 5H meter takes its
+// tone from what's left (green → amber → red), the weekly meter stays muted ink.
+function usageWindowHTML(label, win, provider, kind) {
   if (!win || !Number.isFinite(Number(win.usedPct))) {
-    return `<span class="usage-window missing"><span class="usage-key">${label}</span><b>—</b></span>`;
+    return `<span class="usage-window w${kind} missing"><span class="usage-key">${label}</span><b>—</b></span>`;
   }
-  const remaining = clamp(100 - Number(win.usedPct));
+  const used = clamp(win.usedPct);
+  const remaining = clamp(100 - used);
+  const tone = kind === '7d' ? 'muted' : meterTone(remaining);
   const title = [
-    `${provider} ${label}: ${pctText(remaining)} remaining`,
-    `${pctText(win.usedPct)} used`,
+    `${provider} ${label}: ${pctText(used)} used`,
+    `${pctText(remaining)} remaining`,
     win.resetsAt ? `resets ${fmtTs(win.resetsAt)}` : '',
   ].filter(Boolean).join(' · ');
-  return `<span class="usage-window tone-${meterTone(remaining)}" title="${esc(title)}">
-    <span class="usage-key">${label}</span>${meterHTML(remaining, remaining)}<b>${pctText(remaining)}</b>
+  return `<span class="usage-window w${kind} tone-${tone}" title="${esc(title)}">
+    <span class="usage-key">${label}</span><span class="meter tone-${tone}" style="--pct:${used}%"><span></span></span><b>${pctText(used)}</b>
   </span>`;
 }
 
 function usageProviderHTML(provider) {
   const u = S.data.usage?.[provider] || {};
   const title = [u.source, u.at ? `updated ${fmtTs(u.at)}` : '', u.error ? `error: ${u.error}` : ''].filter(Boolean).join(' · ');
+  // "MAX·OAUTH" / "PLUS·OAUTH" when the CLI auth file exposes a tier; source-derived otherwise
+  const plan = u.plan ? String(u.plan).toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ')[0] : '';
+  const src = plan ? `${plan}·OAUTH` : usageSourceLabel(u.source);
+  // dot echoes the 5H tone (green = headroom, amber = running low, red = nearly spent)
+  const tone5 = Number.isFinite(Number(u.fiveHour?.usedPct)) ? meterTone(clamp(100 - u.fiveHour.usedPct)) : 'muted';
+  const rst5 = u.fiveHour?.resetsAt ? fmtResetIn(u.fiveHour.resetsAt) : '';
+  const rstWk = u.weekly?.resetsAt ? fmtResetDay(u.weekly.resetsAt) : '';
+  // .usage-src + .usage-reset are surfaced on mobile (rich cards); desktop keeps the strip compact.
+  const reset = (rst5 || rstWk)
+    ? `<div class="usage-reset"><span>${rst5 ? `RST ${rst5}` : ''}</span><span>${rstWk ? `WK · ${rstWk}` : ''}</span></div>`
+    : '';
   return `<div class="usage-provider" title="${esc(title)}">
-    <span class="usage-name">${provider}</span>
-    ${usageWindowHTML('5H', u.fiveHour, provider)}
-    ${usageWindowHTML('7D', u.weekly, provider)}
+    <div class="usage-top"><span class="usage-dot tone-${tone5}"></span><span class="usage-name">${provider}</span>${src ? `<span class="usage-src">${esc(src)}</span>` : ''}</div>
+    ${usageWindowHTML('5H', u.fiveHour, provider, '5h')}
+    ${usageWindowHTML('7D', u.weekly, provider, '7d')}
+    ${reset}
   </div>`;
 }
 
@@ -553,16 +595,19 @@ function render() {
 
 function renderTopbar() {
   const h = S.data.health;
-  $('#health').innerHTML =
-    `<span class="${h.claude?.ok ? 'ok' : 'bad'}">CLAUDE ${h.claude?.ok ? (h.claude.version || 'OK') : 'OFFLINE'}</span>` +
-    ` &nbsp;///&nbsp; <span class="${h.codex?.ok ? 'ok' : 'bad'}">CODEX ${h.codex?.ok ? (h.codex.version || 'OK') : 'OFFLINE'}</span>`;
+  // Paper look: liveness lives in the usage meters. Only surface health when a harness is DOWN.
+  const down = [];
+  if (!h.claude?.ok) down.push('CLAUDE');
+  if (!h.codex?.ok) down.push('CODEX');
+  $('#health').innerHTML = down.map((n) => `<span class="bad">${n} OFFLINE</span>`).join(' &nbsp;///&nbsp; ');
   $('#usage').innerHTML = usageStripHTML();
   const r = S.data.runs;
   const cap = S.data.board.settings.maxConcurrent ?? 2;
   const paused = cap <= 0;
   $('#queueinfo').innerHTML = paused
-    ? `<span class="paused-flag">⏸ PAUSED</span> / RUNNING <b>${r.running.length}</b> / QUEUED <b>${r.queued.length}</b>`
-    : `RUNNING <b>${r.running.length}</b> / QUEUED <b>${r.queued.length}</b> / CAP <b>${cap}</b>`;
+    ? `<span class="paused-flag">⏸ PAUSED</span> · RUN <b>${r.running.length}</b> · Q <b>${r.queued.length}</b>`
+    : `RUN <b>${r.running.length}</b> · QUEUE <b>${r.queued.length}</b> · CAP <b>${cap}</b>`;
+  $('#btn-new').textContent = mqMobile.matches ? '+ TICKET' : '[ + TICKET ]';  // mobile bar drops the brackets
   const pauseBtn = $('#btn-pause');
   if (pauseBtn) {
     pauseBtn.textContent = paused ? '[ ▶ RESUME ]' : '[ ⏸ PAUSE ]';
@@ -585,7 +630,7 @@ function renderTopbar() {
 /* Board = design 3a: desktop (≥760px) is the 1c pipeline rail + in-flight tracker;
    mobile (<760px) is the 2a one-phase-per-screen swipe view. */
 const mqMobile = window.matchMedia('(max-width: 760px)');
-mqMobile.addEventListener('change', () => { if (S.data) renderBoard(); });
+mqMobile.addEventListener('change', () => { if (S.data) render(); }); // topbar labels + board layout both flip
 
 // Phase/harness accent for a column: intake=red, terminal=faint, else the harness type colour.
 function stationAccent(c) {
@@ -603,13 +648,15 @@ function ticketStatus(t, c) {
   return t.status;
 }
 
-// Compact harness label for a station/row, e.g. "CLAUDE·FABLE·HIGH", "HUMAN · INTAKE".
+// Compact harness label for a station/row, e.g. "CLAUDE·FABLE-5·HIGH", "HUMAN · INTAKE".
 function stationHarnessLabel(c) {
   if (c.role === 'intake') return 'HUMAN · INTAKE';
   if (c.role === 'terminal') return 'TERMINAL · GATE';
   const h = c.harness || {};
   if (h.type === 'human') return 'HUMAN';
-  return [h.type, h.model, h.effort].filter(Boolean).join('·').toUpperCase();
+  // strip the redundant type prefix from the model id: claude-fable-5 → FABLE-5
+  const model = String(h.model || '').replace(new RegExp(`^${h.type}[-_]`, 'i'), '');
+  return [h.type, model, h.effort].filter(Boolean).join('·').toUpperCase();
 }
 
 // 4-char phase tag for the tracker progress bar (data-driven from the column name).
@@ -661,11 +708,11 @@ function stationEl(c) {
       <div class="sh-top">
         <span class="station-name">${esc(c.name)}</span>
         <span style="display:inline-flex;gap:6px;align-items:center">
-          ${runningHere ? '<span class="run-badge">● RUN</span>' : ''}
+          ${runningHere ? '<span class="run-badge">★ RUN</span>' : ''}
           <span class="station-count">${String(tickets.length).padStart(2, '0')}</span>
         </span>
       </div>
-      <div class="station-harness"><span class="dot"></span>${esc(stationHarnessLabel(c))}${c.autoRun ? ' · AUTO' : ''}<button class="cfg" data-cfg="${c.id}" title="Configure phase">CFG</button></div>
+      <div class="station-harness"><span class="dot"></span>${esc(stationHarnessLabel(c))}${c.role === 'agent' && !c.autoRun ? ' · MANUAL' : ''}<button class="cfg" data-cfg="${c.id}" title="Configure phase">CFG</button></div>
       ${disabledType ? '<div class="station-sweep" style="color:var(--red);border-color:var(--red)">PROVIDER DISABLED IN SETUP</div>' : ''}
       ${c.role === 'intake' && S.data.scheduler?.autoDispatch
         ? '<div class="station-sweep">AUTO SWEEP <span data-sweep>T-—:——</span></div>' : ''}
@@ -758,7 +805,7 @@ function trackRowEl(t) {
   row.innerHTML = `
     <div style="min-width:0">
       <div class="track-title">${esc(t.title)}</div>
-      <div class="track-sub"><span class="dot" style="background:${accent}"></span>${esc(t.id)} · ${esc(stationHarnessLabel(c))}</div>
+      <div class="track-sub"><span class="dot" style="background:${accent}"></span>${esc(ticketNo(t))} · ${esc(stationHarnessLabel(c))}</div>
     </div>
     <div><div class="seg-row">${segs}</div><div class="seg-labels">${labels}</div></div>
     <div class="track-phase${isQ ? ' queued' : ''}">${isQ ? `Queued · pos ${queuePos(t.id)}` : `▸ ${esc(c.name || '?')}`}</div>
@@ -778,13 +825,23 @@ function renderMobileBoard(board) {
   const accent = stationAccent(c);
   const runningHere = tickets.some((t) => S.data.runs.running.includes(t.id));
 
+  // run/queue/cap ledger (queueinfo is hidden on mobile; this restates it above the phase pager)
+  const rr = S.data.runs;
+  const cap = S.data.board.settings.maxConcurrent ?? 2;
+  const strip = document.createElement('div');
+  strip.className = 'mrunstrip';
+  strip.innerHTML = cap <= 0
+    ? `<span class="paused-flag">⏸ PAUSED</span> · RUN ${rr.running.length} · Q ${rr.queued.length}`
+    : `RUN ${rr.running.length} · Q ${rr.queued.length} · CAP ${cap}`;
+  board.appendChild(strip);
+
   const nav = document.createElement('div');
   nav.className = 'mphase-nav';
   nav.innerHTML = `
     <button class="mprev" ${idx === 0 ? 'disabled' : ''} aria-label="previous phase">‹</button>
     <div class="mphase-title">
       <div class="n">${esc(c.name)}</div>
-      <div class="h">${runningHere ? '<span class="run-badge">● RUN</span>' : ''}<span class="dot" style="background:${accent}"></span>${esc(stationHarnessLabel(c))}</div>
+      <div class="h">${runningHere ? '<span class="run-badge">★ RUN</span>' : ''}<span class="dot" style="background:${accent}"></span>${esc(stationHarnessLabel(c))}</div>
     </div>
     <button class="mnext" ${idx === list.length - 1 ? 'disabled' : ''} aria-label="next phase">›</button>`;
   board.appendChild(nav);
@@ -804,17 +861,17 @@ function renderMobileBoard(board) {
     empty.textContent = '· · · NO TICKETS IN THIS PHASE · · ·';
     body.appendChild(empty);
   }
-  if (c.role === 'intake') {
-    const drop = document.createElement('div');
-    drop.className = 'chip-drop';
-    drop.textContent = '· · · DROP TICKET · · ·';
-    body.appendChild(drop);
-  }
+  // every phase gets a drop target on mobile; tapping it opens the new-ticket form
+  const drop = document.createElement('div');
+  drop.className = 'chip-drop';
+  drop.textContent = '· · · DROP TICKET · · ·';
+  drop.onclick = () => { S.newAttachments = []; pushModal({ type: 'new' }); };
+  body.appendChild(drop);
   const prevN = idx > 0 ? list[idx - 1].name : '';
   const nextN = idx < list.length - 1 ? list[idx + 1].name : '';
   const hint = document.createElement('div');
   hint.className = 'mswipe-hint';
-  hint.innerHTML = [prevN ? `‹ ${esc(prevN)}` : '', nextN ? `${esc(nextN)} ›` : ''].filter(Boolean).join('&nbsp;&nbsp;|&nbsp;&nbsp;');
+  hint.innerHTML = `${prevN ? '‹ ' : ''}SWIPE · ${[prevN && esc(prevN), nextN && esc(nextN)].filter(Boolean).join('&nbsp;&nbsp;|&nbsp;&nbsp;')}${nextN ? ' ›' : ''}`;
   body.appendChild(hint);
   board.appendChild(body);
 
@@ -843,7 +900,7 @@ function mcardEl(t, c) {
     : `<span class="t">${esc(st.toUpperCase())}</span>`;
   el.innerHTML = `
     <div class="mc-top"><span class="led ${st}"></span><span class="title">${esc(t.title)}</span></div>
-    <div class="mc-meta"><span>${esc(t.id)}</span><span>${esc(t.workspace.split('/').pop())}</span></div>
+    <div class="mc-meta"><span>${esc(ticketNo(t))}</span><span>${esc(t.workspace.split('/').pop())}</span></div>
     <div class="mc-harness"><span class="dot" style="background:${stationAccent(c)}"></span>${esc(stationHarnessLabel(c))}</div>
     ${last ? `<div class="mc-last">▸ ${esc(last.text)}</div>` : ''}
     <div class="mc-foot">${foot}<span class="tap">tap to open ▸</span></div>`;
@@ -1905,7 +1962,14 @@ function renderSettingsModal() {
         <span>DATA DIR: <b id="s-usage">…</b></span>
         <button class="btn" id="s-prune">[ RECLAIM DISK SPACE ]</button>
       </div>
-      <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>`)}
+      <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>
+
+      <hr class="sep">
+      <div class="section-head">ARCHIVE</div>
+      <div class="disk-row">
+        <span>ARCHIVED TICKETS: <b>${S.data.tickets.filter((t) => t.archived).length}</b></span>
+        <button class="btn" id="s-open-archive">[ OPEN ARCHIVE ]</button>
+      </div>`)}
 
       ${pane('providers', `
       <div class="section-head">PROVIDERS <span>(claude code + codex)</span></div>
@@ -1964,10 +2028,6 @@ function renderSettingsModal() {
 
       ${pane('appearance', `
       <div class="section-head">APPEARANCE <span>(this device only)</span></div>
-      <label class="f">THEME</label>
-      <div class="theme-row">
-        ${['dark', 'light', 'sepia'].map((th) => `<button class="theme-swatch th-${th} ${p.theme === th ? 'sel' : ''}" data-theme-pick="${th}">${th}</button>`).join('')}
-      </div>
       <label class="f">FONT SIZE <output id="s-font-val">${p.fontPx}px</output></label>
       <input id="s-font" type="range" min="12" max="32" step="1" value="${p.fontPx}">
       <label class="f">UI SIZE <output id="s-ui-val">${Math.round(p.uiScale * 100)}%</output></label>
@@ -1991,6 +2051,7 @@ function renderSettingsModal() {
   loadSecretsSettings();
   loadSystemPromptSettings();
   api('/api/maintenance/usage').then((u) => { const el = $('#s-usage'); if (el) el.textContent = fmtBytes(u.bytes); }).catch(() => {});
+  $('#s-open-archive').onclick = () => pushModal({ type: 'archive' });
   $('#s-prune').onclick = () => {
     $('#s-prune').textContent = '[ RECLAIMING… ]';
     api('/api/maintenance/prune', 'POST', {}).then((r) => {
@@ -2063,12 +2124,6 @@ function renderSettingsModal() {
   };
 
   // Appearance — device-local, applies live and persists immediately (no server round-trip).
-  for (const btn of document.querySelectorAll('[data-theme-pick]')) {
-    btn.onclick = () => {
-      savePrefs({ ...S.prefs, theme: btn.dataset.themePick });
-      for (const b of document.querySelectorAll('[data-theme-pick]')) b.classList.toggle('sel', b === btn);
-    };
-  }
   $('#s-font').oninput = (e) => { savePrefs({ ...S.prefs, fontPx: Number(e.target.value) }); $('#s-font-val').textContent = `${e.target.value}px`; };
   $('#s-ui').oninput = (e) => { savePrefs({ ...S.prefs, uiScale: Number(e.target.value) }); $('#s-ui-val').textContent = `${Math.round(e.target.value * 100)}%`; };
   $('#s-appear-reset').onclick = () => { savePrefs({ ...DEFAULT_PREFS }); renderSettingsModal(); };
@@ -2188,10 +2243,46 @@ $('#btn-pause').onclick = () => {
     .then(() => toast(next === 0 ? 'ENGINE PAUSED — nothing new will run' : `ENGINE RESUMED — cap ${next}`))
     .catch(alertErr);
 };
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') requestCloseModal(); });
-document.addEventListener('click', (e) => { if (e.target.closest('.refresh-models')) { e.preventDefault(); refreshModelRegistry(); } });
+/* ---- mobile overflow menu (≡): folds Pause / Archive / Settings off the top bar ---- */
+function buildTopMenu() {
+  const cap = S.data?.board?.settings?.maxConcurrent ?? 2;
+  const paused = cap <= 0;
+  const archived = S.data?.tickets?.filter((t) => t.archived).length || 0;
+  return [
+    { id: 'btn-pause', label: paused ? '▶ RESUME ENGINE' : '⏸ PAUSE ENGINE', danger: paused },
+    { id: 'btn-archive', label: archived ? `ARCHIVE · ${String(archived).padStart(2, '0')}` : 'ARCHIVE' },
+    { id: 'btn-settings', label: 'SETTINGS' },
+  ].map((it) => `<button class="topmenu-item${it.danger ? ' danger' : ''}" data-act="${it.id}">${it.label}</button>`).join('');
+}
+function closeTopMenu() {
+  const m = $('#topmenu');
+  if (!m || m.hidden) return;
+  m.hidden = true;
+  $('#btn-menu')?.setAttribute('aria-expanded', 'false');
+}
+function toggleTopMenu() {
+  const m = $('#topmenu');
+  if (!m) return;
+  if (!m.hidden) { closeTopMenu(); return; }
+  m.innerHTML = buildTopMenu();
+  const bar = $('#topbar')?.getBoundingClientRect();
+  if (bar) { m.style.top = `${bar.bottom}px`; m.style.right = `${Math.max(8, window.innerWidth - bar.right + 8)}px`; }
+  m.hidden = false;
+  $('#btn-menu')?.setAttribute('aria-expanded', 'true');
+  // items just re-trigger the real (hidden) top-bar buttons so wiring stays in one place
+  for (const b of m.querySelectorAll('[data-act]')) {
+    b.onclick = () => { closeTopMenu(); $(`#${b.dataset.act}`)?.click(); };
+  }
+}
+$('#btn-menu').onclick = (e) => { e.stopPropagation(); toggleTopMenu(); };
 
-savePrefs(loadPrefs()); // apply saved theme / font / UI scale before first paint
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeTopMenu(); requestCloseModal(); } });
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.refresh-models')) { e.preventDefault(); refreshModelRegistry(); }
+  if (!e.target.closest('#topmenu') && !e.target.closest('#btn-menu')) closeTopMenu();
+});
+
+savePrefs(loadPrefs()); // apply saved font size / UI scale before first paint
 loadState()
   .then(() => { initHistoryFromLocation(); connectWS(); }) // needs S.data loaded first, to validate a deep-linked ticket/column id
   .catch((e) => { document.body.innerHTML = `<pre style="color:#ff2a2a;padding:20px">DISPATCH FAILED TO LOAD: ${esc(e.message)}</pre>`; });

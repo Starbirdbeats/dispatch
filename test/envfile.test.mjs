@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   deleteEnvKey,
+  envEntries,
   parseEnv,
   serializeEnvValue,
   upsertEnvValue,
@@ -54,4 +58,25 @@ test('validateEnvKey rejects invalid names', () => {
   assert.equal(validateEnvKey('GOOD_1'), 'GOOD_1');
   assert.throws(() => validateEnvKey('1BAD'), /invalid env key/);
   assert.throws(() => validateEnvKey('BAD-NAME'), /invalid env key/);
+});
+
+test('envEntries hides ephemeral runtime-noise keys but keeps file + real keys', () => {
+  const file = path.join(os.tmpdir(), `dispatch-env-${process.pid}-${Date.now()}-test.env`);
+  fs.writeFileSync(file, 'PWD=fromfile\nMY_TOKEN=secret\n');
+  try {
+    const runtime = { _: '/usr/bin/node', PWD: '/runtime/dir', OLDPWD: '/x', SHLVL: '2', RUNTIME_ONLY: 'keepme' };
+    const byKey = Object.fromEntries(envEntries(file, runtime).map((e) => [e.key, e]));
+    // pure shell noise that is runtime-only is filtered out
+    assert.ok(!('_' in byKey), '`_` should be hidden');
+    assert.ok(!('OLDPWD' in byKey), 'OLDPWD should be hidden');
+    assert.ok(!('SHLVL' in byKey), 'SHLVL should be hidden');
+    // a noise-named key that also lives in .env still shows (file entry wins)
+    assert.equal(byKey.PWD?.inFile, true);
+    assert.equal(byKey.PWD?.value, 'fromfile');
+    // real keys are untouched
+    assert.equal(byKey.MY_TOKEN?.value, 'secret');
+    assert.equal(byKey.RUNTIME_ONLY?.value, 'keepme');
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
 });

@@ -685,7 +685,7 @@ function shell(title, bodyHTML, footHTML = '') {
         ${footHTML ? `<div class="panel-foot">${footHTML}</div>` : ''}
       </div>
     </div>`;
-  $('#modal-close').onclick = closeModal;
+  $('#modal-close').onclick = requestCloseModal;
   $('#overlay').onclick = (e) => { if (e.target.id === 'overlay') closeModal(); };
 }
 
@@ -1454,7 +1454,7 @@ function secretRows(entries = []) {
     <div class="h">KEY</div><div class="h">VALUE</div><div class="h">SOURCE</div><div class="h">ACTIONS</div>
     ${entries.map((entry) => `<div class="secret-key">${esc(entry.key)}</div>
       <div><input class="secret-value" type="password" value="${esc(entry.value)}" autocomplete="off" spellcheck="false"></div>
-      <div><span class="secret-source">${esc(secretSource(entry))}</span></div>
+      <div><span class="secret-source ${entry.inFile ? (entry.inRuntime ? 'src-both' : 'src-file') : 'src-runtime'}">${esc(secretSource(entry))}</span></div>
       <div class="secret-actions" data-key="${esc(entry.key)}">
         <button type="button" class="btn" data-secret-reveal>[ SHOW ]</button>
         <button type="button" class="btn" data-secret-save>[ SAVE ]</button>
@@ -1473,7 +1473,8 @@ function renderSecretsPanel(data) {
       <button type="button" class="btn" id="s-secret-new-reveal">[ SHOW ]</button>
       <button type="button" class="btn btn-accent" id="s-secret-add">[ ADD ]</button>
     </div>
-    <div class="hint">FILE: <code>${esc(data.path || '.env')}</code>. Runtime-only keys are visible but delete is disabled until saved into .env.</div>
+    <div class="hint" id="s-secret-msg"></div>
+    <div class="hint"><code>${esc(data.path || '.env')}</code> · each row's [ SAVE ] writes straight to this file · runtime-only keys have no <code>.env</code> line to delete yet.</div>
     ${secretRows(data.entries || [])}`;
   wireSecretsPanel();
 }
@@ -1486,9 +1487,32 @@ function wireSecretsPanel() {
   };
   const newValue = $('#s-secret-value');
   $('#s-secret-new-reveal').onclick = () => toggle(newValue, $('#s-secret-new-reveal'));
-  $('#s-secret-add').onclick = async () => {
-    const key = $('#s-secret-key').value.trim();
-    const value = $('#s-secret-value').value;
+
+  // Add-row key validation: block ADD until the key is a valid env name; warn on overwrite.
+  const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  const keyInput = $('#s-secret-key');
+  const addBtn = $('#s-secret-add');
+  const msg = $('#s-secret-msg');
+  const existingKeys = new Set([...document.querySelectorAll('.secret-key')].map((el) => el.textContent));
+  const validateKey = () => {
+    const k = keyInput.value.trim();
+    if (!k) { addBtn.disabled = true; msg.textContent = ''; msg.className = 'hint'; return; }
+    if (!KEY_RE.test(k)) {
+      addBtn.disabled = true;
+      msg.textContent = 'KEY MUST BE LETTERS, DIGITS OR _ AND NOT START WITH A DIGIT';
+      msg.className = 'hint bad';
+      return;
+    }
+    addBtn.disabled = false;
+    if (existingKeys.has(k)) { msg.textContent = `${k} ALREADY EXISTS — SAVING WILL OVERWRITE IT`; msg.className = 'hint warn'; }
+    else { msg.textContent = ''; msg.className = 'hint'; }
+  };
+  keyInput.addEventListener('input', validateKey);
+  validateKey();
+
+  addBtn.onclick = async () => {
+    const key = keyInput.value.trim();
+    const value = newValue.value;
     try {
       renderSecretsPanel(await api('/api/secrets', 'POST', { key, value }));
       toast('SECRET SAVED');
@@ -1518,6 +1542,29 @@ function wireSecretsPanel() {
       } catch (e) { alertErr(e); }
     };
   }
+  // Mark a row's [ SAVE ] as unsaved once its value diverges from what's on disk.
+  // The panel re-renders after every save, so defaultValue re-syncs and the flag clears.
+  for (const input of document.querySelectorAll('.secret-value')) {
+    input.addEventListener('input', () => {
+      const saveBtn = input.closest('div').nextElementSibling?.nextElementSibling?.querySelector('[data-secret-save]');
+      if (saveBtn) saveBtn.classList.toggle('dirty', input.value !== input.defaultValue);
+    });
+  }
+}
+
+// True when the secrets panel has value edits that were never saved to .env.
+function unsavedSecretCount() {
+  if (S.modal?.type !== 'settings') return 0;
+  let n = 0;
+  for (const input of document.querySelectorAll('.secret-value')) if (input.value !== input.defaultValue) n++;
+  return n;
+}
+
+// Guarded close: warn before discarding unsaved secret edits (each row saves on its own).
+function requestCloseModal() {
+  const n = unsavedSecretCount();
+  if (n && !confirm(`${n} secret ${n > 1 ? 'values have' : 'value has'} unsaved edits. Close without saving? Use each row's [ SAVE ] to keep changes.`)) return;
+  closeModal();
 }
 
 async function loadSecretsSettings() {
@@ -1638,7 +1685,7 @@ function renderSettingsModal() {
 
       <div class="hint" style="margin-top:14px">claude auth depends on local Claude CLI credentials · codex auth depends on local chatgpt/codex login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
     </div>`,
-    `<button class="btn btn-accent" id="s-save">[ SAVE ]</button>`);
+    `<button class="btn btn-accent" id="s-save">[ SAVE SETTINGS ]</button>`);
 
   const fmtBytes = (n) => n == null ? '?' : n > 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e3).toFixed(0)} KB`;
   wireWorkspacePicker('s-ws');
@@ -1788,7 +1835,7 @@ function renderSettingsModal() {
     } catch (e) {
       alertErr(e);
     } finally {
-      btn.textContent = '[ SAVE ]';
+      btn.textContent = '[ SAVE SETTINGS ]';
     }
   };
   $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
@@ -1837,7 +1884,7 @@ $('#btn-pause').onclick = () => {
     .then(() => toast(next === 0 ? 'ENGINE PAUSED — nothing new will run' : `ENGINE RESUMED — cap ${next}`))
     .catch(alertErr);
 };
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') requestCloseModal(); });
 document.addEventListener('click', (e) => { if (e.target.closest('.refresh-models')) { e.preventDefault(); refreshModelRegistry(); } });
 
 savePrefs(loadPrefs()); // apply saved theme / font / UI scale before first paint

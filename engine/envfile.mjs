@@ -5,6 +5,12 @@ import crypto from 'node:crypto';
 export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MANAGED_RUNTIME_KEYS = new Set();
 
+// Ephemeral shell/runtime vars that are never meaningful to manage as secrets and
+// only add noise to the Settings listing (e.g. `_` is the path of the launching
+// binary). Filtered out only when a key is runtime-only — a key written into .env
+// always shows, so nothing the user has explicitly saved is ever hidden.
+const RUNTIME_NOISE_KEYS = new Set(['_', 'PWD', 'OLDPWD', 'SHLVL']);
+
 function atomicWrite(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${crypto.randomBytes(4).toString('hex')}.tmp`;
@@ -167,7 +173,7 @@ export function envEntries(file, runtime = process.env) {
     inFile: fileValues.has(key),
     inRuntime: runtime[key] != null,
     editable: true,
-  }));
+  })).filter((entry) => entry.inFile || !RUNTIME_NOISE_KEYS.has(entry.key));
 }
 
 export function upsertEnvFileValue(file, key, value) {

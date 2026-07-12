@@ -163,6 +163,8 @@ npm run screenshots
 - Provider cards and re-check flow
 - Preset assignment
 - Disabled-provider warning behavior in phase CFG
+- URL-state routing: every modal/tab is reflected in `location.hash`, a hard refresh
+  restores it, and Back/Forward walk modal history without ever navigating out of the app
 
 `npm run screenshots` regenerates `docs/screenshots/*.png` for the README setup flow.
 

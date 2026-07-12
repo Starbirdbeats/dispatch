@@ -3,7 +3,7 @@
 
 const S = {
   data: null,          // /api/state payload
-  modal: null,         // {type:'ticket'|'column'|'new'|'settings', id?, tab?}
+  modal: null,         // {type:'ticket'|'column'|'new'|'settings'|'archive', id?, tab?} — mirrored in location.hash, see modalToHash/hashToModal
   live: {},            // ticketId -> normalized run events (session-local)
   liveContext: {},     // ticketId -> latest live context snapshot
   transcript: null,    // current transcript tab view state
@@ -578,7 +578,7 @@ function renderTopbar() {
       : '<span class="muted">SETUP READY</span>';
   }
   const openNotice = $('#s-open-setup');
-  if (openNotice) openNotice.onclick = () => { S.modal = { type: 'settings', tab: 'providers' }; renderModal(); };
+  if (openNotice) openNotice.onclick = () => pushModal({ type: 'settings', tab: 'providers' });
 }
 
 function renderBoard() {
@@ -617,7 +617,7 @@ function renderBoard() {
       const id = e.dataTransfer.getData('text/ticket');
       if (id) await api(`/api/tickets/${id}/move`, 'POST', { columnId: c.id }).catch(alertErr);
     });
-    $('.cfg', col).onclick = () => { S.modal = { type: 'column', id: c.id }; renderModal(); };
+    $('.cfg', col).onclick = () => pushModal({ type: 'column', id: c.id });
     board.appendChild(col);
   }
   board.scrollLeft = savedX;
@@ -654,12 +654,18 @@ function cardEl(t, c) {
     e.stopPropagation(); // don't open the ticket modal
     api(`/api/tickets/${t.id}/archive`, 'POST', {}).then(() => toast('ARCHIVED')).catch(alertErr);
   };
-  el.onclick = () => { S.modal = { type: 'ticket', id: t.id, tab: 'overview' }; renderModal(); };
+  el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
   return el;
 }
 
 /* ---------- modals ---------- */
-function closeModal() { S.modal = null; S.transcript = null; $('#modal-root').innerHTML = ''; }
+function closeModal() {
+  // history.back() is only safe because initHistoryFromLocation() guarantees a
+  // "board" entry sits beneath every modal we ever push — see below.
+  if (history.state?.modal) { history.back(); return; }
+  S.modal = null; S.transcript = null; $('#modal-root').innerHTML = '';
+  history.replaceState({ modal: false }, '', location.pathname + location.search);
+}
 
 let toastTimer = null;
 function toast(text, isError = false) {
@@ -696,6 +702,83 @@ function renderModal() {
   if (S.modal.type === 'new') renderNewModal();
   if (S.modal.type === 'settings') renderSettingsModal();
   if (S.modal.type === 'archive') renderArchiveModal();
+}
+
+/* ---------- URL-state routing: every modal open/tab is reflected in location.hash,
+   so a hard refresh (or a shared/bookmarked link) lands back on the same view. ---------- */
+function modalToHash(modal) {
+  if (!modal) return '';
+  if (modal.type === 'ticket') return modal.tab && modal.tab !== 'overview' ? `${modal.id}/${modal.tab}` : modal.id;
+  if (modal.type === 'column') return `column/${modal.id}`;
+  if (modal.type === 'settings') return modal.tab && modal.tab !== 'engine' ? `settings/${modal.tab}` : 'settings';
+  if (modal.type === 'new') return 'new';
+  if (modal.type === 'archive') return 'archive';
+  return '';
+}
+
+function hashToModal(hash) {
+  const h = String(hash || '').replace(/^#/, '');
+  if (!h) return null;
+  if (h === 'new') return { type: 'new' };
+  if (h === 'archive') return { type: 'archive' };
+  if (h === 'settings') return { type: 'settings', tab: 'engine' };
+  if (h.startsWith('settings/')) {
+    const tab = h.slice('settings/'.length);
+    return { type: 'settings', tab: SETTINGS_TABS.includes(tab) ? tab : 'engine' };
+  }
+  if (h.startsWith('column/')) return { type: 'column', id: h.slice('column/'.length) };
+  // bare ticket id (matches links already sent by notify.mjs) or id/tab
+  const [id, tab] = h.split('/');
+  if (id.startsWith('t-')) return { type: 'ticket', id, tab: TICKET_TABS.includes(tab) ? tab : 'overview' };
+  return null;
+}
+
+// Writes the hash for a state change. Doesn't touch S.modal or the DOM — callers do
+// that themselves first, since ticket tabs fully re-render but settings tabs just
+// toggle CSS visibility (see renderSettingsModal) to preserve unsaved field edits.
+function writeModalHash(modal, { push }) {
+  const hash = modalToHash(modal);
+  const url = hash ? `#${hash}` : location.pathname + location.search;
+  if (push) history.pushState({ modal: Boolean(modal) }, '', url);
+  else history.replaceState({ modal: Boolean(modal) }, '', url);
+}
+
+// Opens a *new* modal (as opposed to switching tabs inside the one that's already
+// open) — always pushes, so Back steps out to whatever was open before, or the board.
+function pushModal(modal) {
+  S.modal = modal;
+  renderModal();
+  writeModalHash(modal, { push: true });
+}
+
+// Single source of truth for "what does the current hash mean" — runs on boot and on
+// every hashchange (Back/Forward, address-bar edits, or a raw location.hash= write).
+// Never writes history itself: by the time this runs, the URL has already changed.
+function renderForHash() {
+  const modal = hashToModal(location.hash);
+  const missing =
+    (modal?.type === 'ticket' && !S.data?.tickets?.some((t) => t.id === modal.id)) ||
+    (modal?.type === 'column' && !cols().some((c) => c.id === modal.id));
+  if (missing) {
+    toast(`${modal.type === 'ticket' ? 'TICKET' : 'COLUMN'} NOT FOUND`, true);
+    history.replaceState({ modal: false }, '', location.pathname + location.search);
+    S.modal = null; S.transcript = null; $('#modal-root').innerHTML = '';
+    return;
+  }
+  S.modal = modal;
+  if (modal) renderModal();
+  else { S.transcript = null; $('#modal-root').innerHTML = ''; }
+}
+window.addEventListener('hashchange', renderForHash);
+
+// Establishes a "board" entry beneath whatever the page loaded with, so a deep link
+// (Telegram notification, bookmark, shared URL) always has somewhere safe for Back to
+// land instead of navigating out of the app entirely.
+function initHistoryFromLocation() {
+  const initialHash = location.hash;
+  history.replaceState({ modal: false }, '', location.pathname + location.search);
+  if (initialHash) history.pushState({ modal: true }, '', initialHash);
+  renderForHash();
 }
 
 function updateTicketModalHead() {
@@ -768,11 +851,13 @@ function transcriptRecord(raw) {
 }
 
 /* ---- ticket modal ---- */
+const TICKET_TABS = ['overview', 'activity', 'transcript', 'dossier'];
+
 function renderTicketModal() {
   const t = S.data.tickets.find((x) => x.id === S.modal.id);
   if (!t) return closeModal();
   const tab = S.modal.tab || 'overview';
-  const tabs = ['overview', 'activity', 'transcript', 'dossier'];
+  const tabs = TICKET_TABS;
   const running = S.data.runs.running.includes(t.id);
 
   shell(
@@ -788,7 +873,7 @@ function renderTicketModal() {
   );
 
   for (const b of document.querySelectorAll('[data-tab]')) {
-    b.onclick = () => { S.modal.tab = b.dataset.tab; renderTicketModal(); };
+    b.onclick = () => { S.modal.tab = b.dataset.tab; renderTicketModal(); writeModalHash(S.modal, { push: false }); };
   }
   $('#btn-move').onclick = () => api(`/api/tickets/${t.id}/move`, 'POST', { columnId: $('#move-to').value }).then(() => { toast('MOVED'); closeAndReload(); }).catch(alertErr);
   $('#btn-run').onclick = () => api(`/api/tickets/${t.id}/run`, 'POST', {}).then((r) => {
@@ -1430,7 +1515,7 @@ function renderArchiveModal() {
       : '<div class="arch-empty">ARCHIVE EMPTY — archive a done ticket and it lands here</div>'}</div>`
   );
   for (const el of document.querySelectorAll('[data-open]')) {
-    el.onclick = () => { S.modal = { type: 'ticket', id: el.dataset.open, tab: 'overview' }; renderModal(); };
+    el.onclick = () => pushModal({ type: 'ticket', id: el.dataset.open, tab: 'overview' });
   }
   for (const el of document.querySelectorAll('[data-restore]')) {
     el.onclick = (e) => {
@@ -1704,6 +1789,7 @@ function renderSettingsModal() {
       S.modal.tab = b.dataset.tab;
       for (const x of document.querySelectorAll('.tabs [data-tab]')) x.classList.toggle('active', x === b);
       for (const el of document.querySelectorAll('.s-pane')) el.classList.toggle('active', el.dataset.pane === S.modal.tab);
+      writeModalHash(S.modal, { push: false });
     };
   }
 
@@ -1892,9 +1978,9 @@ setInterval(() => {
 }, 1000);
 
 /* ---------- boot ---------- */
-$('#btn-new').onclick = () => { S.newAttachments = []; S.modal = { type: 'new' }; renderModal(); };
-$('#btn-settings').onclick = () => { S.modal = { type: 'settings' }; renderModal(); };
-$('#btn-archive').onclick = () => { S.modal = { type: 'archive' }; renderModal(); };
+$('#btn-new').onclick = () => { S.newAttachments = []; pushModal({ type: 'new' }); };
+$('#btn-settings').onclick = () => pushModal({ type: 'settings' });
+$('#btn-archive').onclick = () => pushModal({ type: 'archive' });
 $('#btn-pause').onclick = () => {
   const cap = S.data.board.settings.maxConcurrent ?? 2;
   let next;
@@ -1908,4 +1994,6 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') requestClo
 document.addEventListener('click', (e) => { if (e.target.closest('.refresh-models')) { e.preventDefault(); refreshModelRegistry(); } });
 
 savePrefs(loadPrefs()); // apply saved theme / font / UI scale before first paint
-loadState().then(connectWS).catch((e) => { document.body.innerHTML = `<pre style="color:#ff2a2a;padding:20px">DISPATCH FAILED TO LOAD: ${esc(e.message)}</pre>`; });
+loadState()
+  .then(() => { initHistoryFromLocation(); connectWS(); }) // needs S.data loaded first, to validate a deep-linked ticket/column id
+  .catch((e) => { document.body.innerHTML = `<pre style="color:#ff2a2a;padding:20px">DISPATCH FAILED TO LOAD: ${esc(e.message)}</pre>`; });

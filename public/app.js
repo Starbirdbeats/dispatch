@@ -339,8 +339,9 @@ function usageSourceLabel(source) {
   return '';
 }
 
-// One usage window: "5H ▓▓▓░ 62%" — the number is % USED; the 5H meter takes its
-// tone from what's left (green → amber → red), the weekly meter stays muted ink.
+// One usage window: "5H ▓▓▓░ 38%" — the number is % REMAINING; the 5H meter fills
+// with what's left and tones green → amber → red as it drains; the weekly meter stays
+// muted ink. (Bar and number both show headroom, not consumption.)
 function usageWindowHTML(label, win, provider, kind) {
   if (!win || !Number.isFinite(Number(win.usedPct))) {
     return `<span class="usage-window w${kind} missing"><span class="usage-key">${label}</span><b>—</b></span>`;
@@ -349,12 +350,12 @@ function usageWindowHTML(label, win, provider, kind) {
   const remaining = clamp(100 - used);
   const tone = kind === '7d' ? 'muted' : meterTone(remaining);
   const title = [
-    `${provider} ${label}: ${pctText(used)} used`,
-    `${pctText(remaining)} remaining`,
+    `${provider} ${label}: ${pctText(remaining)} remaining`,
+    `${pctText(used)} used`,
     win.resetsAt ? `resets ${fmtTs(win.resetsAt)}` : '',
   ].filter(Boolean).join(' · ');
   return `<span class="usage-window w${kind} tone-${tone}" title="${esc(title)}">
-    <span class="usage-key">${label}</span><span class="meter tone-${tone}" style="--pct:${used}%"><span></span></span><b>${pctText(used)}</b>
+    <span class="usage-key">${label}</span><span class="meter tone-${tone}" style="--pct:${remaining}%"><span></span></span><b>${pctText(remaining)}</b>
   </span>`;
 }
 

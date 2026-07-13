@@ -116,7 +116,7 @@ Every ticket owns `<dataDir>/tickets/<id>/DOSSIER.md` — a running hand-off doc
 
 Rules enforced by the run engine:
 1. Every agent run receives the dossier path and is instructed to **read it first**.
-2. Every run must **append a Work Log entry** before finishing (what was done, what the next phase needs to know).
+2. Every run must **append a Work Log entry** before finishing (what was done, what the next phase needs to know). Read-only runs should try the dossier write first; if the sandbox denies it, they put the entry in the optional control-block `work_log` field and the engine appends it.
 3. The run prompt includes the last N activity items (comments, moves) so human comments on the ticket reach the agent too.
 
 Codex picking up Build reads Claude's plan from the dossier — zero re-explanation. Claude picking up Review reads Codex's work log the same way.
@@ -128,10 +128,12 @@ Every agent run must end its final message with a fenced control block:
 {"action": "advance" | "hold" | "bounce" | "flag_human",
  "target_column": "<name, optional>",
  "comment": "<posted to ticket activity>",
- "human_test": "<required when advancing to Done>"}
+ "human_test": "<required when advancing to Done>",
+ "work_log": "<optional read-only fallback: entry body>",
+ "plan": "<optional read-only fallback: full Plan section body>"}
 ```
 
-The engine parses this to move the ticket, post the comment, and enforce the Done gate. Missing/unparseable block → ticket goes to `awaiting-human` with the raw output attached (fail safe, never fail silent).
+The engine parses this to move the ticket, post the comment, write optional read-only dossier fields, and enforce the Done gate. Missing/unparseable block → ticket goes to `awaiting-human` with the raw output attached (fail safe, never fail silent).
 
 ## 6. Run engine
 
@@ -184,7 +186,7 @@ A ticket cannot enter a `terminal` column without `human_test` populated — eit
 
 - **Puppeteer:** workspaces get standard tool access; the composed prompt tells agents Puppeteer is available (`npm i puppeteer`) for browser automation/scraping/UI verification.
 - **Chrome extension (Claude in Chrome):** per-column/per-ticket toggle adds `--chrome` to Claude runs for real-browser driving. Claude-only; Codex tickets needing a browser use Puppeteer.
-- **Permissions:** per-column defaults — Planning/Review run `--permission-mode auto` (claude) / `--sandbox read-only` (codex, review only); Build runs `acceptEdits` / `workspace-write`. A per-ticket "dangerous" toggle unlocks `bypassPermissions` / `danger-full-access` for trusted workspaces, off by default, visually loud when on.
+- **Permissions:** per-column defaults — Planning/Review run `--permission-mode auto` (claude) / `--sandbox read-only` (codex, review only); Build runs `acceptEdits` / `workspace-write`. A per-ticket "dangerous" toggle unlocks `bypassPermissions` / `danger-full-access` for trusted workspaces, off by default, visually loud when on. Read-only tickets force Claude to manual mode with `Write`/`Edit` allowed only inside the ticket data dir, and force Codex to `read-only`; Codex can still hand off through the optional `work_log`/`plan` control fields that the engine writes into the dossier.
 
 ## 8. UI spec
 

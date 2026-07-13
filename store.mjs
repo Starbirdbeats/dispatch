@@ -8,6 +8,7 @@ export const DATA_DIR = process.env.DISPATCH_DATA || path.join(os.homedir(), 'di
 const TICKETS_DIR = path.join(DATA_DIR, 'tickets');
 const BOARD_FILE = path.join(DATA_DIR, 'board.json');
 const QUEUE_FILE = path.join(DATA_DIR, 'queue.json');
+const MAX_DOSSIER_FIELD_CHARS = 20_000;
 
 const DEFAULT_BOARD = {
   settings: {
@@ -195,6 +196,32 @@ function replaceSection(doc, heading, newBlock) {
   return [...lines.slice(0, start), ...newBlock.split('\n'), '', ...lines.slice(end)].join('\n');
 }
 
+function sectionBounds(doc, heading) {
+  const lines = doc.split('\n');
+  const start = lines.findIndex((l) => l.trim() === heading);
+  if (start === -1) return null;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) { end = i; break; }
+  }
+  return { lines, start, end };
+}
+
+function trimDossierField(text) {
+  let s = String(text || '').trim();
+  if (s.length > MAX_DOSSIER_FIELD_CHARS) {
+    s = `${s.slice(0, MAX_DOSSIER_FIELD_CHARS).trimEnd()}\n\n_[truncated by Dispatch at ${MAX_DOSSIER_FIELD_CHARS} characters]_`;
+  }
+  return s;
+}
+
+function insertSectionBefore(doc, beforeHeading, newBlock) {
+  const lines = doc.split('\n');
+  const at = lines.findIndex((l) => l.trim() === beforeHeading);
+  if (at === -1) return `${doc.trimEnd()}\n\n${newBlock}\n`;
+  return [...lines.slice(0, at), newBlock, '', ...lines.slice(at)].join('\n');
+}
+
 export class Store {
   // Files/dirs Dispatch itself owns inside a ticket dir. Anything else is agent scratch.
   static KNOWN_TICKET_ENTRIES = new Set(['ticket.json', 'DOSSIER.md', 'last-message.txt', 'transcripts', 'runs', 'attachments']);
@@ -364,6 +391,35 @@ export class Store {
 
   readDossier(id) {
     try { return fs.readFileSync(this.dossierPath(id), 'utf8'); } catch { return ''; }
+  }
+
+  appendWorkLog(id, text) {
+    const entry = trimDossierField(text);
+    if (!entry) return false;
+    let doc = this.readDossier(id);
+    const bounds = sectionBounds(doc, '## Work Log');
+    if (!bounds) {
+      doc = `${doc.trimEnd()}\n\n## Work Log\n${entry}\n`;
+    } else {
+      const before = bounds.lines.slice(0, bounds.end).join('\n').trimEnd();
+      const after = bounds.lines.slice(bounds.end).join('\n').trimStart();
+      doc = `${before}\n\n${entry}\n`;
+      if (after) doc += `\n${after}`;
+    }
+    atomicWrite(this.dossierPath(id), doc.endsWith('\n') ? doc : `${doc}\n`);
+    return true;
+  }
+
+  writePlan(id, text) {
+    const plan = trimDossierField(text);
+    if (!plan) return false;
+    const body = ['## Plan', plan].join('\n');
+    let doc = this.readDossier(id);
+    const replaced = replaceSection(doc, '## Plan', body);
+    if (replaced != null) doc = replaced;
+    else doc = insertSectionBefore(doc, '## Work Log', body);
+    atomicWrite(this.dossierPath(id), doc.endsWith('\n') ? doc : `${doc}\n`);
+    return true;
   }
 
   /* ---- attachments ----

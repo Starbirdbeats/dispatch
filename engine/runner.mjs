@@ -162,6 +162,7 @@ export class Runner {
     // READ-ONLY tickets: force sandbox to look-but-don't-touch, whatever the column configured.
     if (ticket.readOnly && h.type !== 'human') {
       h.permissions = h.type === 'codex' ? 'read-only' : 'manual';
+      h.readOnly = true;
     }
     return h;
   }
@@ -782,6 +783,7 @@ export class Runner {
     }
 
     store.appendActivity(ticket.id, { kind: 'handoff', by: harness.type, text: control.comment || '(no comment)' });
+    this._applyDossierFields(ticket, column, harness, control);
     if (control.human_test) ticket.humanTest = control.human_test;
 
     switch (control.action) {
@@ -827,6 +829,28 @@ export class Runner {
           ticket.stuckReason = { kind: 'hold', at: nowIso(), detail: `${harness.type} did work but held (attempt ${ticket.holds}/${MAX_HOLDS}) — phase not yet complete. Note: ${control.comment || '(none)'}` };
         }
         break;
+      }
+    }
+  }
+
+  _applyDossierFields(ticket, column, harness, control) {
+    const store = this.store;
+    const workLog = typeof control.work_log === 'string' ? control.work_log.trim() : '';
+    if (workLog && typeof store.appendWorkLog === 'function') {
+      const header = `### ${nowIso()} — ${harness.type || 'agent'} (${column.name}) [engine-appended]`;
+      try {
+        store.appendWorkLog(ticket.id, `${header}\n${workLog}`);
+      } catch (err) {
+        store.appendActivity(ticket.id, { kind: 'system', by: 'engine', text: `failed to append work_log to dossier: ${err.message}` });
+      }
+    }
+
+    const plan = typeof control.plan === 'string' ? control.plan.trim() : '';
+    if (plan && typeof store.writePlan === 'function') {
+      try {
+        store.writePlan(ticket.id, plan);
+      } catch (err) {
+        store.appendActivity(ticket.id, { kind: 'system', by: 'engine', text: `failed to write plan to dossier: ${err.message}` });
       }
     }
   }

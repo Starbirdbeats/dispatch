@@ -2,6 +2,7 @@
 // Sessions: first run mints a UUID via --session-id; later runs --resume it.
 // Output: --output-format stream-json, one JSON event per line.
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { CLAUDE_CONTEXT_WINDOW } from './limits.mjs';
 
 export function buildInvocation({ prompt, harness, sessionId, dataDir }) {
@@ -16,7 +17,8 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir }) {
   } else if (harness.permissions) {
     args.push('--permission-mode', harness.permissions);
   }
-  if (harness.allowedTools?.trim()) args.push('--allowedTools', harness.allowedTools.trim());
+  const allowedTools = buildAllowedTools(harness, dataDir);
+  if (allowedTools) args.push('--allowedTools', allowedTools);
   if (harness.chrome) args.push('--chrome');
   args.push('--add-dir', dataDir);
 
@@ -29,6 +31,21 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir }) {
   }
   args.push(prompt);
   return { cmd: 'claude', args, newSessionId };
+}
+
+function buildAllowedTools(harness, dataDir) {
+  const configured = harness.allowedTools?.trim();
+  const rules = configured ? [configured] : [];
+  if (harness.readOnly && dataDir) {
+    const dataPattern = absoluteClaudePathPattern(dataDir);
+    rules.push(`Write(${dataPattern}/**)`, `Edit(${dataPattern}/**)`);
+  }
+  return rules.join(' ').trim();
+}
+
+function absoluteClaudePathPattern(dir) {
+  const abs = path.resolve(dir).replaceAll('\\', '/').replace(/^\/+/, '');
+  return `//${abs}`;
 }
 
 // Normalize a stream-json line into a Dispatch run event (or null to skip).

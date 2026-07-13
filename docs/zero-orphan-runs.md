@@ -69,7 +69,7 @@ For every `activeRun`:
 ### 2.4 Finalize (idempotent)
 
 On `exit.json`: read last message (codex `-o` file / claude `result` event from the journal),
-parse control block, apply move/comment/Done-gate — today's `_applyControl`, unchanged.
+parse control block, apply move/comment/optional dossier `work_log` and `plan` fields/Done-gate.
 Then `rename(exit.json → finalized.json)`. The rename is the exactly-once guard: whichever
 server instance wins the rename does the post-run handling; a second finalizer finds nothing.
 
@@ -87,7 +87,10 @@ boot re-queues it. (Closes the "queued jobs evaporate" hole.)
 
 ## 3. What stays the same
 
-Adapters, prompt contract, control-block parsing, Done gate, bounce logic, UI protocol.
+Adapters, prompt contract, control-block parsing, Done gate, bounce logic, UI protocol. Read-only
+runs may include optional `work_log` and `plan` fields in the control block when their sandbox
+blocks direct dossier writes; the finalizer writes those fields exactly once with the rest of
+post-run handling.
 This is a runner+service refactor; nothing above the engine layer notices.
 
 ## 4. Steps

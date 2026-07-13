@@ -29,7 +29,7 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
 
   if (ticket.readOnly) {
     lines.push('\n## READ-ONLY TICKET');
-    lines.push('This ticket is READ-ONLY: analyse/read the repo for context only. Your sandbox blocks writes, so do NOT attempt to edit files, run migrations, or commit — the goal is understanding, not changes. Put your findings/analysis in the dossier and advance.');
+    lines.push('This ticket is READ-ONLY: analyse/read the repo for context only. Do NOT attempt to edit workspace files, run migrations, or commit — the goal is understanding, not changes. You must still complete the hand-off. Try the normal dossier Work Log/Plan update first; if your sandbox denies the dossier write, do not retry. Instead include the Work Log entry body as "work_log" in your control block, and include "plan" only if this phase produced or updated the plan. Dispatch will write those fields into the dossier for you.');
   }
 
   lines.push('\n## Tooling notes');
@@ -46,7 +46,13 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
   lines.push('{"action": "advance" | "hold" | "bounce" | "flag_human",');
   lines.push(' "target_column": "<column name — required for bounce, optional for advance>",');
   lines.push(' "comment": "<one-paragraph summary posted to the ticket>",');
-  lines.push(' "human_test": "<step-by-step human test instructions, or NONE: <reason> — REQUIRED when advancing to Done>"}');
+  if (ticket.readOnly) {
+    lines.push(' "human_test": "<step-by-step human test instructions, or NONE: <reason> — REQUIRED when advancing to Done>",');
+    lines.push(' "work_log": "<optional fallback: Work Log entry body if direct dossier append was denied>",');
+    lines.push(' "plan": "<optional fallback: full Plan section body if direct plan write was denied>"}');
+  } else {
+    lines.push(' "human_test": "<step-by-step human test instructions, or NONE: <reason> — REQUIRED when advancing to Done>"}');
+  }
   lines.push('```');
   lines.push('- "advance": phase complete, move the ticket forward.');
   lines.push('- "hold": you did work but the phase is not complete (e.g. you need another run).');

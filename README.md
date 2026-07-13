@@ -74,6 +74,8 @@ three-step guided stepper — each step unlocks as the one before it is done:
    - **Both**: Planning=Claude, Build=Codex, Review=Claude
    - **Claude only**: all phases use Claude
    - **Codex only**: all phases use Codex
+   - Presets are just shortcuts — **PHASE DEFAULTS** (below the stepper) lets each
+     phase run any harness (Claude, Codex, or human) with its own model and effort
    - *Mark setup complete* stays gated until steps 1 & 2 are done
 
 On narrow screens the rail collapses, the step number moves inline, and the tab bar

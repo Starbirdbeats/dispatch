@@ -630,7 +630,7 @@ function setupStepperHTML(s) {
         <option value="codex" ${presetVal === 'codex' || presetVal === 'codex only' ? 'selected' : ''}>Codex only</option>
       </select>
       <button class="btn" id="s-preset-apply">[ APPLY PRESET ]</button>
-      <div class="hint">Fine-tune model &amp; effort per phase in PHASE DEFAULTS below, or each column's CFG.</div>
+      <div class="hint">Presets are shortcuts — PHASE DEFAULTS below lets each phase run ANY provider, model &amp; effort.</div>
     </div>
   </div>
 
@@ -2271,22 +2271,22 @@ function renderSettingsModal() {
       <div id="s-stepper">${setupStepperHTML(s)}</div>
 
       <hr class="sep">
-      <div class="section-head">PHASE DEFAULTS <span>(model &amp; effort per column)</span></div>
-      <div class="overrides-wrap"><div class="overrides-grid" style="grid-template-columns:110px 90px 1fr 1fr">
+      <div class="section-head">PHASE DEFAULTS <span>(harness, model &amp; effort per column)</span></div>
+      <div class="overrides-wrap"><div class="overrides-grid" style="grid-template-columns:110px 110px 1fr 1fr">
         <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div>
         ${agentCols.map((c) => `
           <div>${esc(c.name)}</div>
-          <div>${esc(c.harness.type)}</div>
-          <div class="model-cell"><select data-pd="${c.id}:model">${harnessOptions('model', c.harness.type, c.harness.model || '', '—')}</select>${refreshBtn()}</div>
-          <div><select data-pd="${c.id}:effort">${harnessOptions('effort', c.harness.type, c.harness.effort || '', '— (CLI default)', c.harness.model)}</select></div>`).join('')}
+          <div><select data-pd="${c.id}:type">${providerTypeOptions(c.harness.type, { includeHuman: true, disabledOk: false, showWarnings: true })}</select></div>
+          <div class="model-cell"><select data-pd="${c.id}:model" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('model', c.harness.type, c.harness.model || '', '—')}</select>${refreshBtn()}</div>
+          <div><select data-pd="${c.id}:effort" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', c.harness.type, c.harness.effort || '', '— (CLI default)', c.harness.model)}</select></div>`).join('')}
       </div></div>
-      <div class="hint">changing a harness TYPE (claude ⇄ codex) still needs that column's own CFG panel — this list only sets model/effort defaults.</div>
+      <div class="hint">any phase can run any provider — presets in step 3 are just shortcuts. Permissions, network &amp; tools live in each column's CFG panel.</div>
       <div class="hint" id="s-models-meta">${['claude', 'codex'].map((ty) => {
         const m = S.data.registry[ty]?.meta || {};
         const age = m.fetchedAt ? fmtDur(Date.now() - Date.parse(m.fetchedAt)) + ' ago' : 'never';
         return `${ty}: ${esc(m.source || 'seed')} · ${age}`;
       }).join(' &nbsp;///&nbsp; ')} — models auto-refresh daily; ↻ forces it now.</div>
-      <div class="hint" style="margin-top:14px">claude auth depends on local Claude CLI credentials · codex auth depends on local chatgpt/codex login · <button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>`)}
+      <div class="hint" style="margin-top:14px">claude auth is detected via <code>claude auth status</code> · codex via <code>codex login status</code> — re-probe from step 2 above if state looks stale.</div>`)}
 
       ${pane('environment', `
       <div class="section-head">ENVIRONMENT VARIABLES <span>(repo .env + runtime)</span></div>
@@ -2357,13 +2357,36 @@ function renderSettingsModal() {
   // stepper, which re-renders on auth changes — wiring is shared with updateStepperUI().
   wireStepperHandlers();
 
+  // Effective (possibly unsaved) harness type for a phase row — the type select wins
+  // over the column's saved harness so model/effort refills track what's on screen.
+  const rowType = (colId) => document.querySelector(`[data-pd="${colId}:type"]`)?.value
+    || cols().find((c) => c.id === colId)?.harness.type || 'claude';
+
+  // Switching a phase's harness re-fills model + effort with THAT provider's registry
+  // (reset to CLI default — the old values belong to the other provider). HUMAN takes
+  // neither, so both selects grey out.
+  for (const sel of document.querySelectorAll('[data-pd$=":type"]')) sel.onchange = () => {
+    const colId = sel.dataset.pd.split(':')[0];
+    const type = sel.value;
+    const model = document.querySelector(`[data-pd="${colId}:model"]`);
+    const eff = document.querySelector(`[data-pd="${colId}:effort"]`);
+    const human = type === 'human';
+    if (model) {
+      model.innerHTML = human ? '<option value="">—</option>' : harnessOptions('model', type, '', '—');
+      model.disabled = human;
+    }
+    if (eff) {
+      eff.innerHTML = human ? '<option value="">—</option>' : harnessOptions('effort', type, '', '— (CLI default)', '');
+      eff.disabled = human;
+    }
+  };
+
   for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => {
     if (!handleCustomModel(sel)) return;
     // refill the sibling effort select with the chosen model's supported levels
     const colId = sel.dataset.pd.split(':')[0];
     const eff = document.querySelector(`[data-pd="${colId}:effort"]`);
-    const col = cols().find((c) => c.id === colId);
-    if (eff && col) eff.innerHTML = harnessOptions('effort', col.harness.type, eff.value, '— (CLI default)', sel.value);
+    if (eff) eff.innerHTML = harnessOptions('effort', rowType(colId), eff.value, '— (CLI default)', sel.value);
   };
 
   // Appearance — device-local, applies live and persists immediately (no server round-trip).
@@ -2393,11 +2416,20 @@ function renderSettingsModal() {
     }
     try {
       await Promise.all(agentCols.map((c) => {
-        const d = phaseDefaults[c.id];
-        if (!d || (!d.model && !d.effort)) return null;
+        const d = phaseDefaults[c.id] || {};
+        const typeChanged = d.type && d.type !== c.harness.type;
+        if (!typeChanged && !d.model && !d.effort) return null;
         const harness = { ...c.harness };
-        if (d.model) harness.model = d.model;
-        if (d.effort) harness.effort = d.effort;
+        if (typeChanged) {
+          // Provider swap: take model/effort from the refilled selects verbatim — empty
+          // means CLI default; the previous values belonged to the other provider.
+          harness.type = d.type;
+          harness.model = d.model || '';
+          harness.effort = d.effort || '';
+        } else {
+          if (d.model) harness.model = d.model;
+          if (d.effort) harness.effort = d.effort;
+        }
         return api(`/api/columns/${c.id}`, 'PATCH', { harness });
       }).filter(Boolean));
       const preset = $('#s-preset')?.value;

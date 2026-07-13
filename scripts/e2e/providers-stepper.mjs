@@ -126,6 +126,23 @@ async function dumpFailureState(page, harness, pageErrors) {
     }, harness.base);
     assert.equal(bogus, 400, 'unknown provider must be rejected');
 
+    // ---- per-phase harness selection (PHASE DEFAULTS grid) ---------------------------
+    // Build ships as codex; switch it to claude from the grid and save — no CFG panel.
+    await page.setViewport({ width: 1100, height: 900 });
+    const buildTypeSel = '[data-pd="col-build:type"]';
+    await page.waitForSelector(buildTypeSel);
+    assert.equal(await page.$eval(buildTypeSel, (el) => el.value), 'codex', 'build phase starts as codex');
+    await page.select(buildTypeSel, 'claude');
+    // the model select refills with claude's registry, reset to CLI default
+    const modelAfterSwap = await page.$eval('[data-pd="col-build:model"]', (el) => ({ value: el.value, opts: Array.from(el.options).map((o) => o.value) }));
+    assert.equal(modelAfterSwap.value, '', 'model resets to CLI default on harness swap');
+    await page.$eval('#s-save', (el) => el.click());
+    await page.waitForFunction(async () => {
+      const s = await fetch('/api/state').then((r) => r.json());
+      return s.board.columns.find((c) => c.id === 'col-build')?.harness?.type === 'claude';
+    }, { timeout: 8000 });
+    console.log('e2e: per-phase harness swap (build codex → claude) saved');
+
     console.log('e2e: providers stepper + auth flow checks passed');
   } catch (e) {
     await dumpFailureState(page, harness, pageErrors);

@@ -7,16 +7,18 @@ import { test } from 'node:test';
 import { probe } from '../registry.mjs';
 
 async function withSandbox(env, fn) {
-  const prev = {
-    HOME: process.env.HOME,
-    PATH: process.env.PATH,
-  };
+  // Snapshot the env-key fallbacks too so a key set in the outer environment can't leak
+  // into a "logged out" assertion (and gets restored afterwards).
+  const keys = ['HOME', 'PATH', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
+  const prev = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   Object.assign(process.env, env);
   try {
     return await fn();
   } finally {
-    process.env.HOME = prev.HOME;
-    process.env.PATH = prev.PATH;
+    for (const k of keys) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
   }
 }
 
@@ -84,6 +86,67 @@ test('probe keeps provider installation/auth checks independent and degrades on 
       assert.equal(status.codex.authenticated, false);
       assert.ok(typeof status.codex.error === 'string');
       assert.match(status.codex.error, /not found|command not found|ENOENT/);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test('probe reads codex auth from stderr (modern codex-cli prints status there)', async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'dispatch-probe-codex-'));
+  const bin = mkdtempSync(path.join(os.tmpdir(), 'dispatch-probe-bin-'));
+  try {
+    // No claude here; codex prints its "logged in" line to STDERR and exits 0.
+    writeScript(bin, 'codex', '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "codex 2.0"; exit 0; fi\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then echo "Logged in using ChatGPT" 1>&2; exit 0; fi\n');
+    await withSandbox({ HOME: home, PATH: bin }, async () => {
+      const status = await probe();
+      assert.equal(status.codex.installed, true);
+      assert.equal(status.codex.authenticated, true, 'codex auth must be read from stderr');
+      assert.match(status.codex.authDetail, /logged in/i);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test('probe reports claude authenticated from `auth status` even when the token file is empty', async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'dispatch-probe-claude-ok-'));
+  const bin = mkdtempSync(path.join(os.tmpdir(), 'dispatch-probe-bin-'));
+  try {
+    // Modern Claude Code: token lives in the keyring, so .credentials.json has an EMPTY
+    // accessToken. `claude auth status --json` is the source of truth.
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: '', expiresAt: 0 } }), 'utf8');
+    writeScript(bin, 'claude', '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "claude 2.1.0"; exit 0; fi\nif [ "$1" = "auth" ] && [ "$2" = "status" ]; then echo \'{"loggedIn":true,"authMethod":"claudeAiOauth","apiProvider":"firstParty"}\'; exit 0; fi\n');
+    await withSandbox({ HOME: home, PATH: bin }, async () => {
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      const status = await probe();
+      assert.equal(status.claude.installed, true);
+      assert.equal(status.claude.authenticated, true, 'claude auth must come from `auth status`, not the empty token file');
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test('probe reports claude NOT authenticated when `auth status` says logged out (non-zero exit)', async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'dispatch-probe-claude-out-'));
+  const bin = mkdtempSync(path.join(os.tmpdir(), 'dispatch-probe-bin-'));
+  try {
+    // No credentials file; `claude auth status --json` prints the verdict on stdout and
+    // exits 1 (the CLI's real behavior when logged out).
+    writeScript(bin, 'claude', '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "claude 2.1.0"; exit 0; fi\nif [ "$1" = "auth" ] && [ "$2" = "status" ]; then echo \'{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}\'; exit 1; fi\n');
+    await withSandbox({ HOME: home, PATH: bin }, async () => {
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      const status = await probe();
+      assert.equal(status.claude.installed, true);
+      assert.equal(status.claude.authenticated, false);
+      assert.equal(status.claude.authDetail, 'not authenticated');
     });
   } finally {
     rmSync(home, { recursive: true, force: true });

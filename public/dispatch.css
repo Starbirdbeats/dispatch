@@ -175,32 +175,11 @@ label.f output { color: var(--fg); float: right; font-variant-numeric: tabular-n
 .skip-note { font-size: 10px; color: var(--fg-faint); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
 .ro-tag { font-size: 8px; font-weight: 800; letter-spacing: 0.1em; color: var(--bg); background: var(--claude); padding: 1px 4px; margin-left: 2px; align-self: center; }
 
-/* ---------- setup cards ---------- */
-.setup-cards { display: grid; gap: 10px; }
-.setup-card { border: 1px solid var(--line); background: var(--bg-1); padding: 8px 10px; }
-.setup-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
-.setup-card-title { color: var(--fg); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; }
-.setup-card-status { font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; }
-.setup-card-status.ok { color: var(--green); }
-.setup-card-status.warn { color: var(--amber); }
-.setup-card-status.bad { color: var(--red); }
-.setup-card .cmd {
-  margin: 8px 0;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  padding: 6px 8px;
-  font-size: 10px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--fg-dim);
-}
-.setup-card .setup-actions { margin-top: 7px; display: flex; gap: 6px; flex-wrap: wrap; }
-.setup-card .setup-actions .btn { white-space: nowrap; }
+/* ---------- setup status pills (provider auth state in the stepper) ---------- */
 .setup-pill { display: inline-block; border: 1px solid var(--line); color: var(--fg-faint); text-transform: uppercase; font-size: 9px; letter-spacing: 0.09em; padding: 3px 6px; margin: 0 6px 6px 0; }
 .setup-pill.ok { border-color: var(--green); color: var(--green); }
 .setup-pill.warn { border-color: var(--amber); color: var(--amber); }
 .setup-pill.bad { border-color: var(--red); color: var(--red); }
-.setup-auth-note { margin-top: 6px; color: var(--fg-faint); font-size: 9px; line-height: 1.4; }
 
 /* ---- appearance controls ---- */
 .section-head { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg); margin: 4px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--line); }
@@ -587,10 +566,12 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
   position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px);
   background: var(--bg-2); color: var(--fg); border: 1px solid var(--fg-dim);
   padding: 10px 18px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+  max-width: min(560px, calc(100vw - 32px)); line-height: 1.55; text-align: center;
   z-index: 1001; opacity: 0; pointer-events: none; transition: opacity .12s steps(2), transform .12s steps(2);
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-#toast.err { border-color: var(--red); color: var(--red); }
+/* error toasts carry actionable guidance — clickable to dismiss, and visually louder */
+#toast.err { border-color: var(--red); color: var(--red); background: var(--bg-1); pointer-events: auto; cursor: pointer; }
 
 /* ---------- mobile ---------- */
 @media (max-width: 760px) {
@@ -651,3 +632,69 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--bg-2); border: 1px solid var(--line); }
 ::-webkit-scrollbar-thumb:hover { background: var(--line); }
+
+/* ---------- Providers → 4C guided stepper (Enable → Authenticate → Assign) ---------- */
+.stepper-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.stepper-progress { display: flex; align-items: center; gap: 9px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-dim); }
+.stepper-progress .meter { width: 120px; flex: 0 0 120px; }
+
+.stepper { display: grid; grid-template-columns: 28px 1fr; gap: 0 16px; }
+.step-rail { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.step-node { width: 28px; height: 28px; flex: 0 0 28px; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; font-size: 12px; }
+.step-node.done { background: var(--green); color: var(--bg); }
+.step-node.active { background: var(--amber); color: var(--bg); }
+.step-node.pending { border: 1px solid var(--fg-faint); color: var(--fg-faint); }
+.step-spine { flex: 1; width: 2px; background: var(--line); margin-top: 2px; }
+.step-body { padding-bottom: 16px; }
+.step-body.step-locked { opacity: 0.55; }
+
+.step-title { font-size: 12px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; display: flex; align-items: center; gap: 8px; }
+.step-flag { font-size: 9px; border: 1px solid var(--amber); color: var(--amber); padding: 1px 5px; letter-spacing: 0.06em; }
+.step-flag.active { border-color: var(--red); color: var(--red); }
+.step-sub { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-faint); margin: 4px 0 9px; }
+
+.step-enables { display: flex; gap: 18px; flex-wrap: wrap; }
+.step-enable { margin: 0; }
+
+.step-auth { border: 1px solid var(--line); background: var(--bg-1); padding: 9px 11px; margin-bottom: 6px; }
+.step-auth.todo { border-color: var(--amber); }
+.step-auth-head { display: flex; align-items: center; gap: 10px; }
+.step-auth-name { font-size: 11px; font-weight: 700; flex: 1; }
+.step-auth-head .btn { font-size: 9.5px; padding: 6px 9px; }
+.step-dot { width: 8px; height: 8px; flex: 0 0 8px; display: inline-block; background: var(--fg-faint); }
+.step-dot.tone-ok { background: var(--green); }
+.step-dot.tone-warn { background: var(--amber); }
+.step-auth-cmd { display: flex; align-items: center; gap: 9px; margin-top: 9px; }
+.step-auth-cmd code { flex: 1; background: var(--bg-2); border: 1px solid var(--line); padding: 6px 9px; font-size: 11px; color: var(--fg); }
+.step-auth-cmd .btn { white-space: nowrap; }
+.step-auth-cmd input.step-code { flex: 1; margin: 0; font-size: 12px; padding: 7px 9px; }
+.step-auth .hint.bad { margin-top: 7px; text-transform: none; letter-spacing: 0.02em; }
+
+.step-preset { margin-bottom: 6px; }
+.stepper-foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+
+/* ---- mobile: drop the rail, inline the number chip, scrollable tab strip ---- */
+@media (max-width: 760px) {
+  /* tab bar stops clipping the six labels — horizontal scroll strip */
+  .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tabs button { flex: 0 0 auto; padding: 13px 16px; }
+
+  .stepper { grid-template-columns: 1fr; gap: 0; }
+  .step-rail { display: none; }                 /* number moves inline into the title */
+  .step-body { border: 1px solid var(--line); background: var(--bg-1); padding: 11px 12px; margin-bottom: 7px; }
+  .step-body.step-locked { opacity: 0.7; }
+  .step-title::before {                          /* inline step chip, fed by data-step */
+    content: attr(data-step);
+    width: 22px; height: 22px; flex: 0 0 22px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 11px; background: var(--fg-faint); color: var(--bg);
+  }
+  .step-body.is-done .step-title::before { background: var(--green); content: "✓"; }
+  .step-body.is-active .step-title::before { background: var(--amber); }
+
+  .step-auth-cmd { flex-direction: column; align-items: stretch; }
+  .step-auth-cmd .btn { height: 44px; }          /* ≥44px touch targets */
+  .step-enables { gap: 12px; }
+  .stepper-foot { flex-direction: column; align-items: stretch; }
+  .stepper-foot .btn { height: 46px; }
+}

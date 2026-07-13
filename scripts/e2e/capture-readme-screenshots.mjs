@@ -45,7 +45,7 @@ async function withServer(fn) {
     await page.waitForSelector('.panel-head h3');
     await page.click('.tabs [data-tab="providers"]');
     await page.waitForSelector('.s-pane[data-pane="providers"].active');
-    outputs.push(await capture(page, 'setup-provider-cards.png'));
+    outputs.push(await capture(page, 'setup-provider-stepper.png'));
 
     await page.select('#s-preset', 'claude');
     await page.click('#s-preset-apply');

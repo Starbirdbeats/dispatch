@@ -117,17 +117,34 @@ function formatHumanTest(text) {
 }
 
 async function api(path, method = 'GET', body) {
-  const res = await fetch(path, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    // fetch only rejects on network-level failure — the server is unreachable.
+    throw new Error(`can't reach Dispatch — is the server still running? (${method} ${path})`);
+  }
+  if (!res.ok) {
+    // Prefer the server's actionable { error } message; fall back to status context.
+    const detail = (await res.json().catch(() => ({}))).error;
+    throw new Error(detail || `${method} ${path} failed — ${res.status} ${res.statusText}`);
+  }
   return res.json();
 }
 
+let loadStateSeq = 0;
 async function loadState() {
-  S.data = await api('/api/state');
+  // Websocket bursts (e.g. a login settling fires probe + usage broadcasts back-to-back)
+  // trigger overlapping loadState calls. Drop any response superseded by a newer request
+  // so a slow, stale /api/state can't clobber fresher state and revert the UI mid-flight.
+  const seq = ++loadStateSeq;
+  const data = await api('/api/state');
+  if (seq !== loadStateSeq) return;
+  S.data = data;
   // Server restarted (new code deployed): pick up fresh JS/CSS instead of running stale app code.
   if (S.serverBoot && S.serverBoot !== S.data.serverBoot) return location.reload();
   S.serverBoot = S.data.serverBoot;
@@ -339,8 +356,9 @@ function usageSourceLabel(source) {
   return '';
 }
 
-// One usage window: "5H ▓▓▓░ 62%" — the number is % USED; the 5H meter takes its
-// tone from what's left (green → amber → red), the weekly meter stays muted ink.
+// One usage window: "5H ▓▓▓░ 38%" — the number is % REMAINING; the 5H meter fills
+// with what's left and tones green → amber → red as it drains; the weekly meter stays
+// muted ink. (Bar and number both show headroom, not consumption.)
 function usageWindowHTML(label, win, provider, kind) {
   if (!win || !Number.isFinite(Number(win.usedPct))) {
     return `<span class="usage-window w${kind} missing"><span class="usage-key">${label}</span><b>—</b></span>`;
@@ -349,12 +367,12 @@ function usageWindowHTML(label, win, provider, kind) {
   const remaining = clamp(100 - used);
   const tone = kind === '7d' ? 'muted' : meterTone(remaining);
   const title = [
-    `${provider} ${label}: ${pctText(used)} used`,
-    `${pctText(remaining)} remaining`,
+    `${provider} ${label}: ${pctText(remaining)} remaining`,
+    `${pctText(used)} used`,
     win.resetsAt ? `resets ${fmtTs(win.resetsAt)}` : '',
   ].filter(Boolean).join(' · ');
   return `<span class="usage-window w${kind} tone-${tone}" title="${esc(title)}">
-    <span class="usage-key">${label}</span><span class="meter tone-${tone}" style="--pct:${used}%"><span></span></span><b>${pctText(used)}</b>
+    <span class="usage-key">${label}</span><span class="meter tone-${tone}" style="--pct:${remaining}%"><span></span></span><b>${pctText(remaining)}</b>
   </span>`;
 }
 
@@ -427,20 +445,6 @@ function setupNotice() {
   return messages;
 }
 
-function providerStatusText(type) {
-  const state = setupInfo().providers?.[type] || {};
-  if (state.authenticated) return `authenticated${state.authDetail && state.authDetail !== 'authenticated' ? ` · ${state.authDetail}` : ''}`;
-  if (state.installed) return `installed${state.error ? ` · ${state.authDetail || state.error}` : ''} · not authenticated`;
-  return state.error ? `offline (${state.error})` : 'not installed';
-}
-
-function setupStatusClass(type) {
-  const state = setupInfo().providers?.[type] || {};
-  if (state.authenticated) return 'ok';
-  if (state.installed) return 'warn';
-  return 'bad';
-}
-
 function providerTypeOptions(selected, { includeHuman = false, includeCurrent = true, disabledOk = false, showWarnings = false } = {}) {
   const enabled = new Set(setupEnabledTypes());
   const options = [];
@@ -473,25 +477,11 @@ function providerTypeOptions(selected, { includeHuman = false, includeCurrent = 
   return options.join('');
 }
 
-function setupCardInfo(type) {
-  const state = setupInfo().providers?.[type] || {};
-  const installed = state.installed ? 'installed' : 'not installed';
-  return {
-    enabled: state.enabled !== false,
-    installed,
-    status: setupStatusClass(type),
-    text: providerStatusText(type),
-    authDetail: state.authDetail || '',
-    version: state.version || '',
-    error: state.error || '',
-  };
-}
-
 function providerCommands(type) {
   if (type === 'claude') {
     return [
       'claude --version',
-      'claude setup-token',
+      'claude auth login', // subscription sign-in (--claudeai is the CLI default)
     ];
   }
   return [
@@ -500,30 +490,330 @@ function providerCommands(type) {
   ];
 }
 
-function setupCardsHTML() {
-  return PROVIDER_ORDER.map((type) => {
-    const state = setupInfo().providers?.[type] || {};
-    const info = setupCardInfo(type);
-    const status = setupStatusClass(type);
-    const stateClass = info.enabled ? 'ok' : 'warn';
-    return `<div class="setup-card">
-      <div class="setup-card-head">
-        <div class="setup-card-title">${providerStatusLabel(type)} ${info.enabled ? 'ENABLED' : 'DISABLED'}</div>
-        <div class="setup-card-status ${stateClass}">${esc(info.installed ? 'installed' : 'offline')}</div>
-      </div>
-      <div class="setup-prompt">${esc(providerStatusText(type))}</div>
-      <label class="check-row inline"><input id="s-${type}-enabled" type="checkbox" ${info.enabled ? 'checked' : ''}><span>use provider in automation</span></label>
-      <label class="check-row inline"><input id="s-${type}-authed" type="checkbox" ${state.authenticated ? 'checked' : ''} disabled><span>authenticated</span></label>
-      <div class="setup-auth-note">
-        ${esc(state.version || 'not detected')}${info.text ? ` · ${esc(info.text)}` : ''}
-      </div>
-      <div class="cmd">${providerCommands(type).map((cmd) => `<span>${esc(cmd)}</span>`).join('<br>')}</div>
-      <div class="setup-actions">
-        <button class="btn" data-probe="${type}">[ RE-CHECK ]</button>
-        <button class="btn" data-copy="${type}">[ COPY PRIMARY CMD ]</button>
+/* ---------- Providers → 4C guided stepper (Enable → Authenticate → Assign) ----------
+   Pure view layer over setupInfo(). Re-emits the same ids the settings handlers bind to
+   (#s-<type>-enabled, #s-preset, #s-preset-apply, #s-setup-complete, #s-probe, data-probe),
+   so no wiring changes are needed beyond the new data-auth launch button. */
+
+// Derive the three-step state from the existing setup payload.
+function providerStepState() {
+  const info = setupInfo();
+  const enabledTypes = PROVIDER_ORDER.filter((t) => info.providers?.[t]?.enabled !== false);
+  // Step 1 — at least one provider is enabled for automation.
+  const enable = enabledTypes.length > 0;
+  // Step 2 — every ENABLED + INSTALLED provider is authenticated (disabled ones skipped).
+  const relevant = enabledTypes.filter((t) => info.providers?.[t]?.installed);
+  const auth = enable && relevant.length > 0 && relevant.every((t) => info.providers?.[t]?.authenticated);
+  // Step 3 — roles assigned + setup marked complete.
+  const assign = Boolean(info.completedAt);
+  const doneCount = [enable, auth, assign].filter(Boolean).length;
+  return { enable, auth, assign, doneCount, enabledTypes };
+}
+
+// Enable toggle for Step 1 — keeps the #s-<type>-enabled id the #s-save handler reads.
+function stepEnableToggle(type) {
+  const on = setupInfo().providers?.[type]?.enabled !== false;
+  return `<label class="check-row inline step-enable">
+    <input id="s-${type}-enabled" type="checkbox" ${on ? 'checked' : ''}>
+    <span>${providerStatusLabel(type)}</span>
+  </label>`;
+}
+
+// One provider row inside Step 2. Three states: authenticated (pill only), login in
+// progress (open-URL / paste-code controls, driven by setup.authPending from the
+// server's in-memory login sessions), or idle (command + AUTHENTICATE →).
+function stepAuthRow(type) {
+  const info = setupInfo();
+  const st = info.providers?.[type] || {};
+  const label = providerStatusLabel(type).toUpperCase();
+  const authed = Boolean(st.authenticated);
+  const pending = !authed ? info.authPending?.[type] : null;
+  const lastError = !authed && !pending ? info.authErrors?.[type] : null;
+  const cmd = providerCommands(type)[1] || ''; // the subscription login command
+
+  if (authed) {
+    return `<div class="step-auth">
+      <div class="step-auth-head">
+        <span class="step-dot tone-ok"></span>
+        <span class="step-auth-name">${label}</span>
+        <span class="setup-pill ok">✓ AUTHENTICATED</span>
+        <button class="btn" data-probe="${type}">↻ RE-CHECK</button>
       </div>
     </div>`;
-  }).join('');
+  }
+
+  if (pending) {
+    return `<div class="step-auth todo">
+      <div class="step-auth-head">
+        <span class="step-dot tone-warn"></span>
+        <span class="step-auth-name">${label}</span>
+        <span class="setup-pill warn">⋯ LOGIN IN PROGRESS</span>
+        <button class="btn" data-auth-cancel="${type}">✕ CANCEL</button>
+      </div>
+      <div class="step-auth-cmd">
+        <code>${esc(pending.command || cmd)}</code>
+        <button class="btn btn-accent" data-auth-open="${type}" ${pending.url ? '' : 'disabled'}>OPEN LOGIN PAGE ↗</button>
+      </div>
+      ${pending.needsCode ? `<div class="step-auth-cmd">
+        <input class="step-code" data-auth-code-input="${type}" placeholder="paste the code from the browser" autocomplete="off" spellcheck="false">
+        <button class="btn btn-accent" data-auth-code="${type}">SUBMIT CODE →</button>
+      </div>
+      <div class="hint">sign in with your subscription in the login tab — it shows a one-time code; paste it above.</div>`
+      : `<div class="hint">finish the sign-in in the opened tab (browser on the Dispatch machine) — this row updates by itself.</div>`}
+    </div>`;
+  }
+
+  return `<div class="step-auth todo">
+    <div class="step-auth-head">
+      <span class="step-dot tone-warn"></span>
+      <span class="step-auth-name">${label}</span>
+      <span class="setup-pill warn">! NOT AUTHENTICATED</span>
+      <button class="btn" data-probe="${type}">↻ RE-CHECK</button>
+    </div>
+    <div class="step-auth-cmd">
+      <code>${esc(cmd)}</code>
+      <button class="btn" data-copy="${type}">COPY</button>
+      <button class="btn btn-accent" data-auth="${type}">AUTHENTICATE →</button>
+    </div>
+    ${lastError ? `<div class="hint bad">${esc(lastError)} — try again, or run \`${esc(cmd)}\` in a terminal, then RE-CHECK</div>` : ''}
+  </div>`;
+}
+
+function setupStepperHTML(s) {
+  const st = providerStepState();
+  const presetVal = s.setup?.lastPreset || 'both';
+  const node = (n, done, active) =>
+    `<span class="step-node ${done ? 'done' : active ? 'active' : 'pending'}">${done ? '✓' : n}</span>`;
+  // per-step done/active drives BOTH the desktop rail node and the mobile inline chip
+  const step1 = { done: st.enable, active: !st.enable };
+  const step2 = { done: st.auth, active: st.enable && !st.auth };
+  const step3 = { done: st.assign, active: st.auth && !st.assign };
+  const bodyClass = (step, locked) =>
+    `step-body${locked ? ' step-locked' : ''}${step.done ? ' is-done' : step.active ? ' is-active' : ''}`;
+  const authedCount = st.enabledTypes.filter((t) => setupInfo().providers?.[t]?.authenticated).length;
+
+  return `
+  <div class="stepper-head">
+    <div class="section-head" style="border:none;margin:0;padding:0">PROVIDER SETUP</div>
+    <div class="stepper-progress">
+      <span>${st.doneCount} OF 3 DONE</span>
+      <span class="meter tone-live" style="--pct:${(st.doneCount / 3) * 100}%"><span></span></span>
+    </div>
+  </div>
+
+  <div class="stepper">
+    <!-- STEP 1 — ENABLE -->
+    <div class="step-rail">${node(1, step1.done, step1.active)}<span class="step-spine"></span></div>
+    <div class="${bodyClass(step1, false)}">
+      <div class="step-title" data-step="1">01 · Enable providers ${st.enable ? '' : '<span class="step-flag active">START HERE</span>'}</div>
+      <div class="step-sub">${st.enabledTypes.length} of ${PROVIDER_ORDER.length} enabled for automation</div>
+      <div class="step-enables">${PROVIDER_ORDER.map(stepEnableToggle).join('')}</div>
+    </div>
+
+    <!-- STEP 2 — AUTHENTICATE -->
+    <div class="step-rail">${node(2, step2.done, step2.active)}<span class="step-spine"></span></div>
+    <div class="${bodyClass(step2, !st.enable)}">
+      <div class="step-title" data-step="2">02 · Authenticate ${step2.active ? '<span class="step-flag">IN PROGRESS</span>' : ''}</div>
+      <div class="step-sub">${authedCount} of ${st.enabledTypes.length} authenticated</div>
+      ${st.enabledTypes.map(stepAuthRow).join('')}
+      <div class="hint"><button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
+    </div>
+
+    <!-- STEP 3 — ASSIGN -->
+    <div class="step-rail">${node(3, step3.done, step3.active)}</div>
+    <div class="${bodyClass(step3, !st.auth)}">
+      <div class="step-title" data-step="3">03 · Assign roles</div>
+      <div class="step-sub">Preset drives Planning / Build / Review harnesses</div>
+      <select id="s-preset" class="step-preset">
+        <option value="both" ${presetVal === 'both' || presetVal === 'manual' ? 'selected' : ''}>Both (planning: Claude, build: Codex)</option>
+        <option value="claude" ${presetVal === 'claude' || presetVal === 'claude only' ? 'selected' : ''}>Claude only</option>
+        <option value="codex" ${presetVal === 'codex' || presetVal === 'codex only' ? 'selected' : ''}>Codex only</option>
+      </select>
+      <button class="btn" id="s-preset-apply">[ APPLY PRESET ]</button>
+      <div class="hint">Fine-tune model &amp; effort per phase in PHASE DEFAULTS below, or each column's CFG.</div>
+    </div>
+  </div>
+
+  <div class="stepper-foot">
+    <span class="hint" style="margin:0">${st.enable && st.auth ? 'Ready — mark setup complete.' : 'Finish steps 1 &amp; 2 to complete setup.'}</span>
+    <button class="btn ${st.enable && st.auth ? 'btn-accent' : ''}" id="s-setup-complete" ${st.enable && st.auth ? '' : 'disabled'}>[ MARK SETUP COMPLETE ]</button>
+  </div>`;
+}
+
+// Everything the stepper re-render depends on. When this changes (probe result, a login
+// session starting/settling, setup completion), the open settings modal patches ONLY the
+// stepper region — full re-renders would wipe unsaved edits in the other panes.
+function stepperFingerprint() {
+  const info = setupInfo();
+  return JSON.stringify([
+    PROVIDER_ORDER.map((t) => {
+      const p = info.providers?.[t] || {};
+      return [p.enabled, p.installed, p.authenticated, p.authDetail];
+    }),
+    Object.keys(info.authPending || {}),
+    info.authErrors || {},
+    info.completedAt,
+  ]);
+}
+
+// Surgical stepper refresh, driven by websocket state-changed while SETTINGS is open.
+// Skips when the user is mid-interaction: typing a login code, or an enable toggle is
+// dirty vs the server (a re-render would silently revert their unsaved change).
+function updateStepperUI() {
+  const box = $('#s-stepper');
+  if (!box) return;
+  const fp = stepperFingerprint();
+  if (fp === S.stepperFp) return;
+  const codeInput = box.querySelector('[data-auth-code-input]');
+  if (codeInput && codeInput.value.trim() && setupInfo().authPending?.[codeInput.dataset.authCodeInput]) return;
+  for (const type of PROVIDER_ORDER) {
+    const el = $(`#s-${type}-enabled`);
+    if (el && el.checked !== (setupInfo().providers?.[type]?.enabled !== false)) return;
+  }
+  box.innerHTML = setupStepperHTML(S.data.board.settings);
+  wireStepperHandlers();
+  S.stepperFp = fp;
+}
+
+// While a login session is pending, poll state as a fallback so the row still flips to
+// AUTHENTICATED even if the websocket 'state-changed' push is missed (reconnect window,
+// suspended tab). Self-clearing: stops when no session is pending or SETTINGS closes.
+let authPollTimer = null;
+function syncAuthPolling() {
+  const pendingTypes = Object.keys(setupInfo().authPending || {});
+  const needed = pendingTypes.length > 0 && Boolean($('#s-stepper'));
+  if (needed && !authPollTimer) {
+    authPollTimer = setInterval(() => {
+      if (!$('#s-stepper') || !Object.keys(setupInfo().authPending || {}).length) {
+        clearInterval(authPollTimer);
+        authPollTimer = null;
+        return;
+      }
+      loadState().catch(() => { /* transient fetch failure — next tick retries */ });
+    }, 2500);
+  } else if (!needed && authPollTimer) {
+    clearInterval(authPollTimer);
+    authPollTimer = null;
+  }
+}
+
+// Handlers for everything inside #s-stepper. Called on every stepper (re)render — all
+// bindings are scoped to current DOM nodes, so re-wiring after a patch is safe.
+function wireStepperHandlers() {
+  S.stepperFp = stepperFingerprint();
+  syncAuthPolling();
+  for (const type of PROVIDER_ORDER) {
+    const probeBtn = document.querySelector(`[data-probe="${type}"]`);
+    const copyBtn = document.querySelector(`[data-copy="${type}"]`);
+    const firstCmd = providerCommands(type)[1] || '';
+    probeBtn?.addEventListener('click', async () => {
+      probeBtn.textContent = '[ CHECKING… ]';
+      try {
+        await api('/api/probe', 'POST', {});
+        await loadState();
+        updateStepperUI();
+        toast('CLI STATUS REFRESHED');
+      } catch (e) { alertErr(e); }
+      const btn = document.querySelector(`[data-probe="${type}"]`);
+      if (btn) btn.textContent = '↻ RE-CHECK';
+    });
+    copyBtn?.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard?.writeText(firstCmd || '');
+        toast('copied to clipboard');
+      } catch {
+        prompt('copy this command', firstCmd || '');
+      }
+    });
+  }
+
+  // AUTHENTICATE → : start the subscription login on the host, open its URL here.
+  // The blank tab is opened synchronously (inside the click) so popup blockers allow it,
+  // then pointed at the auth URL once the server hands it back.
+  for (const btn of document.querySelectorAll('[data-auth]')) {
+    btn.addEventListener('click', async () => {
+      const type = btn.dataset.auth;
+      btn.textContent = '[ STARTING… ]';
+      btn.disabled = true;
+      const popup = window.open('', '_blank');
+      try {
+        const r = await api('/api/setup/auth', 'POST', { type });
+        if (popup && r.url) popup.location = r.url;
+        else if (popup) popup.close();
+        await loadState();
+        updateStepperUI();
+        if (!popup && r.url) toast('popup blocked — use OPEN LOGIN PAGE ↗ to open the sign-in tab', true);
+        else toast(r.needsCode ? 'login tab opened — sign in, then paste the code below' : `login tab opened — finish the sign-in in the browser on ${r.host}`);
+      } catch (e) {
+        if (popup) popup.close();
+        await loadState().catch(() => {});
+        updateStepperUI();
+        alertErr(e);
+      }
+    });
+  }
+  // OPEN LOGIN PAGE ↗ : re-open the pending session's URL (popup lost / opened elsewhere).
+  for (const btn of document.querySelectorAll('[data-auth-open]')) {
+    btn.addEventListener('click', () => {
+      const url = setupInfo().authPending?.[btn.dataset.authOpen]?.url;
+      if (url) window.open(url, '_blank');
+      else toast('no login URL yet — click AUTHENTICATE again', true);
+    });
+  }
+  // SUBMIT CODE → : forward the one-time code to the CLI's stdin (claude flow).
+  for (const btn of document.querySelectorAll('[data-auth-code]')) {
+    btn.addEventListener('click', async () => {
+      const type = btn.dataset.authCode;
+      const input = document.querySelector(`[data-auth-code-input="${type}"]`);
+      const code = (input?.value || '').trim();
+      if (!code) { toast('paste the code from the browser first', true); return; }
+      btn.textContent = '[ VERIFYING… ]';
+      btn.disabled = true;
+      try {
+        await api('/api/setup/auth/code', 'POST', { type, code });
+        toast('code submitted — verifying with the provider…');
+        // success flips the row via the server's post-login probe broadcast
+      } catch (e) {
+        alertErr(e);
+        const b = document.querySelector(`[data-auth-code="${type}"]`);
+        if (b) { b.textContent = 'SUBMIT CODE →'; b.disabled = false; }
+      }
+    });
+  }
+  for (const btn of document.querySelectorAll('[data-auth-cancel]')) {
+    btn.addEventListener('click', async () => {
+      try {
+        await api('/api/setup/auth/cancel', 'POST', { type: btn.dataset.authCancel });
+        await loadState();
+        updateStepperUI();
+        toast('login cancelled');
+      } catch (e) { alertErr(e); }
+    });
+  }
+
+  $('#s-preset-apply').onclick = async () => {
+    const preset = $('#s-preset').value;
+    try {
+      $('#s-preset-apply').textContent = '[ APPLYING… ]';
+      await api('/api/setup/preset', 'POST', { preset });
+      await loadState();
+      renderSettingsModal();
+      toast(`PRESET APPLIED: ${setupPresetLabel(preset.toLowerCase())}`);
+    } catch (e) { alertErr(e); }
+    finally { const b = $('#s-preset-apply'); if (b) b.textContent = '[ APPLY PRESET ]'; }
+  };
+  $('#s-setup-complete').onclick = async () => {
+    try {
+      $('#s-setup-complete').textContent = '[ SAVING… ]';
+      await api('/api/setup/complete', 'POST', {});
+      await loadState();
+      renderSettingsModal();
+      toast('SETUP MARKED COMPLETE');
+    } catch (e) { alertErr(e); }
+    finally { const b = $('#s-setup-complete'); if (b) b.textContent = '[ MARK SETUP COMPLETE ]'; }
+  };
+  const probeAll = $('#s-probe');
+  if (probeAll) probeAll.onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
 }
 
 function usageStripHTML() {
@@ -591,6 +881,9 @@ function render() {
     // the diagnosis banner is informational — safe to refresh on every state change
     if (lt && $('#diag-banner')) renderDiagBanner(lt);
   }
+  // Settings modal never fully re-renders on state changes (it holds unsaved edits), but
+  // the provider stepper must flip live when a login completes — patch just that region.
+  if (S.modal?.type === 'settings') updateStepperUI();
 }
 
 function renderTopbar() {
@@ -923,14 +1216,17 @@ function toast(text, isError = false) {
   if (!el) {
     el = document.createElement('div');
     el.id = 'toast';
+    el.addEventListener('click', () => { el.classList.remove('show'); clearTimeout(toastTimer); });
     document.body.appendChild(el);
   }
   el.textContent = text;
   el.className = isError ? 'err show' : 'show';
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+  // Errors are usually actionable ("run X, then RE-CHECK") — hold them longer and let a
+  // click dismiss early; success toasts stay brief.
+  toastTimer = setTimeout(() => el.classList.remove('show'), isError ? 7000 : 2600);
 }
-function alertErr(e) { toast(`ERROR: ${e.message}`, true); }
+function alertErr(e) { toast(`ERROR — ${e.message}`, true); }
 
 function shell(title, bodyHTML, footHTML = '') {
   $('#modal-root').innerHTML = `
@@ -1972,18 +2268,7 @@ function renderSettingsModal() {
       </div>`)}
 
       ${pane('providers', `
-      <div class="section-head">PROVIDERS <span>(claude code + codex)</span></div>
-      <div class="setup-cards">${setupCardsHTML()}</div>
-      <label class="f">PROVIDER PRESETS</label>
-      <select id="s-preset">
-        <option value="both" ${((s.setup?.lastPreset || 'both') === 'both' || (s.setup?.lastPreset || 'both') === 'manual') ? 'selected' : ''}>Both (planning: Claude, build: Codex)</option>
-        <option value="claude" ${s.setup?.lastPreset === 'claude' || s.setup?.lastPreset === 'claude only' ? 'selected' : ''}>Claude only</option>
-        <option value="codex" ${s.setup?.lastPreset === 'codex' || s.setup?.lastPreset === 'codex only' ? 'selected' : ''}>Codex only</option>
-      </select>
-      <button class="btn" id="s-preset-apply">[ APPLY PRESET ]</button>
-      <button class="btn" id="s-setup-complete">[ MARK SETUP COMPLETE ]</button>
-      <div class="hint">Apply a preset to update Planning/Build/Review harnesses without editing JSON. You can still fine-tune each phase in CFG.</div>
-      <div class="hint">Choose provider toggles here before running the pipeline. Disabled providers are preserved on existing columns but won’t be auto-run.</div>
+      <div id="s-stepper">${setupStepperHTML(s)}</div>
 
       <hr class="sep">
       <div class="section-head">PHASE DEFAULTS <span>(model &amp; effort per column)</span></div>
@@ -2068,51 +2353,9 @@ function renderSettingsModal() {
     .finally(() => { $('#s-tg-test').textContent = '[ SEND TEST ]'; });
   };
 
-  // Setup controls: provider enablement, preset assignment, re-check, copy login command, setup completion.
-  for (const type of PROVIDER_ORDER) {
-    const enabledEl = $(`#s-${type}-enabled`);
-    const probeBtn = document.querySelector(`[data-probe="${type}"]`);
-    const copyBtn = document.querySelector(`[data-copy="${type}"]`);
-    const firstCmd = providerCommands(type)[1] || '';
-    probeBtn?.addEventListener('click', async () => {
-      probeBtn.textContent = '[ CHECKING… ]';
-      try {
-        await api('/api/probe', 'POST', {});
-        loadState().then(renderSettingsModal);
-        toast('CLI STATUS REFRESHED');
-      } catch (e) { alertErr(e); }
-      probeBtn.textContent = '[ RE-CHECK ]';
-    });
-    copyBtn?.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard?.writeText(firstCmd || '');
-        toast('copied to clipboard');
-      } catch {
-        prompt('copy this command', firstCmd || '');
-      }
-    });
-  }
-  $('#s-preset-apply').onclick = async () => {
-    const preset = $('#s-preset').value;
-    try {
-      $('#s-preset-apply').textContent = '[ APPLYING… ]';
-      await api('/api/setup/preset', 'POST', { preset });
-      await loadState();
-      renderSettingsModal();
-      toast(`PRESET APPLIED: ${setupPresetLabel(preset.toLowerCase())}`);
-    } catch (e) { alertErr(e); }
-    finally { $('#s-preset-apply').textContent = '[ APPLY PRESET ]'; }
-  };
-  $('#s-setup-complete').onclick = async () => {
-    try {
-      $('#s-setup-complete').textContent = '[ SAVING… ]';
-      await api('/api/setup/complete', 'POST', {});
-      await loadState();
-      renderSettingsModal();
-      toast('SETUP MARKED COMPLETE');
-    } catch (e) { alertErr(e); }
-    finally { $('#s-setup-complete').textContent = '[ MARK SETUP COMPLETE ]'; }
-  };
+  // Setup controls (enable toggles, auth flow, preset, completion) all live inside the
+  // stepper, which re-renders on auth changes — wiring is shared with updateStepperUI().
+  wireStepperHandlers();
 
   for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => {
     if (!handleCustomModel(sel)) return;
@@ -2192,7 +2435,6 @@ function renderSettingsModal() {
       btn.textContent = '[ SAVE SETTINGS ]';
     }
   };
-  $('#s-probe').onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
 }
 
 /* ---------- 1s clocks: sweep countdown, wake countdown, retry countdown, live-run elapsed ---------- */

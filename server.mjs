@@ -17,6 +17,7 @@ import {
   upsertEnvFileValue,
   validateEnvKey,
 } from './engine/envfile.mjs';
+import { AUTH_COMMANDS, createAuthSessions } from './engine/authflow.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENV_FILE = path.resolve(process.env.DISPATCH_ENV_FILE || path.join(__dirname, '.env'));
@@ -65,11 +66,16 @@ function setupStatus() {
       ok: Boolean(h.ok),
     };
   }
+  // Transient login-session state (in-memory only, never persisted): pending sessions
+  // render the code-paste / open-URL row; errors surface the last failed attempt.
+  const auth = authSessions.snapshot();
   return {
     providers,
     enabledTypes: enabledProviders(settings),
     completedAt: settings.setup?.completedAt || null,
     lastPreset: settings.setup?.lastPreset || 'manual',
+    authPending: auth.pending,
+    authErrors: auth.errors,
   };
 }
 
@@ -577,6 +583,65 @@ app.post('/api/setup/complete', (_req, res) => {
   store.saveBoard();
   broadcast({ type: 'state-changed' });
   res.json(setupStatus());
+});
+
+// Subscription OAuth login sessions (claude auth login / codex login). The CLIs run
+// headless under systemd, so authflow captures the login URL for the web client to
+// open; claude's one-time code comes back through /api/setup/auth/code. When a login
+// process settles we re-probe so every connected client flips to AUTHENTICATED.
+const authSessions = createAuthSessions({
+  onSettled: async () => {
+    // Flip auth state fast: re-probe the CLIs and broadcast immediately so the pill
+    // updates. Usage meters (network calls) refresh out-of-band — the auth flip must not
+    // wait on them.
+    try { health = await probe(); } catch { /* keep prior health; pending row still clears */ }
+    broadcast({ type: 'state-changed' });
+    refreshProviderPlans();
+    Promise.all([probeClaudeUsage(), probeCodexUsage()])
+      .then(() => broadcast({ type: 'state-changed' }))
+      .catch(() => { /* usage is best-effort */ });
+  },
+});
+process.on('exit', () => authSessions.disposeAll());
+// systemd stop sends SIGTERM: without a handler node dies without 'exit' hooks, which
+// would orphan any pending `claude auth login` / `codex login` children.
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => { authSessions.disposeAll(); process.exit(0); });
+}
+
+// Launch (or return the already-running) login for a provider. Responds with the auth
+// URL for the client to open; claude additionally needs the code pasted back.
+app.post('/api/setup/auth', async (req, res) => {
+  const type = String(req.body?.type || '');
+  if (!AUTH_COMMANDS[type]) return res.status(400).json({ error: `unknown provider: ${type || '(none)'}` });
+  try {
+    const started = await authSessions.start(type);
+    broadcast({ type: 'state-changed' }); // other clients render the pending row too
+    res.json({ ok: true, host: os.hostname(), ...started });
+  } catch (e) {
+    broadcast({ type: 'state-changed' });
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// Claude flow: the browser shows a one-time code — forward it to the CLI's stdin.
+app.post('/api/setup/auth/code', (req, res) => {
+  const type = String(req.body?.type || '');
+  if (!AUTH_COMMANDS[type]) return res.status(400).json({ error: `unknown provider: ${type || '(none)'}` });
+  try {
+    authSessions.submitCode(type, req.body?.code);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(409).json({ error: e.message });
+  }
+});
+
+app.post('/api/setup/auth/cancel', (req, res) => {
+  const type = String(req.body?.type || '');
+  if (!AUTH_COMMANDS[type]) return res.status(400).json({ error: `unknown provider: ${type || '(none)'}` });
+  const killed = authSessions.cancel(type);
+  broadcast({ type: 'state-changed' });
+  res.json({ ok: true, cancelled: killed });
 });
 
 app.post('/api/notify/test', async (req, res) => {

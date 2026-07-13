@@ -93,7 +93,7 @@ function screenshotsDir() {
 
     // Re-open settings and check the build phase still renders a warning if a disabled provider is selected.
     await clickFresh(page, '#btn-settings');
-    await page.waitForSelector('.setup-cards');
+    await page.waitForSelector('.stepper');
 
     await page.waitForSelector('#board .cfg[data-cfg="col-build"]', { timeout: 3000 });
     await clickFresh(page, '#board .cfg[data-cfg="col-build"]');

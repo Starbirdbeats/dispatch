@@ -93,7 +93,17 @@ if [ "$1" = "app-server" ]; then
 fi
 
 if [ "$1" = "login" ] && [ "$2" = "status" ]; then
-  echo "${statusText}"
+  echo "${statusText}" 1>&2
+  exit 0
+fi
+
+# Subscription login: print the auth URL to STDERR (as real codex-cli does) then block on
+# the localhost callback. e2e drives the pending → cancel path; a marker file lets a test
+# simulate success out-of-band.
+if [ "$1" = "login" ]; then
+  echo "Starting local login server on http://localhost:1455." 1>&2
+  echo "navigate to https://auth.openai.com/oauth/authorize?client_id=fake-e2e&state=e2e" 1>&2
+  sleep 120
   exit 0
 fi
 
@@ -106,6 +116,32 @@ function setupFakeClaudeBin(binDir, version = 'claude 1.0.0') {
 if [ "$1" = "--version" ]; then
   echo "${version}"
   exit 0
+fi
+
+# Subscription login: print the auth URL on STDOUT and wait for the one-time code on STDIN
+# (mirrors \`claude auth login\`). On the expected code, write credentials so a subsequent
+# \`auth status\` reports logged in — this is what flips the UI to AUTHENTICATED in e2e.
+if [ "$1" = "auth" ] && [ "$2" = "login" ]; then
+  echo "Opening browser to sign in…"
+  echo "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=fake-e2e&state=e2e"
+  echo "Paste code here if prompted > "
+  read code
+  if [ "\$code" = "GOOD-CODE" ]; then
+    mkdir -p "\$HOME/.claude"
+    printf '%s' '{"claudeAiOauth":{"accessToken":"","expiresAt":0}}' > "\$HOME/.claude/.credentials.json"
+    exit 0
+  fi
+  echo "invalid code" 1>&2
+  exit 1
+fi
+
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  if [ -f "$HOME/.claude/.credentials.json" ]; then
+    echo '{"loggedIn":true,"authMethod":"claudeAiOauth","apiProvider":"firstParty"}'
+    exit 0
+  fi
+  echo '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'
+  exit 1
 fi
 
 if [ "$1" = "setup-token" ]; then

@@ -194,6 +194,37 @@ function parseCodexAuth(stdout) {
   return { authenticated: true, detail: truncate(raw) };
 }
 
+// `claude auth status --json` → { loggedIn, authMethod, apiProvider }. Modern Claude Code
+// keeps the token in the OS keyring (not .credentials.json), so the CLI is the source of
+// truth. Returns authenticated:null when the output can't be understood (caller falls back).
+function parseClaudeAuth(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return { authenticated: null, detail: '' };
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start !== -1 && end > start) {
+    try {
+      const obj = JSON.parse(text.slice(start, end + 1));
+      const method = String(obj.authMethod || '').toLowerCase();
+      const loggedIn = obj.loggedIn === true || (method !== '' && method !== 'none');
+      if (obj.loggedIn === true || obj.loggedIn === false || method) {
+        const detail = loggedIn
+          ? (method && method !== 'none' ? `authenticated · ${method}` : 'authenticated')
+          : 'not authenticated';
+        return { authenticated: loggedIn, detail };
+      }
+    } catch { /* not JSON — fall through to text heuristics */ }
+  }
+  const lower = text.toLowerCase();
+  if (/not logged|logged out|not authenticated|signed out|please log ?in|login required|no auth/.test(lower)) {
+    return { authenticated: false, detail: truncate(text) };
+  }
+  if (/logged in|authenticated|active session/.test(lower)) {
+    return { authenticated: true, detail: truncate(text) };
+  }
+  return { authenticated: null, detail: truncate(text) };
+}
+
 // lookahead (?!\d) rejects truncated slugs like "claude-opus-47" (would-be "claude-opus-4")
 export function parseModelIds(type, html) {
   const re = type === 'claude'
@@ -309,34 +340,76 @@ export async function probe() {
     codex: { ok: false, installed: false, authenticated: false, authDetail: '', version: null, error: null },
   };
 
-  // Claude: installed status from `claude --version`, auth status from local OAuth token file.
+  // Claude: installed status from `claude --version`.
   try {
     const { stdout } = await run('claude', ['--version'], { timeout: 15000 });
     result.claude.installed = true;
     result.claude.ok = true;
     result.claude.version = truncate(stdout, 60);
   } catch (e) { result.claude.error = normalizeProbeError(e); }
+  // Claude auth: ask the CLI (`claude auth status --json`) — the token lives in the OS
+  // keyring on modern Claude Code, so the file may exist with an empty token. Fall back to
+  // the OAuth token file / env key for older CLIs or key-based (non-interactive) auth.
   try {
-    readClaudeOAuthToken();
-    result.claude.authenticated = true;
-    result.claude.authDetail = 'authenticated';
+    let parsed = { authenticated: null, detail: '' };
+    try {
+      const { stdout, stderr } = await run('claude', ['auth', 'status', '--json'], { timeout: 15000 });
+      parsed = parseClaudeAuth(stdout);
+      if (parsed.authenticated === null) parsed = parseClaudeAuth(stderr);
+    } catch (statusErr) {
+      // `claude auth status --json` exits non-zero when logged out but still prints the
+      // JSON verdict on stdout; ENOENT (older CLI without the subcommand) yields neither,
+      // leaving parsed indeterminate so we fall back to the token file below.
+      parsed = parseClaudeAuth(statusErr.stdout);
+      if (parsed.authenticated === null) parsed = parseClaudeAuth(statusErr.stderr);
+    }
+
+    if (parsed.authenticated === true) {
+      result.claude.authenticated = true;
+      result.claude.authDetail = parsed.detail || 'authenticated';
+    } else if (parsed.authenticated === false) {
+      result.claude.authenticated = false;
+      result.claude.authDetail = parsed.detail || 'not authenticated';
+    } else if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
+      result.claude.authenticated = true;
+      result.claude.authDetail = 'authenticated · api key';
+    } else {
+      readClaudeOAuthToken(); // throws if the file has no usable token
+      result.claude.authenticated = true;
+      result.claude.authDetail = 'authenticated';
+    }
   } catch (e) {
     result.claude.authenticated = false;
     result.claude.authDetail = normalizeProbeError(e.message || e, 'not authenticated');
   }
 
-  // Codex: installed status from `codex --version`, auth status from `codex login status`.
+  // Codex: installed status from `codex --version`.
   try {
     const { stdout } = await run('codex', ['--version'], { timeout: 15000 });
     result.codex.installed = true;
     result.codex.ok = true;
     result.codex.version = truncate(stdout, 60);
-    const { stdout: authRaw } = await run('codex', ['login', 'status'], { timeout: 15000 });
-    const parsed = parseCodexAuth(authRaw);
-    result.codex.authenticated = Boolean(parsed.authenticated);
-    result.codex.authDetail = parsed.detail || (parsed.authenticated === false ? 'not authenticated' : '');
-  } catch (e) {
-    result.codex.error = normalizeProbeError(e);
+  } catch (e) { result.codex.error = normalizeProbeError(e); }
+  // Codex auth from `codex login status`. Modern codex-cli prints the status line to
+  // STDERR, so parse whichever stream carries a verdict (and the error streams on non-zero
+  // exit) rather than reading stdout alone.
+  if (result.codex.installed) {
+    try {
+      const { stdout, stderr } = await run('codex', ['login', 'status'], { timeout: 15000 });
+      let parsed = parseCodexAuth(stdout);
+      if (parsed.authenticated === null) parsed = parseCodexAuth(stderr);
+      result.codex.authenticated = Boolean(parsed.authenticated);
+      result.codex.authDetail = parsed.detail || (parsed.authenticated === false ? 'not authenticated' : '');
+    } catch (e) {
+      let parsed = parseCodexAuth(e.stdout);
+      if (parsed.authenticated === null) parsed = parseCodexAuth(e.stderr);
+      if (parsed.authenticated === null) {
+        result.codex.authDetail = normalizeProbeError(e, 'not authenticated');
+      } else {
+        result.codex.authenticated = Boolean(parsed.authenticated);
+        result.codex.authDetail = parsed.detail || 'not authenticated';
+      }
+    }
   }
 
   return result;

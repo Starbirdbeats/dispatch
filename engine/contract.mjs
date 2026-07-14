@@ -13,6 +13,7 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
   lines.push(`Title: ${ticket.title}`);
   if (ticket.description) lines.push(`Description:\n${ticket.description}`);
   lines.push(`Workspace repo to inspect: ${ticket.workspace}`);
+  if (ticket.branchName) lines.push(`Working branch: ${ticket.branchName}`);
 
   lines.push('\n## Shared context — READ FIRST');
   lines.push(`The ticket dossier lives at: ${dossierPath}`);

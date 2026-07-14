@@ -331,6 +331,9 @@ export class Store {
         ? null
         : (Number.isFinite(+maxBounces) && +maxBounces >= 0 ? Math.floor(+maxBounces) : null),
       humanTest: null,
+      branchName: null,       // set before the first non-read-only agent run in a Git workspace
+      branchBase: null,       // commit SHA used when the ticket branch was created
+      branchedAt: null,
       startedAt: null,       // set when work first begins (enters an agent phase / first run)
       completedAt: null,     // set when it lands in a terminal column
       durationMs: null,      // activeMs, frozen at completion

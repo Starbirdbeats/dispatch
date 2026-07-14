@@ -10,6 +10,7 @@ import { composePrompt, parseControlBlock } from './contract.mjs';
 import { telegramConfig, sendTelegram, renderMessage } from './notify.mjs';
 import { applyCodexRateLimits, USAGE } from './usage.mjs';
 import { contextSnapshot } from './limits.mjs';
+import { BranchPrepError, prepareTicketBranch } from './branching.mjs';
 import { REGISTRY } from '../registry.mjs';
 
 const ADAPTERS = { claude, codex };
@@ -71,6 +72,11 @@ function tailFile(file, n = 800) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function workspaceKey(workspace) {
+  if (!workspace) return '';
+  try { return fs.realpathSync(workspace); } catch { return path.resolve(workspace); }
 }
 
 function normalizeModelAndEffort(h) {
@@ -320,7 +326,9 @@ export class Runner {
     // ?? not || : maxConcurrent === 0 is a real value meaning "paused — start nothing".
     const cap = this.store.board.settings.maxConcurrent ?? 2;
     while (this.running.size < cap && this.queue.length) {
-      const job = this.queue.shift();
+      const jobIndex = this._nextStartableJobIndex();
+      if (jobIndex === -1) break;
+      const [job] = this.queue.splice(jobIndex, 1);
       this._saveQueue();
       this._run(job).catch((err) => {
         const t = this.store.tickets.get(job.ticketId);
@@ -340,6 +348,26 @@ export class Runner {
     }
   }
 
+  _nextStartableJobIndex() {
+    for (let i = 0; i < this.queue.length; i++) {
+      const job = this.queue[i];
+      const ticket = this.store.tickets.get(job.ticketId);
+      if (!ticket) return i;
+      if (!this._workspaceBusy(ticket.workspace, ticket.id)) return i;
+    }
+    return -1;
+  }
+
+  _workspaceBusy(workspace, ticketId) {
+    const key = workspaceKey(workspace);
+    for (const runningTicketId of this.running.keys()) {
+      if (runningTicketId === ticketId) continue;
+      const runningTicket = this.store.tickets.get(runningTicketId);
+      if (workspaceKey(runningTicket?.workspace) === key) return true;
+    }
+    return false;
+  }
+
   async _run({ ticketId }) {
     const store = this.store;
     const ticket = store.tickets.get(ticketId);
@@ -357,6 +385,20 @@ export class Runner {
     const adapter = ADAPTERS[harness.type];
     if (!adapter) throw new Error(`unknown harness ${harness.type}`);
     if (!fs.existsSync(ticket.workspace)) throw new Error(`workspace missing: ${ticket.workspace}`);
+    if (!ticket.readOnly) {
+      try {
+        this._prepareBranch(ticket);
+      } catch (err) {
+        if (err instanceof BranchPrepError) {
+          this._parkBranchFailure(ticket, err);
+          this._closeEntry(ticketId);
+          this.broadcast({ type: 'state-changed' });
+          this._pump();
+          return;
+        }
+        throw err;
+      }
+    }
 
     const dataDir = store.ticketDir(ticketId);
     const sessionId = ticket.sessions[harness.type];
@@ -403,6 +445,7 @@ export class Runner {
     atomicWrite(path.join(runDir, 'cmd.json'), JSON.stringify({
       runId, ticketId, columnId: column.id,
       harness: { type: harness.type, model: harness.model, effort: harness.effort },
+      branchName: ticket.branchName || null,
       cmd: inv.cmd,
       args: inv.args.map(truncateArg),
       pid: proc.pid,
@@ -419,13 +462,46 @@ export class Runner {
     delete ticket.stuckReason;   // fresh run — clear whatever stuck the last attempt
     delete ticket.retryAt;       // manual/fresh runs replace any parked rate-limit retry
     delete ticket.pendingWake;   // this run IS the wake
-    ticket.currentRun = { column: column.name, harness: harness.type, model: harness.model, startedAt, transcriptFile };
+    ticket.currentRun = { column: column.name, harness: harness.type, model: harness.model, branchName: ticket.branchName || null, startedAt, transcriptFile };
     ticket.activeRun = activeRun;
     store.saveTicket(ticketId);
     store.appendActivity(ticketId, { kind: 'run', by: harness.type, text: `run started: ${column.name} (${harness.model || 'default model'}, effort ${harness.effort || 'default'})` });
     this.broadcast({ type: 'state-changed' });
 
     this._attach(ticketId);
+  }
+
+  _prepareBranch(ticket) {
+    const result = prepareTicketBranch({ ticket, workspace: ticket.workspace });
+    const firstBranch = !ticket.branchName;
+    ticket.branchName = result.branchName;
+    ticket.branchBase = ticket.branchBase || result.branchBase || null;
+    ticket.branchedAt = ticket.branchedAt || result.branchedAt;
+    this.store.saveTicket(ticket.id);
+    if (firstBranch || result.action === 'created' || result.action === 'switched') {
+      this.store.appendActivity(ticket.id, {
+        kind: 'system',
+        by: 'engine',
+        text: `branch ready: ${result.branchName}`,
+      });
+    }
+    return result;
+  }
+
+  _parkBranchFailure(ticket, err) {
+    ticket.status = 'awaiting-human';
+    ticket.stuckReason = {
+      kind: err.kind || 'branch-unavailable',
+      at: nowIso(),
+      detail: err.detail || err.message || 'Dispatch could not prepare a branch for this ticket.',
+    };
+    this.store.appendActivity(ticket.id, {
+      kind: 'system',
+      by: 'engine',
+      text: `branch prep failed: ${ticket.stuckReason.detail}`,
+    });
+    this._maybeNotify(ticket);
+    this.store.saveTicket(ticket.id);
   }
 
   _attach(ticketId) {

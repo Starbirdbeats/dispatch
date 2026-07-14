@@ -862,6 +862,43 @@ async function readUploads(fileList) {
   }
   return out;
 }
+// Pull image files out of a clipboard payload, naming browser-generated blobs.
+function imagesFromClipboard(dataTransfer) {
+  const out = [];
+  let n = 0;
+  for (const it of [...(dataTransfer?.items || [])]) {
+    if (it.kind !== 'file' || !it.type.startsWith('image/')) continue;
+    const blob = it.getAsFile();
+    if (!blob) continue;
+    const ext = (blob.type.split('/')[1] || 'png').replace('+xml', '');
+    const name = (blob.name && blob.name !== 'image.png')
+      ? blob.name
+      : `pasted-${Date.now()}${n ? '-' + n : ''}.${ext}`;
+    out.push(new File([blob], name, { type: blob.type }));
+    n++;
+  }
+  return out;
+}
+function insertAtCursor(ta, text) {
+  const s = ta.selectionStart ?? ta.value.length;
+  const e = ta.selectionEnd ?? ta.value.length;
+  ta.value = ta.value.slice(0, s) + text + ta.value.slice(e);
+  const pos = s + text.length;
+  ta.selectionStart = ta.selectionEnd = pos;
+}
+function wirePasteImages(ta, onImages) {
+  if (!ta) return;
+  ta.addEventListener('paste', async (e) => {
+    const dt = e.clipboardData;
+    const imgs = imagesFromClipboard(dt);
+    if (!imgs.length) return;
+    const hasText = [...(dt?.items || [])].some((it) => it.kind === 'string');
+    if (!hasText) e.preventDefault();
+    insertAtCursor(ta, imgs.map((f) => `[image: ${f.name}]`).join('\n'));
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    await onImages(imgs);
+  });
+}
 // Wire a drop-zone + hidden input + browse button to a handler. Ids are caller-supplied.
 function wireDropzone(dropId, inputId, browseId, onFiles) {
   const drop = $(`#${dropId}`), input = $(`#${inputId}`);
@@ -873,7 +910,7 @@ function wireDropzone(dropId, inputId, browseId, onFiles) {
   drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); onFiles(e.dataTransfer.files); };
 }
 const dropzoneHTML = (dropId, inputId, browseId) =>
-  `<div class="att-drop" id="${dropId}"><span>DROP FILES OR</span><button type="button" class="btn" id="${browseId}">[ BROWSE ]</button><input type="file" id="${inputId}" multiple hidden></div>`;
+  `<div class="att-drop" id="${dropId}"><span>DROP FILES, PASTE, OR</span><button type="button" class="btn" id="${browseId}">[ BROWSE ]</button><input type="file" id="${inputId}" multiple hidden></div>`;
 
 /* ---------- render ---------- */
 function render() {
@@ -1743,6 +1780,7 @@ function renderOverview(body, t) {
 
   // Attachments upload/remove independently of SAVE CHANGES so draft edits above are never lost.
   wireDropzone('ov-att-drop', 'ov-att-input', 'ov-att-browse', (files) => uploadTicketFiles(t, files));
+  wirePasteImages($('#f-desc'), (files) => uploadTicketFiles(t, files));
   renderTicketAttachments(t);
 }
 
@@ -1814,6 +1852,7 @@ function renderActivity(body, t) {
     </div>` : ''}`;
 
   $('#f-comment').oninput = (e) => { S.commentDraft = e.target.value; };
+  wirePasteImages($('#f-comment'), (files) => uploadTicketFiles(t, files));
   if (canWake) {
     const syncWakeHarness = () => {
       const h = normalizeHarnessChoice({ type: $('#cw-type').value, model: $('#cw-model').value, effort: $('#cw-effort').value }, {});
@@ -2040,6 +2079,10 @@ function renderNewModal() {
     `<button class="btn btn-accent" id="n-create">[ CREATE ]</button>`);
   renderNewOverrides();
   wireDropzone('n-att-drop', 'n-att-input', 'n-att-browse', async (files) => {
+    S.newAttachments = (S.newAttachments || []).concat(await readUploads(files));
+    renderStagedAttachments();
+  });
+  wirePasteImages($('#n-desc'), async (files) => {
     S.newAttachments = (S.newAttachments || []).concat(await readUploads(files));
     renderStagedAttachments();
   });

@@ -102,6 +102,12 @@ async function state(base) {
 
     assert.equal((await state(harness.base)).tickets.some((t) => t.id === backlogTicket.id), false, 'archive delete is permanent');
 
+    await api(harness.base, '/api/tickets', 'POST', {
+      title: 'Archive controls mobile',
+      workspace: harness.root,
+      columnId: columns[0].id,
+    });
+
     await page.setViewport({ width: 390, height: 844 });
     await page.reload({ waitUntil: 'networkidle2' });
     await page.waitForSelector('.mcard');

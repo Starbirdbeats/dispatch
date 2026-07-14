@@ -465,13 +465,34 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 .att-x { border: none; background: none; color: var(--fg-faint); cursor: pointer; font-family: var(--mono); font-size: 10px; padding: 0; }
 .att-x:hover { color: var(--red); }
 .att-empty { color: var(--fg-faint); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; padding: 6px 2px; }
-.paste-thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
+.paste-thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; align-items: flex-start; }
 .paste-thumbs:empty { display: none; }
+.paste-thumb-wrap { position: relative; display: block; width: 54px; height: 54px; }
+.paste-thumb-hit {
+  display: block; width: 54px; height: 54px; padding: 0; border: none; background: none;
+  cursor: zoom-in;
+}
 .paste-thumb {
   width: 52px; height: 52px; object-fit: cover;
   border: 1px solid var(--line); background: var(--bg-1);
   border-radius: 4px !important; /* user-requested exception to the global sharp-corner reset */
 }
+.paste-thumb-x {
+  position: absolute; top: -5px; right: -5px; width: 18px; height: 18px; padding: 0;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  font-family: var(--mono); font-size: 10px; line-height: 16px; font-weight: 700;
+  cursor: pointer; z-index: 1;
+}
+.paste-thumb-x:hover { color: var(--bg); background: var(--red); border-color: var(--red); }
+.paste-preview {
+  position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: color-mix(in srgb, var(--bg) 82%, transparent);
+}
+.paste-preview img {
+  max-width: min(92vw, 1100px); max-height: 88vh; object-fit: contain;
+  border: 1px solid var(--line); background: var(--bg);
+}
+.paste-preview-close { position: fixed; top: 16px; right: 16px; }
 
 .workspace-picker { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: stretch; }
 .workspace-picker input { grid-column: 1 / -1; }

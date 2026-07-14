@@ -10,6 +10,7 @@ const S = {
   commentDraft: '',
   commentThumbs: [],
   commentThumbTicketId: null,
+  newPasteThumbs: [],
   mobilePhase: 0,      // <760px board: which phase (column index) is on screen
   railExpanded: {},    // desktop rail: colId -> showing all chips past the +N cap
 };
@@ -893,16 +894,89 @@ function ensurePasteThumbStrip(ta) {
   ta.parentNode.insertBefore(strip, ta);
   return strip;
 }
-function appendPasteThumb(strip, file) {
-  const img = document.createElement('img');
-  img.className = 'paste-thumb';
-  img.src = URL.createObjectURL(file);
-  img.alt = file.name;
-  img.title = file.name;
-  strip.appendChild(img);
-  return { name: file.name, url: img.src };
+function pasteThumbId() {
+  return `pt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
-function wirePasteImages(ta, onImages, onThumbs) {
+let pastePreviewCleanup = null;
+function openPastePreview(th) {
+  if (pastePreviewCleanup) pastePreviewCleanup();
+  const overlay = document.createElement('div');
+  overlay.className = 'paste-preview';
+  overlay.innerHTML = `
+    <button type="button" class="paste-preview-close" title="Close">[ x ]</button>
+    <img src="${esc(th.url)}" alt="${esc(th.name)}">`;
+  const close = () => { window.removeEventListener('keydown', onKey, true); overlay.remove(); pastePreviewCleanup = null; };
+  const onKey = (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  };
+  overlay.onclick = (e) => { if (e.target === overlay) close(); };
+  $('.paste-preview-close', overlay).onclick = close;
+  window.addEventListener('keydown', onKey, true);
+  pastePreviewCleanup = close;
+  document.body.appendChild(overlay);
+}
+function pasteThumbHTML(th) {
+  return `<span class="paste-thumb-wrap" data-thumb-id="${esc(th.id)}">
+    <button type="button" class="paste-thumb-hit" title="${esc(th.name)}">
+      <img class="paste-thumb" src="${esc(th.url)}" alt="${esc(th.name)}">
+    </button>
+    <button type="button" class="paste-thumb-x" title="Remove">x</button>
+  </span>`;
+}
+function wirePasteThumb(el, th, onRemove) {
+  $('.paste-thumb-hit', el).onclick = () => openPastePreview(th);
+  $('.paste-thumb-x', el).onclick = async (e) => {
+    e.stopPropagation();
+    th.removed = true;
+    el.remove();
+    if (onRemove) await onRemove(th).catch(alertErr);
+  };
+}
+function wirePasteThumbs(root, thumbs, onRemove) {
+  for (const el of root.querySelectorAll('.paste-thumb-wrap')) {
+    const th = thumbs.find((x) => x.id === el.dataset.thumbId);
+    if (th) wirePasteThumb(el, th, onRemove);
+  }
+}
+function revokePasteThumb(th) {
+  if (th?.url) URL.revokeObjectURL(th.url);
+}
+function removePasteThumbFromDOM(th) {
+  document.querySelector(`.paste-thumb-wrap[data-thumb-id="${CSS.escape(th.id)}"]`)?.remove();
+}
+function removePasteThumbFromList(list, th) {
+  const i = list.indexOf(th);
+  if (i >= 0) list.splice(i, 1);
+  revokePasteThumb(th);
+}
+function clearNewPasteThumbs() {
+  for (const th of S.newPasteThumbs || []) revokePasteThumb(th);
+  S.newPasteThumbs = [];
+}
+async function deleteTicketAttachment(t, attId, { refresh = true } = {}) {
+  if (!attId) return;
+  await api(`/api/tickets/${t.id}/attachments/${attId}`, 'DELETE');
+  const cur = S.data.tickets.find((x) => x.id === t.id);
+  if (cur) cur.attachments = (cur.attachments || []).filter((a) => a.id !== attId);
+  if (refresh) renderTicketAttachments(t);
+  toast('ATTACHMENT REMOVED');
+}
+async function handleExistingThumbRemove(t, th) {
+  if (th.attachmentId) await deleteTicketAttachment(t, th.attachmentId);
+  else th.removeAfterUpload = true;
+  revokePasteThumb(th);
+}
+function appendPasteThumb(strip, file, onRemove) {
+  const th = { id: pasteThumbId(), name: file.name, url: URL.createObjectURL(file) };
+  strip.insertAdjacentHTML('beforeend', pasteThumbHTML(th));
+  const el = strip.lastElementChild;
+  wirePasteThumb(el, th, onRemove);
+  return th;
+}
+function wirePasteImages(ta, onImages, { onThumbs, onRemoveThumb } = {}) {
   if (!ta) return;
   ta.addEventListener('paste', async (e) => {
     const dt = e.clipboardData;
@@ -917,9 +991,9 @@ function wirePasteImages(ta, onImages, onThumbs) {
     });
     if (!valid.length) return;
     const strip = ensurePasteThumbStrip(ta);
-    const thumbs = valid.map((file) => appendPasteThumb(strip, file));
+    const thumbs = valid.map((file) => appendPasteThumb(strip, file, onRemoveThumb));
     if (onThumbs) onThumbs(thumbs);
-    await onImages(valid);
+    await onImages(valid, thumbs);
   });
 }
 // Wire a drop-zone + hidden input + browse button to a handler. Ids are caller-supplied.
@@ -1296,7 +1370,7 @@ function renderMobileBoard(board) {
   const drop = document.createElement('div');
   drop.className = 'chip-drop';
   drop.textContent = '· · · DROP TICKET · · ·';
-  drop.onclick = () => { S.newAttachments = []; S.newOverrides = {}; pushModal({ type: 'new' }); };
+  drop.onclick = () => { S.newAttachments = []; S.newOverrides = {}; clearNewPasteThumbs(); pushModal({ type: 'new' }); };
   body.appendChild(drop);
   const prevN = idx > 0 ? list[idx - 1].name : '';
   const nextN = idx < list.length - 1 ? list[idx + 1].name : '';
@@ -1345,6 +1419,8 @@ function closeModal() {
   // history.back() is only safe because initHistoryFromLocation() guarantees a
   // "board" entry sits beneath every modal we ever push — see below.
   if (history.state?.modal) { history.back(); return; }
+  clearCommentThumbs();
+  clearNewPasteThumbs();
   S.modal = null; S.transcript = null; $('#modal-root').innerHTML = '';
   history.replaceState({ modal: false }, '', location.pathname + location.search);
 }
@@ -1446,6 +1522,7 @@ function writeModalHash(modal, { push }) {
 function pushModal(modal) {
   if (modal?.type === 'ticket' && modal.id !== S.modal?.id) resetCommentThumbsForTicket(modal.id);
   else if (modal?.type !== 'ticket') clearCommentThumbs();
+  if (modal?.type !== 'new') clearNewPasteThumbs();
   S.modal = modal;
   renderModal();
   writeModalHash(modal, { push: true });
@@ -1467,6 +1544,7 @@ function renderForHash() {
   }
   if (modal?.type === 'ticket' && modal.id !== S.modal?.id) resetCommentThumbsForTicket(modal.id);
   else if (modal?.type !== 'ticket') clearCommentThumbs();
+  if (modal?.type !== 'new') clearNewPasteThumbs();
   S.modal = modal;
   if (modal) renderModal();
   else { S.transcript = null; $('#modal-root').innerHTML = ''; }
@@ -1894,7 +1972,15 @@ function renderOverview(body, t) {
 
   // Attachments upload/remove independently of SAVE CHANGES so draft edits above are never lost.
   wireDropzone('ov-att-drop', 'ov-att-input', 'ov-att-browse', (files) => uploadTicketFiles(t, files));
-  wirePasteImages($('#f-desc'), (files) => uploadTicketFiles(t, files));
+  wirePasteImages($('#f-desc'), async (files, thumbs) => {
+    const added = await uploadTicketFiles(t, files);
+    (added || []).forEach((att, i) => {
+      const th = thumbs[i];
+      if (!th) return;
+      th.attachmentId = att.id;
+      if (th.removeAfterUpload || th.removed) deleteTicketAttachment(t, att.id).catch(alertErr);
+    });
+  }, { onRemoveThumb: (th) => handleExistingThumbRemove(t, th) });
   renderTicketAttachments(t);
 }
 
@@ -1913,31 +1999,25 @@ function renderTicketAttachments(t) {
   for (const b of box.querySelectorAll('[data-rm]')) {
     b.onclick = () => {
       if (!confirm('Remove this attachment?')) return;
-      api(`/api/tickets/${t.id}/attachments/${b.dataset.rm}`, 'DELETE').then(() => {
-        const cur = S.data.tickets.find((x) => x.id === t.id);
-        if (cur) cur.attachments = (cur.attachments || []).filter((a) => a.id !== b.dataset.rm);
-        renderTicketAttachments(t);
-        toast('ATTACHMENT REMOVED');
-      }).catch(alertErr);
+      deleteTicketAttachment(t, b.dataset.rm).catch(alertErr);
     };
   }
 }
 
 async function uploadTicketFiles(t, fileList) {
   const files = await readUploads(fileList);
-  if (!files.length) return;
-  await api(`/api/tickets/${t.id}/attachments`, 'POST', { attachments: files }).then((r) => {
+  if (!files.length) return [];
+  return api(`/api/tickets/${t.id}/attachments`, 'POST', { attachments: files }).then((r) => {
     const cur = S.data.tickets.find((x) => x.id === t.id);
     if (cur) cur.attachments = r.attachments;
     renderTicketAttachments(t);
     toast(`ATTACHED ${files.length} FILE${files.length > 1 ? 'S' : ''}`);
+    return r.added || [];
   }).catch(alertErr);
 }
 
 function pasteThumbsHTML(thumbs = []) {
-  return `<div class="paste-thumbs">${thumbs.map((th) =>
-    `<img class="paste-thumb" src="${esc(th.url)}" alt="${esc(th.name)}" title="${esc(th.name)}">`
-  ).join('')}</div>`;
+  return `<div class="paste-thumbs">${thumbs.map((th) => pasteThumbHTML(th)).join('')}</div>`;
 }
 
 function renderActivity(body, t) {
@@ -1976,10 +2056,26 @@ function renderActivity(body, t) {
     </div>` : ''}`;
 
   $('#f-comment').oninput = (e) => { S.commentDraft = e.target.value; };
-  wirePasteImages($('#f-comment'), (files) => uploadTicketFiles(t, files), (thumbs) => {
+  const removeCommentThumb = async (th) => {
+    removePasteThumbFromList(S.commentThumbs, th);
+    if (th.attachmentId) await deleteTicketAttachment(t, th.attachmentId, { refresh: false });
+    else th.removeAfterUpload = true;
+  };
+  wirePasteThumbs($('.commentbox'), S.commentThumbs, removeCommentThumb);
+  wirePasteImages($('#f-comment'), async (files, thumbs) => {
+    const added = await uploadTicketFiles(t, files);
+    (added || []).forEach((att, i) => {
+      const th = thumbs[i];
+      if (!th) return;
+      th.attachmentId = att.id;
+      if (th.removeAfterUpload || th.removed || !S.commentThumbs.includes(th)) {
+        deleteTicketAttachment(t, att.id, { refresh: false }).catch(alertErr);
+      }
+    });
+  }, { onThumbs: (thumbs) => {
     resetCommentThumbsForTicket(t.id);
     S.commentThumbs = (S.commentThumbs || []).concat(thumbs);
-  });
+  }, onRemoveThumb: removeCommentThumb });
   if (canWake) {
     const syncWakeHarness = () => {
       const h = normalizeHarnessChoice({ type: $('#cw-type').value, model: $('#cw-model').value, effort: $('#cw-effort').value }, {});
@@ -2215,10 +2311,23 @@ function renderNewModal() {
     S.newAttachments = (S.newAttachments || []).concat(await readUploads(files));
     renderStagedAttachments();
   });
-  wirePasteImages($('#n-desc'), async (files) => {
-    S.newAttachments = (S.newAttachments || []).concat(await readUploads(files));
+  const removeNewThumb = (th) => {
+    if (th.upload) S.newAttachments = (S.newAttachments || []).filter((a) => a !== th.upload);
+    else th.removeAfterRead = true;
+    removePasteThumbFromList(S.newPasteThumbs, th);
     renderStagedAttachments();
-  });
+  };
+  wirePasteImages($('#n-desc'), async (files, thumbs) => {
+    const uploads = await readUploads(files);
+    uploads.forEach((upload, i) => {
+      const th = thumbs[i];
+      if (!th) return;
+      th.upload = upload;
+      if (th.removeAfterRead || th.removed) return;
+      S.newAttachments = (S.newAttachments || []).concat(upload);
+    });
+    renderStagedAttachments();
+  }, { onThumbs: (thumbs) => { S.newPasteThumbs = (S.newPasteThumbs || []).concat(thumbs); }, onRemoveThumb: removeNewThumb });
   wireWorkspacePicker('n-ws');
   $('#n-readonly').onchange = (e) => { $('#n-skip-wrap').hidden = !e.target.checked; };
   renderStagedAttachments();
@@ -2235,7 +2344,7 @@ function renderNewModal() {
       overrides: S.newOverrides || {},
       readOnly, skip,
       attachments: (S.newAttachments || []).map(({ name, type, size, dataB64 }) => ({ name, type, size, dataB64 })),
-    }).then((r) => { S.newAttachments = []; S.newOverrides = {}; toast(r.started ? `CREATED — STARTED → ${r.started.toUpperCase()}` : 'TICKET CREATED'); closeAndReload(); }).catch(alertErr);
+    }).then((r) => { S.newAttachments = []; S.newOverrides = {}; clearNewPasteThumbs(); toast(r.started ? `CREATED — STARTED → ${r.started.toUpperCase()}` : 'TICKET CREATED'); closeAndReload(); }).catch(alertErr);
   };
 }
 
@@ -2251,7 +2360,15 @@ function renderStagedAttachments() {
       <button type="button" class="att-x" data-rm="${i}" title="Remove">[ x ]</button>
     </div>`).join('');
   for (const b of box.querySelectorAll('[data-rm]')) {
-    b.onclick = () => { S.newAttachments.splice(Number(b.dataset.rm), 1); renderStagedAttachments(); };
+    b.onclick = () => {
+      const removed = S.newAttachments.splice(Number(b.dataset.rm), 1)[0];
+      const th = (S.newPasteThumbs || []).find((x) => x.upload === removed);
+      if (th) {
+        removePasteThumbFromDOM(th);
+        removePasteThumbFromList(S.newPasteThumbs, th);
+      }
+      renderStagedAttachments();
+    };
   }
 }
 
@@ -2768,7 +2885,7 @@ setInterval(() => {
 }, 1000);
 
 /* ---------- boot ---------- */
-$('#btn-new').onclick = () => { S.newAttachments = []; S.newOverrides = {}; pushModal({ type: 'new' }); };
+$('#btn-new').onclick = () => { S.newAttachments = []; S.newOverrides = {}; clearNewPasteThumbs(); pushModal({ type: 'new' }); };
 $('#btn-settings').onclick = () => pushModal({ type: 'settings' });
 $('#btn-archive').onclick = () => pushModal({ type: 'archive' });
 $('#btn-pause').onclick = () => {

@@ -391,10 +391,12 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; background: v
 .panel-body { overflow-y: auto; padding: 16px; flex: 1 1 auto; }
 .panel-foot { border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 
-.tabs { display: flex; gap: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
+.tabs { display: flex; gap: 1px; min-width: 0; background: var(--line); border-bottom: 1px solid var(--line); }
 .tabs button {
   flex: 1; background: var(--bg); border: none; color: var(--fg-dim); font-family: var(--mono);
-  font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; padding: 9px 0; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  min-width: 0; font-size: 10px; line-height: 1.2; text-transform: uppercase; letter-spacing: 0.12em;
+  padding: 9px 0; cursor: pointer; white-space: nowrap;
 }
 .tabs button.active { background: var(--bg-2); color: var(--fg); }
 
@@ -734,8 +736,22 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 /* ---- mobile: drop the rail, inline the number chip, scrollable tab strip ---- */
 @media (max-width: 760px) {
   /* tab bar stops clipping the six labels — horizontal scroll strip */
-  .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .tabs button { flex: 0 0 auto; padding: 13px 16px; }
+  .tabs {
+    flex: 0 0 auto;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+  .tabs button {
+    flex: 0 0 auto;
+    min-width: 8.5rem;
+    min-height: 44px;
+    padding: 13px 16px;
+    scroll-snap-align: start;
+  }
 
   .stepper { grid-template-columns: 1fr; gap: 0; }
   .step-rail { display: none; }                 /* number moves inline into the title */

@@ -1662,6 +1662,7 @@ function renderTicketModal() {
      <button class="btn" id="btn-archive-ticket">[ ARCHIVE ]</button>
      <button class="btn btn-danger" id="btn-del">[ DELETE ]</button>`
   );
+  $('.tabs button.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 
   for (const b of document.querySelectorAll('[data-tab]')) {
     b.onclick = () => { S.modal.tab = b.dataset.tab; renderTicketModal(); writeModalHash(S.modal, { push: false }); };

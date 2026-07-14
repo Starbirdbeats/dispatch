@@ -93,6 +93,40 @@ async function seedTicket(base, title, root) {
     assert.equal(await page.$$eval('.mdots span.on', (e) => e.length), 1, 'exactly one active dot');
     assert.ok(await page.$eval('.mprev', (b) => b.disabled), 'prev disabled on first phase');
 
+    // ticket modal tabs stay usable on phone-sized viewports: the strip scrolls
+    // horizontally, preserves 44px touch targets, and keeps the active tab visible.
+    await page.$eval('.mcard', (el) => el.click());
+    await page.waitForSelector('#overlay .tabs [data-tab="overview"]');
+    const tabsOverflow = await page.$eval('.tabs', (el) => getComputedStyle(el).overflowX);
+    assert.ok(['auto', 'scroll'].includes(tabsOverflow), `ticket tab strip should scroll, got: ${tabsOverflow}`);
+    const tabsFitViewport = await page.$eval('.tabs', (el) => {
+      const r = el.getBoundingClientRect();
+      return r.left >= -1 && r.right <= window.innerWidth + 1;
+    });
+    assert.ok(tabsFitViewport, 'ticket tab strip stays within the mobile viewport');
+    const tabHeights = await page.$$eval('.tabs [data-tab]', (els) => els.map((el) => el.getBoundingClientRect().height));
+    assert.ok(tabHeights.every((h) => h >= 44), `ticket tabs should be >=44px tall, got: ${tabHeights.join(', ')}`);
+
+    for (const tab of ['overview', 'activity', 'transcript', 'dossier']) {
+      await page.$eval(`.tabs [data-tab="${tab}"]`, (el) => {
+        el.scrollIntoView({ block: 'nearest', inline: 'center' });
+        el.click();
+      });
+      await page.waitForFunction((want) => document.querySelector('.tabs button.active')?.dataset.tab === want, {}, tab);
+      const hash = await page.evaluate(() => location.hash);
+      if (tab === 'overview') assert.match(hash, /^#t-[^/]+$/, 'overview tab keeps bare ticket hash');
+      else assert.match(hash, new RegExp(`^#t-[^/]+/${tab}$`), `${tab} tab updates the hash`);
+      const activeVisible = await page.$eval('.tabs', (strip) => {
+        const active = strip.querySelector('button.active');
+        const sr = strip.getBoundingClientRect();
+        const ar = active.getBoundingClientRect();
+        return ar.left >= sr.left - 1 && ar.right <= sr.right + 1 && ar.top >= sr.top - 1 && ar.bottom <= sr.bottom + 1;
+      });
+      assert.ok(activeVisible, `${tab} tab remains visible in the mobile strip`);
+    }
+    await page.$eval('#modal-close', (el) => el.click());
+    await page.waitForFunction(() => !document.querySelector('#overlay'));
+
     const firstPhase = await page.$eval('.mphase-title .n', (e) => e.textContent);
     await page.$eval('.mnext', (b) => b.click());
     await page.waitForFunction((prev) => document.querySelector('.mphase-title .n')?.textContent !== prev, {}, firstPhase);

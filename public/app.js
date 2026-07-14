@@ -883,12 +883,21 @@ function imagesFromClipboard(dataTransfer) {
   }
   return out;
 }
-function insertAtCursor(ta, text) {
-  const s = ta.selectionStart ?? ta.value.length;
-  const e = ta.selectionEnd ?? ta.value.length;
-  ta.value = ta.value.slice(0, s) + text + ta.value.slice(e);
-  const pos = s + text.length;
-  ta.selectionStart = ta.selectionEnd = pos;
+function ensurePasteThumbStrip(ta) {
+  let strip = ta.previousElementSibling;
+  if (strip?.classList.contains('paste-thumbs')) return strip;
+  strip = document.createElement('div');
+  strip.className = 'paste-thumbs';
+  ta.parentNode.insertBefore(strip, ta);
+  return strip;
+}
+function appendPasteThumb(strip, file) {
+  const img = document.createElement('img');
+  img.className = 'paste-thumb';
+  img.src = URL.createObjectURL(file);
+  img.alt = file.name;
+  img.title = file.name;
+  strip.appendChild(img);
 }
 function wirePasteImages(ta, onImages) {
   if (!ta) return;
@@ -898,9 +907,15 @@ function wirePasteImages(ta, onImages) {
     if (!imgs.length) return;
     const hasText = [...(dt?.items || [])].some((it) => it.kind === 'string');
     if (!hasText) e.preventDefault();
-    insertAtCursor(ta, imgs.map((f) => `[image: ${f.name}]`).join('\n'));
-    ta.dispatchEvent(new Event('input', { bubbles: true }));
-    await onImages(imgs);
+    const valid = imgs.filter((file) => {
+      if (file.size <= MAX_ATTACH_MB * 1024 * 1024) return true;
+      toast(`${file.name} > ${MAX_ATTACH_MB}MB — skipped`, true);
+      return false;
+    });
+    if (!valid.length) return;
+    const strip = ensurePasteThumbStrip(ta);
+    valid.forEach((file) => appendPasteThumb(strip, file));
+    await onImages(valid);
   });
 }
 // Wire a drop-zone + hidden input + browse button to a handler. Ids are caller-supplied.

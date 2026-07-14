@@ -371,14 +371,17 @@ function usageSourceLabel(source) {
 // muted ink. (Bar and number both show headroom, not consumption.)
 function usageWindowHTML(label, win, provider, kind) {
   if (!win || !Number.isFinite(Number(win.usedPct))) {
-    return `<span class="usage-window w${kind} missing"><span class="usage-key">${label}</span><b>—</b></span>`;
+    return `<span class="usage-window-block w${kind} missing"><span class="usage-window missing"><span class="usage-key">${label}</span><b>—</b></span></span>`;
   }
   const used = clamp(win.usedPct);
   const remaining = clamp(100 - used);
   const tone = kind === '7d' ? 'muted' : meterTone(remaining);
-  const title = `${provider} ${label}: ${pctText(used)} used`;
-  return `<span class="usage-window w${kind} tone-${tone}" title="${esc(title)}">
-    <span class="usage-key">${label}</span><span class="meter tone-${tone}" style="--pct:${remaining}%"><span></span></span><b>${pctText(remaining)}</b>
+  const resetAt = win.resetsAt ? (kind === '7d' ? fmtResetDay(win.resetsAt) : fmtResetIn(win.resetsAt)) : '';
+  const resetText = resetAt ? `RST ${resetAt}` : '';
+  const title = `${provider} ${label}: ${pctText(used)} used${resetText ? ` · ${resetText}` : ''}`;
+  return `<span class="usage-window-block w${kind} tone-${tone}" title="${esc(title)}">
+    <span class="usage-window"><span class="usage-key">${label}</span><span class="meter tone-${tone}" style="--pct:${remaining}%"><span></span></span><b>${pctText(remaining)}</b></span>
+    ${resetText ? `<span class="usage-reset-line">${esc(resetText)}</span>` : ''}
   </span>`;
 }
 
@@ -390,17 +393,10 @@ function usageProviderHTML(provider) {
   const src = plan ? `${plan}·OAUTH` : usageSourceLabel(u.source);
   // dot echoes the 5H tone (green = headroom, amber = running low, red = nearly spent)
   const tone5 = Number.isFinite(Number(u.fiveHour?.usedPct)) ? meterTone(clamp(100 - u.fiveHour.usedPct)) : 'muted';
-  const rst5 = u.fiveHour?.resetsAt ? fmtResetIn(u.fiveHour.resetsAt) : '';
-  const rstWk = u.weekly?.resetsAt ? fmtResetDay(u.weekly.resetsAt) : '';
-  // .usage-src + .usage-reset are surfaced on mobile (rich cards); desktop keeps the strip compact.
-  const reset = (rst5 || rstWk)
-    ? `<div class="usage-reset"><span>${rst5 ? `RST ${rst5}` : ''}</span><span>${rstWk ? `WK · ${rstWk}` : ''}</span></div>`
-    : '';
   return `<div class="usage-provider" title="${esc(title)}">
     <div class="usage-top"><span class="usage-dot tone-${tone5}"></span><span class="usage-name">${provider}</span>${src ? `<span class="usage-src">${esc(src)}</span>` : ''}</div>
     ${usageWindowHTML('5H', u.fiveHour, provider, '5h')}
     ${usageWindowHTML('7D', u.weekly, provider, '7d')}
-    ${reset}
   </div>`;
 }
 

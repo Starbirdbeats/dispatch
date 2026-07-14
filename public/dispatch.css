@@ -91,7 +91,7 @@ body {
   background: transparent;
   padding: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   flex: 0 0 auto;          /* size to content — never clip the % readout */
   min-width: 0;
@@ -100,18 +100,20 @@ body {
   color: var(--fg-dim);
   white-space: nowrap;
 }
-.usage-name { color: var(--fg); font-weight: 800; min-width: 44px; }
-/* desktop: dot + name flow inline with the windows; tier badge and reset footer are mobile-only */
+.usage-name { color: var(--fg); font-weight: 800; min-width: 44px; line-height: 10px; }
+/* desktop: dot + name flow inline with the windows; tier badge is mobile-only */
 .usage-top { display: contents; }
-.usage-src, .usage-reset { display: none; }
-.usage-dot { width: 8px; height: 8px; flex: 0 0 8px; display: inline-block; background: var(--fg-faint); }
+.usage-src { display: none; }
+.usage-dot { width: 8px; height: 8px; flex: 0 0 8px; display: inline-block; background: var(--fg-faint); margin-top: 1px; }
 .usage-dot.tone-live { background: var(--green); }
 .usage-dot.tone-warn { background: var(--amber); }
 .usage-dot.tone-stuck { background: var(--red); }
+.usage-window-block { display: inline-flex; flex-direction: column; gap: 2px; min-width: 0; }
 .usage-window { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .usage-window b { color: var(--fg); font-size: 10px; font-variant-numeric: tabular-nums; }
 .usage-window.missing b { color: var(--fg-faint); }
 .usage-key { color: var(--fg-faint); font-size: 8px; }
+.usage-reset-line { color: var(--fg-faint); font-size: 7px; line-height: 1; letter-spacing: 0.05em; font-variant-numeric: tabular-nums; }
 .meter {
   --pct: 0%;
   width: 44px;
@@ -643,18 +645,19 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
   .actions { grid-column: 2; }   /* reset off the desktop col-5 track */
   .health { grid-column: 1 / -1; order: 3; border-top: 1px solid var(--line); font-size: 9px; flex-wrap: wrap; gap: 6px; }
 
-  /* usage: two boxed provider cards (name + tier, 5H/7D bars, reset footer) */
+  /* usage: two boxed provider cards (name + tier, 5H/7D bars with per-window resets) */
   .usage-strip { grid-column: 1 / -1; order: 4; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; flex-wrap: nowrap; }
   .usage-provider { flex: initial; flex-direction: column; align-items: stretch; gap: 7px; padding: 10px 11px; font-size: 9px; background: var(--bg-1); border: 1px solid var(--line); }
   .usage-top { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
   .usage-dot { display: none; }
-  .usage-name { min-width: 0; font-size: 12px; margin-right: auto; }
+  .usage-name { min-width: 0; font-size: 12px; line-height: 1; margin-right: auto; }
   .usage-src { display: inline; color: var(--fg-faint); font-size: 8px; letter-spacing: 0.09em; }
+  .usage-window-block { gap: 3px; }
   .usage-window { min-width: 0; gap: 8px; }
   .usage-window .meter { flex: 1 1 auto; width: auto; }
   .usage-window .usage-key { flex: 0 0 18px; font-size: 9px; }
   .usage-window b { font-size: 11px; }
-  .usage-reset { display: flex; justify-content: space-between; gap: 6px; margin-top: 1px; padding-top: 5px; border-top: 1px dashed var(--line); color: var(--fg-faint); font-size: 8px; letter-spacing: 0.05em; }
+  .usage-reset-line { padding-left: 26px; font-size: 8px; }
 
   #topbar .queueinfo { display: none; }  /* #topbar > * would out-specify a bare class */
   .actions { justify-content: flex-end; flex-wrap: wrap; gap: 6px; }

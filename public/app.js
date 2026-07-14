@@ -928,6 +928,7 @@ function render() {
   // Settings modal never fully re-renders on state changes (it holds unsaved edits), but
   // the provider stepper must flip live when a login completes — patch just that region.
   if (S.modal?.type === 'settings') updateStepperUI();
+  if (S.modal?.type === 'archive') renderArchiveModal();
 }
 
 function renderTopbar() {
@@ -1004,6 +1005,73 @@ function phaseAbbrev(name) {
 function queuePos(id) {
   const i = (S.data.runs.queued || []).indexOf(id);
   return i < 0 ? '?' : i + 1;
+}
+
+function stopTicketAction(e) {
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+function defaultRestoreColumnId() {
+  return (cols().find((c) => c.role === 'terminal') || cols().at(-1) || {}).id || '';
+}
+
+function ticketActionButtonsHTML(t, className = 'ticket-actions') {
+  const classes = ['ticket-actions', className].filter(Boolean).join(' ');
+  return `<span class="${classes}" data-ticket-actions>
+    <button type="button" class="ticket-icon" data-ticket-archive="${esc(t.id)}" title="Archive ticket" aria-label="Archive ${esc(t.title)}">A</button>
+    <button type="button" class="ticket-icon danger" data-ticket-delete="${esc(t.id)}" title="Delete ticket" aria-label="Delete ${esc(t.title)}">X</button>
+  </span>`;
+}
+
+function wireTicketActionButtons(root = document) {
+  for (const b of root.querySelectorAll('[data-ticket-archive]')) {
+    b.onclick = (e) => {
+      stopTicketAction(e);
+      archiveTicket(b.dataset.ticketArchive, { closeTicketModal: S.modal?.type === 'ticket' });
+    };
+  }
+  for (const b of root.querySelectorAll('[data-ticket-delete]')) {
+    b.onclick = (e) => {
+      stopTicketAction(e);
+      deleteTicket(b.dataset.ticketDelete, { closeTicketModal: S.modal?.type === 'ticket' });
+    };
+  }
+}
+
+async function archiveTicket(id, { closeTicketModal = false } = {}) {
+  const t = S.data.tickets.find((x) => x.id === id);
+  const active = S.data.runs.running.includes(id) || S.data.runs.queued.includes(id);
+  const msg = active
+    ? `Archive "${t?.title || id}" and stop its queued/running work? It will be hidden from the board but kept in the archive.`
+    : `Archive "${t?.title || id}"? It will be hidden from the board but kept in the archive.`;
+  if (!confirm(msg)) return;
+  try {
+    await api(`/api/tickets/${id}/archive`, 'POST', {});
+    toast('ARCHIVED');
+  } catch (e) { alertErr(e); return; }
+  if (closeTicketModal && S.modal?.type === 'ticket' && S.modal.id === id) closeModal();
+  await loadState();
+}
+
+async function deleteTicket(id, { closeTicketModal = false, archived = false } = {}) {
+  const t = S.data.tickets.find((x) => x.id === id);
+  const noun = archived ? 'archived ticket' : 'ticket';
+  if (!confirm(`Permanently delete ${noun} "${t?.title || id}" + dossier + transcripts + attachments?`)) return;
+  try {
+    await api(`/api/tickets/${id}`, 'DELETE');
+    toast('DELETED');
+  } catch (e) { alertErr(e); return; }
+  if (closeTicketModal && S.modal?.type === 'ticket' && S.modal.id === id) closeModal();
+  await loadState();
+}
+
+async function restoreTicket(id, columnId = defaultRestoreColumnId()) {
+  try {
+    await api(`/api/tickets/${id}/unarchive`, 'POST', { columnId });
+    toast('RESTORED');
+  } catch (e) { alertErr(e); return; }
+  await loadState();
 }
 
 function renderBoard() {
@@ -1092,9 +1160,10 @@ function chipEl(t, c) {
   el.className = `chip card status-${st}`;
   el.dataset.id = t.id;
   el.draggable = true;
-  el.innerHTML = `<span class="led ${st}"></span><span class="title">${esc(t.title)}</span>`;
+  el.innerHTML = `<span class="led ${st}"></span><span class="title">${esc(t.title)}</span>${ticketActionButtonsHTML(t, 'chip-actions')}`;
   el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/ticket', t.id); el.classList.add('dragging'); });
   el.addEventListener('dragend', () => el.classList.remove('dragging'));
+  wireTicketActionButtons(el);
   el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
   return el;
 }
@@ -1108,7 +1177,7 @@ function inflightEl() {
   const track = document.createElement('div');
   track.className = 'track';
   const ids = [...running, ...queued.filter((id) => !running.includes(id))];
-  const rows = ids.map((id) => S.data.tickets.find((t) => t.id === id)).filter(Boolean);
+  const rows = ids.map((id) => S.data.tickets.find((t) => t.id === id)).filter((t) => t && !t.archived);
   if (!rows.length) {
     track.innerHTML = '<div class="inflight-empty">NO RUNS IN FLIGHT — queue a ticket and watch it move down the line</div>';
   } else {
@@ -1146,7 +1215,9 @@ function trackRowEl(t) {
     </div>
     <div><div class="seg-row">${segs}</div><div class="seg-labels">${labels}</div></div>
     <div class="track-phase${isQ ? ' queued' : ''}">${isQ ? `Queued · pos ${queuePos(t.id)}` : `▸ ${esc(c.name || '?')}`}</div>
-    ${isRun && startMs ? `<div class="track-elapsed" data-tplus="${startMs}">T+00:00</div>` : '<div class="track-elapsed none">—</div>'}`;
+    ${isRun && startMs ? `<div class="track-elapsed" data-tplus="${startMs}">T+00:00</div>` : '<div class="track-elapsed none">—</div>'}
+    ${ticketActionButtonsHTML(t, 'track-actions')}`;
+  wireTicketActionButtons(row);
   row.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
   return row;
 }
@@ -1236,11 +1307,12 @@ function mcardEl(t, c) {
     ? `<span class="t run"><span data-tplus="${startMs}">T+00:00</span> · RUNNING</span>`
     : `<span class="t">${esc(st.toUpperCase())}</span>`;
   el.innerHTML = `
-    <div class="mc-top"><span class="led ${st}"></span><span class="title">${esc(t.title)}</span></div>
+    <div class="mc-top"><span class="led ${st}"></span><span class="title">${esc(t.title)}</span>${ticketActionButtonsHTML(t, 'mcard-actions')}</div>
     <div class="mc-meta"><span>${esc(ticketNo(t))}</span><span>${esc(t.workspace.split('/').pop())}</span></div>
     <div class="mc-harness"><span class="dot" style="background:${stationAccent(c)}"></span>${esc(stationHarnessLabel(c))}</div>
     ${last ? `<div class="mc-last">▸ ${esc(last.text)}</div>` : ''}
     <div class="mc-foot">${foot}<span class="tap">tap to open ▸</span></div>`;
+  wireTicketActionButtons(el);
   el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
   return el;
 }
@@ -1459,6 +1531,7 @@ function renderTicketModal() {
      <button class="btn" id="btn-move">[ MOVE ]</button>
      <button class="btn" id="btn-run" ${running ? 'disabled' : ''}>[ ${effective(t, cols().find((c) => c.id === t.columnId) || {}).type === 'human' ? 'START PIPELINE' : 'RUN NOW'} ]</button>
      <button class="btn btn-danger" id="btn-stop" ${running || S.data.runs.queued.includes(t.id) ? '' : 'disabled'}>[ STOP ]</button>
+     <button class="btn" id="btn-archive-ticket">[ ARCHIVE ]</button>
      <button class="btn btn-danger" id="btn-del">[ DELETE ]</button>`
   );
 
@@ -1471,7 +1544,8 @@ function renderTicketModal() {
     else toast(`NOT QUEUED: ${r.reason || 'unknown'}`, true);
   }).catch(alertErr);
   $('#btn-stop').onclick = () => api(`/api/tickets/${t.id}/stop`, 'POST', {}).then(() => toast('STOP SIGNAL SENT')).catch(alertErr);
-  $('#btn-del').onclick = () => { if (confirm('Delete ticket + dossier + transcripts?')) api(`/api/tickets/${t.id}`, 'DELETE').then(closeModal).catch(alertErr); };
+  $('#btn-archive-ticket').onclick = () => archiveTicket(t.id, { closeTicketModal: true });
+  $('#btn-del').onclick = () => deleteTicket(t.id, { closeTicketModal: true, archived: t.archived });
 
   renderDiagBanner(t);
 
@@ -2125,29 +2199,52 @@ function renderStagedAttachments() {
 /* ---- archive modal ---- */
 function renderArchiveModal() {
   const items = archivedTickets();
-  const rows = items.map((t) => `
+  const restoreDefault = defaultRestoreColumnId();
+  const restoreOptions = (selected = restoreDefault) => cols().map((c) =>
+    `<option value="${esc(c.id)}" ${c.id === selected ? 'selected' : ''}>${esc(c.name)}</option>`
+  ).join('');
+  const rows = items.map((t) => {
+    const current = cols().find((c) => c.id === t.columnId);
+    return `
     <div class="arch-item" data-open="${t.id}">
       <div class="arch-main">
-        <div class="arch-title">${esc(t.title)}</div>
-        <div class="arch-meta"><span>${esc(t.workspace.split('/').pop())}</span>${t.archivedAt ? `<span>ARCHIVED ${esc(t.archivedAt.replace('T', ' ').slice(0, 16))}</span>` : ''}</div>
+        <div class="arch-title">${esc(ticketNo(t))} · ${esc(t.title)}</div>
+        <div class="arch-meta">
+          <span>${esc(t.workspace.split('/').pop())}</span>
+          <span>FROM ${esc(current?.name || '?')}</span>
+          ${t.archivedAt ? `<span>ARCHIVED ${esc(t.archivedAt.replace('T', ' ').slice(0, 16))}</span>` : ''}
+        </div>
       </div>
-      <button class="btn arch-restore" data-restore="${t.id}">[ RESTORE ]</button>
-    </div>`).join('');
+      <div class="arch-actions">
+        <select class="arch-dest" data-restore-dest="${esc(t.id)}" aria-label="Restore destination for ${esc(t.title)}">${restoreOptions()}</select>
+        <button class="btn arch-restore" data-restore="${esc(t.id)}">[ RESTORE ]</button>
+        <button class="btn btn-danger arch-delete" data-archive-delete="${esc(t.id)}">[ DELETE ]</button>
+      </div>
+    </div>`;
+  }).join('');
   shell(
     `ARCHIVE <span style="color:var(--fg-faint);font-size:10px">${String(items.length).padStart(2, '0')} TICKETS</span>`,
     `<div class="panel-body">${items.length
       ? `<div class="arch-list">${rows}</div>`
-      : '<div class="arch-empty">ARCHIVE EMPTY — archive a done ticket and it lands here</div>'}</div>`
+      : '<div class="arch-empty">ARCHIVE EMPTY — archive a ticket and it lands here</div>'}</div>`
   );
   for (const el of document.querySelectorAll('[data-open]')) {
     el.onclick = () => pushModal({ type: 'ticket', id: el.dataset.open, tab: 'overview' });
   }
   for (const el of document.querySelectorAll('[data-restore]')) {
     el.onclick = (e) => {
-      e.stopPropagation(); // don't open the ticket modal underneath
-      api(`/api/tickets/${el.dataset.restore}/unarchive`, 'POST', {})
-        .then(() => { toast('RESTORED'); loadState().then(() => { if (S.modal?.type === 'archive') renderArchiveModal(); }); })
-        .catch(alertErr);
+      stopTicketAction(e);
+      const dest = el.closest('.arch-item')?.querySelector('[data-restore-dest]')?.value || restoreDefault;
+      restoreTicket(el.dataset.restore, dest);
+    };
+  }
+  for (const el of document.querySelectorAll('[data-restore-dest]')) {
+    el.onclick = stopTicketAction;
+  }
+  for (const el of document.querySelectorAll('[data-archive-delete]')) {
+    el.onclick = (e) => {
+      stopTicketAction(e);
+      deleteTicket(el.dataset.archiveDelete, { archived: true });
     };
   }
 }

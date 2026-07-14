@@ -6,7 +6,7 @@
   "scripts": {
     "test": "node --test",
     "start": "node server.mjs",
-    "test:e2e": "node scripts/e2e/setup-ui.mjs && node scripts/e2e/providers-stepper.mjs && node scripts/e2e/url-routing.mjs && node scripts/e2e/board-responsive.mjs",
+    "test:e2e": "node scripts/e2e/setup-ui.mjs && node scripts/e2e/providers-stepper.mjs && node scripts/e2e/url-routing.mjs && node scripts/e2e/board-responsive.mjs && node scripts/e2e/archive-delete.mjs",
     "screenshots": "node scripts/e2e/capture-readme-screenshots.mjs"
   },
   "keywords": [],

@@ -803,17 +803,22 @@ app.post('/api/tickets/:id/move', (req, res) => {
 });
 
 // Archive is a soft flag: the ticket keeps its column, dossier, and transcripts but drops
-// off the board. Only completed work (terminal column) can be archived.
+// off the board. Archiving is allowed from any phase and removes queued work first.
 app.post('/api/tickets/:id/archive', (req, res) => {
   const t = store.tickets.get(req.params.id);
   if (!t) return res.status(404).json({ error: 'not found' });
-  const col = store.column(t.columnId);
-  if (col?.role !== 'terminal') return res.status(400).json({ error: 'only completed (terminal) tickets can be archived' });
+  const wasActive = Boolean(t.activeRun);
+  runner.stop(t.id);
+  if (t.status === 'queued') t.status = 'idle';
+  delete t.pendingWake;
+  delete t.retryAt;
   t.archived = true;
   t.archivedAt = new Date().toISOString();
-  // reclaim scratch + trim run journals now that it's done being worked
-  const { removed } = store.pruneTicketData(t.id, { keepRuns: store.board.settings.keepRunsPerTicket ?? 5 });
-  if (removed.length) store.appendActivity(t.id, { kind: 'system', by: 'engine', text: `pruned on archive: removed ${removed.length} scratch item(s) — ${removed.slice(0, 6).join(', ')}${removed.length > 6 ? '…' : ''}` });
+  // Reclaim scratch + trim run journals only once no process is still using the ticket dir.
+  if (!wasActive) {
+    const { removed } = store.pruneTicketData(t.id, { keepRuns: store.board.settings.keepRunsPerTicket ?? 5 });
+    if (removed.length) store.appendActivity(t.id, { kind: 'system', by: 'engine', text: `pruned on archive: removed ${removed.length} scratch item(s) — ${removed.slice(0, 6).join(', ')}${removed.length > 6 ? '…' : ''}` });
+  }
   store.appendActivity(t.id, { kind: 'system', by: 'human', text: 'archived' });
   store.saveTicket(t.id);
   broadcast({ type: 'state-changed' });
@@ -821,11 +826,19 @@ app.post('/api/tickets/:id/archive', (req, res) => {
 });
 
 app.post('/api/tickets/:id/unarchive', (req, res) => {
-  const t = store.tickets.get(req.params.id);
+  let t = store.tickets.get(req.params.id);
   if (!t) return res.status(404).json({ error: 'not found' });
+  const requested = req.body?.columnId ? store.column(req.body.columnId) : null;
+  const target = requested || store.board.columns.find((c) => c.role === 'terminal') || store.column(t.columnId);
+  if (target && target.id !== t.columnId) {
+    t = runner.moveTicket(t.id, target.id, { by: 'human', autoRun: false }) || t;
+  }
   delete t.archived;
   delete t.archivedAt;
-  store.appendActivity(t.id, { kind: 'system', by: 'human', text: 'restored from archive' });
+  delete t.pendingWake;
+  delete t.retryAt;
+  store.appendActivity(t.id, { kind: 'system', by: 'human', text: `restored from archive${target ? ` to ${target.name}` : ''}` });
+  store.saveTicket(t.id);
   broadcast({ type: 'state-changed' });
   res.json(t);
 });

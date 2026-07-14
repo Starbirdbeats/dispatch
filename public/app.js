@@ -959,7 +959,7 @@ function renderTopbar() {
     const reasons = setupNotice();
     notice.innerHTML = reasons.length
       ? `<span class="warn">SETUP REQUIRED — ${reasons.join(' • ')}. <button class="btn btn-accent" id="s-open-setup">[ OPEN SETUP ]</button></span>`
-      : '<span class="muted">SETUP READY</span>';
+      : '';
   }
   const openNotice = $('#s-open-setup');
   if (openNotice) openNotice.onclick = () => pushModal({ type: 'settings', tab: 'providers' });

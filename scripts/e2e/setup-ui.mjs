@@ -68,6 +68,23 @@ function screenshotsDir() {
     const notice = await page.$eval('#setup-notice', (el) => el.textContent || '');
     assert.ok(notice.includes('SETUP REQUIRED'), notice);
 
+    await waitForState(page, harness.base, (s) => (
+      s.setup.providers.claude?.installed &&
+      s.setup.providers.claude?.authenticated &&
+      s.setup.providers.codex?.installed &&
+      s.setup.providers.codex?.authenticated
+    ), 'providers authenticated');
+    const completeRes = await fetch(`${harness.base}/api/setup/complete`, { method: 'POST' });
+    assert.equal(completeRes.ok, true);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => (document.querySelector('#board')?.children.length || 0) > 0);
+    const readyNotice = await page.$eval('#setup-notice', (el) => ({
+      text: el.textContent || '',
+      display: getComputedStyle(el).display,
+    }));
+    assert.equal(readyNotice.text.trim(), '');
+    assert.equal(readyNotice.display, 'none');
+
     // Open settings and confirm setup controls and status cards render.
     await clickFresh(page, '#btn-settings');
     await page.waitForSelector('.panel-head h3', { timeout: 3000 });

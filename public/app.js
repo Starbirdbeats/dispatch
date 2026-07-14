@@ -1011,6 +1011,7 @@ const dropzoneHTML = (dropId, inputId, browseId) =>
 
 /* ---------- render ---------- */
 function render() {
+  renderUpdateButton();
   renderTopbar();
   renderBoard();
   if (S.modal?.type === 'ticket') {
@@ -1026,6 +1027,15 @@ function render() {
   // the provider stepper must flip live when a login completes — patch just that region.
   if (S.modal?.type === 'settings') updateStepperUI();
   if (S.modal?.type === 'archive') renderArchiveModal();
+}
+
+function renderUpdateButton() {
+  const btn = $('#btn-update');
+  if (!btn) return;
+  const u = S.data?.updateStatus;
+  const behind = u && !u.error ? (u.behind || 0) : 0;
+  btn.hidden = behind <= 0;
+  if (behind > 0) btn.textContent = `[ ↑ UPDATE ${behind} ]`;
 }
 
 function renderTopbar() {
@@ -2888,6 +2898,18 @@ setInterval(() => {
 $('#btn-new').onclick = () => { S.newAttachments = []; S.newOverrides = {}; clearNewPasteThumbs(); pushModal({ type: 'new' }); };
 $('#btn-settings').onclick = () => pushModal({ type: 'settings' });
 $('#btn-archive').onclick = () => pushModal({ type: 'archive' });
+$('#btn-update').onclick = async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  try {
+    const r = await api('/api/update/apply', 'POST', {});
+    toast(r.applied ? 'UPDATED — RESTART DISPATCH TO APPLY' : 'ALREADY UP TO DATE');
+  } catch (err) {
+    alertErr(err);
+  } finally {
+    btn.disabled = false;
+  }
+};
 $('#btn-pause').onclick = () => {
   const cap = S.data.board.settings.maxConcurrent ?? 2;
   let next;

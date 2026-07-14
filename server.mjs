@@ -18,6 +18,7 @@ import {
   validateEnvKey,
 } from './engine/envfile.mjs';
 import { AUTH_COMMANDS, createAuthSessions } from './engine/authflow.mjs';
+import { checkUpdateStatus, createGitRunner, parseAheadBehind } from './engine/update-status.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENV_FILE = path.resolve(process.env.DISPATCH_ENV_FILE || path.join(__dirname, '.env'));
@@ -48,6 +49,8 @@ let health = {
   claude: { ok: false, installed: false, authenticated: false, version: null, authDetail: '', error: null },
   codex: { ok: false, installed: false, authenticated: false, version: null, authDetail: '', error: null },
 };
+let updateStatus = { behind: 0, ahead: 0, branch: null, error: null, checkedAt: null };
+let updateCheckInFlight = false;
 probe().then((h) => { health = h; broadcast({ type: 'state-changed' }); });
 
 // Keep setup status consistent across state refreshes and settings screens.
@@ -193,6 +196,28 @@ function broadcast(msg) {
 }
 
 const runner = new Runner(store, broadcast);
+const git = createGitRunner(__dirname);
+
+async function refreshUpdateStatus({ forceBroadcast = false } = {}) {
+  if (updateCheckInFlight) return updateStatus;
+  updateCheckInFlight = true;
+  try {
+    const next = await checkUpdateStatus({ git });
+    const changed = next.behind !== updateStatus.behind
+      || next.ahead !== updateStatus.ahead
+      || Boolean(next.error) !== Boolean(updateStatus.error);
+    updateStatus = next;
+    if (forceBroadcast || changed) broadcast({ type: 'state-changed' });
+    return updateStatus;
+  } finally {
+    updateCheckInFlight = false;
+  }
+}
+
+refreshUpdateStatus({ forceBroadcast: true }).catch(() => {});
+setInterval(() => {
+  refreshUpdateStatus().catch(() => {});
+}, 5 * 60 * 1000);
 
 function writeTextAtomic(file, data) {
   const tmp = `${file}.${crypto.randomBytes(4).toString('hex')}.tmp`;
@@ -503,12 +528,59 @@ setInterval(() => { try { pruneSweep(); } catch (e) { console.error('prune-sweep
 runner.recover();
 
 // ---- state ----
+app.post('/api/update/apply', async (_req, res) => {
+  try {
+    try {
+      await git(['fetch', '--quiet', 'origin', 'main'], 30_000);
+    } catch (e) {
+      return res.status(502).json({ error: `fetch failed: ${e.message || e}` });
+    }
+
+    const behindOut = await git(['rev-list', '--count', 'refs/heads/main..refs/remotes/origin/main']);
+    const { behind } = parseAheadBehind(behindOut, '0');
+    if (behind <= 0) {
+      updateStatus = await checkUpdateStatus({ git });
+      broadcast({ type: 'state-changed' });
+      return res.json({ ok: true, applied: false, message: 'already up to date' });
+    }
+
+    try {
+      await git(['merge-base', '--is-ancestor', 'refs/heads/main', 'refs/remotes/origin/main']);
+    } catch {
+      return res.status(409).json({ error: 'local main has diverged from origin/main — resolve manually' });
+    }
+
+    const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => null);
+    if (branch === 'main') {
+      const status = await git(['status', '--porcelain']);
+      if (status) return res.status(409).json({ error: 'working tree has uncommitted changes — commit or stash first' });
+      await git(['merge', '--ff-only', 'origin/main'], 30_000);
+    } else {
+      await git(['fetch', '--quiet', 'origin', 'main:main'], 30_000);
+    }
+
+    updateStatus = await checkUpdateStatus({ git });
+    broadcast({ type: 'state-changed' });
+    res.json({
+      ok: true,
+      applied: true,
+      behind: 0,
+      branch,
+      needsRestart: true,
+      message: 'local main updated — restart Dispatch to run the new code',
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'update failed' });
+  }
+});
+
 app.get('/api/state', (_req, res) => {
   res.json({
     board: store.board,
     tickets: [...store.tickets.values()],
     registry: REGISTRY,
     health,
+    updateStatus,
     setup: setupStatus(),
     usage: USAGE,
     runs: runner.snapshot(),

@@ -614,6 +614,20 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 /* error toasts carry actionable guidance — clickable to dismiss, and visually louder */
 #toast.err { border-color: var(--red); color: var(--red); background: var(--bg-1); pointer-events: auto; cursor: pointer; }
 
+/* ---------- self-update button ---------- */
+.update-fab {
+  position: fixed; right: 16px; bottom: 16px; z-index: 3000;
+  background: var(--bg-1); color: var(--red);
+  border: 1px solid var(--red); padding: 8px 12px;
+  font: inherit; font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em;
+  cursor: pointer; box-shadow: 4px 4px 0 rgba(46, 42, 32, 0.12);
+  transition: background .12s steps(2), color .12s steps(2), transform .12s steps(2);
+}
+.update-fab:hover { background: var(--red); color: var(--bg); transform: translate(-1px, -1px); }
+.update-fab:disabled { color: var(--fg-faint); border-color: var(--bg-2); cursor: not-allowed; box-shadow: none; }
+.update-fab[hidden] { display: none; }
+@media (max-width: 760px) { .update-fab { right: 12px; bottom: 12px; font-size: 11px; } }
+
 /* ---------- mobile ---------- */
 @media (max-width: 760px) {
   body { overflow: auto; }

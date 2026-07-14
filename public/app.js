@@ -373,11 +373,7 @@ function usageWindowHTML(label, win, provider, kind) {
   const used = clamp(win.usedPct);
   const remaining = clamp(100 - used);
   const tone = kind === '7d' ? 'muted' : meterTone(remaining);
-  const title = [
-    `${provider} ${label}: ${pctText(remaining)} remaining`,
-    `${pctText(used)} used`,
-    win.resetsAt ? `resets ${fmtTs(win.resetsAt)}` : '',
-  ].filter(Boolean).join(' · ');
+  const title = `${provider} ${label}: ${pctText(used)} used`;
   return `<span class="usage-window w${kind} tone-${tone}" title="${esc(title)}">
     <span class="usage-key">${label}</span><span class="meter tone-${tone}" style="--pct:${remaining}%"><span></span></span><b>${pctText(remaining)}</b>
   </span>`;

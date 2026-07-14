@@ -85,7 +85,7 @@ body {
 /* desktop: meters sit bare on the header paper — no box, no dividers, just whitespace between providers */
 .usage-strip {
   align-items: center;
-  gap: 22px;
+  gap: 14px;
 }
 .usage-provider {
   background: transparent;
@@ -101,15 +101,14 @@ body {
   white-space: nowrap;
 }
 .usage-name { color: var(--fg); font-weight: 800; min-width: 44px; }
-/* desktop: dot + name flow inline with the 5H window; tier badge, 7D and reset footer are mobile-only */
+/* desktop: dot + name flow inline with the windows; tier badge and reset footer are mobile-only */
 .usage-top { display: contents; }
 .usage-src, .usage-reset { display: none; }
-.usage-strip .usage-window.w7d { display: none; }
 .usage-dot { width: 8px; height: 8px; flex: 0 0 8px; display: inline-block; background: var(--fg-faint); }
 .usage-dot.tone-live { background: var(--green); }
 .usage-dot.tone-warn { background: var(--amber); }
 .usage-dot.tone-stuck { background: var(--red); }
-.usage-window { display: flex; align-items: center; gap: 5px; min-width: 82px; }
+.usage-window { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .usage-window b { color: var(--fg); font-size: 10px; font-variant-numeric: tabular-nums; }
 .usage-window.missing b { color: var(--fg-faint); }
 .usage-key { color: var(--fg-faint); font-size: 8px; }
@@ -602,7 +601,6 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
   .usage-provider { flex: initial; flex-direction: column; align-items: stretch; gap: 7px; padding: 10px 11px; font-size: 9px; background: var(--bg-1); border: 1px solid var(--line); }
   .usage-top { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
   .usage-dot { display: none; }
-  .usage-strip .usage-window.w7d { display: flex; }
   .usage-name { min-width: 0; font-size: 12px; margin-right: auto; }
   .usage-src { display: inline; color: var(--fg-faint); font-size: 8px; letter-spacing: 0.09em; }
   .usage-window { min-width: 0; gap: 8px; }

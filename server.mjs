@@ -35,7 +35,7 @@ const [{ Store, DATA_DIR, providerEnabled, enabledProviders }, { Runner }, notif
   import('./registry.mjs'),
 ]);
 const { telegramConfig, sendTelegram } = notify;
-const { USAGE, codexRateLimitWindows, loadUsageCache, setProviderUsage, setProviderPlan } = usage;
+const { USAGE, extractCodexRateLimitsSnapshot, loadUsageCache, setProviderUsage, setProviderPlan } = usage;
 const { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe, readClaudeOAuthToken } = registry;
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
 
@@ -266,18 +266,35 @@ async function probeClaudeUsage() {
   }
 }
 
-function fetchCodexRateLimits({ timeoutMs = 8000 } = {}) {
+function fetchCodexRateLimits({ timeoutMs = 15_000 } = {}) {
   return new Promise((resolve, reject) => {
-    const proc = spawn('codex', ['app-server'], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const proc = spawn('codex', ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'] });
     const rl = readline.createInterface({ input: proc.stdout });
     let settled = false;
     let reqId = 1;
+    let rateLimitReqId = null;
+    let stderr = '';
+    const stderrSnippet = () => stderr.replace(/\s+/g, ' ').trim().slice(0, 500);
+    proc.stderr?.setEncoding?.('utf8');
+    proc.stderr?.on('data', (chunk) => {
+      stderr += String(chunk);
+      if (stderr.length > 2000) stderr = stderr.slice(-2000);
+    });
+    const withStderr = (err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      const snippet = stderrSnippet();
+      return new Error(snippet ? `${msg}; stderr: ${snippet}` : msg);
+    };
+    const rpcErrorMessage = (prefix, error) => {
+      const msg = error?.message || JSON.stringify(error) || 'unknown error';
+      return `${prefix}: ${msg}`;
+    };
     const finish = (err, val) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       try { proc.kill(); } catch {}
-      err ? reject(err) : resolve(val);
+      err ? reject(withStderr(err)) : resolve(val);
     };
     const send = (o) => {
       if (!proc.stdin || proc.stdin.destroyed || proc.stdin.writableEnded) return false;
@@ -295,11 +312,12 @@ function fetchCodexRateLimits({ timeoutMs = 8000 } = {}) {
     rl.on('line', (line) => {
       let msg; try { msg = JSON.parse(line); } catch { return; }
       if (msg.id === 1) {
-        if (msg.error) return finish(new Error(`initialize: ${msg.error.message}`));
+        if (msg.error) return finish(new Error(rpcErrorMessage('initialize', msg.error)));
         send({ jsonrpc: '2.0', method: 'initialized' });
-        send({ jsonrpc: '2.0', id: ++reqId, method: 'account/rateLimits/read' });
-      } else if (msg.id === 2) {
-        if (msg.error) return finish(new Error(`rateLimits/read: ${msg.error.message}`));
+        rateLimitReqId = ++reqId;
+        send({ jsonrpc: '2.0', id: rateLimitReqId, method: 'account/rateLimits/read' });
+      } else if (msg.id === rateLimitReqId) {
+        if (msg.error) return finish(new Error(rpcErrorMessage('rateLimits/read', msg.error)));
         finish(null, msg.result);
       }
     });
@@ -307,33 +325,15 @@ function fetchCodexRateLimits({ timeoutMs = 8000 } = {}) {
   });
 }
 
-function mapCodexRateLimitWindow(win) {
-  if (!win) return null;
-  return {
-    usedPct: win.usedPercent ?? win.used_percent ?? win.used_percentage,
-    resetsAt: win.resetsAt ?? win.resets_at,
-  };
-}
-
-function mapCodexRateLimits(snap, at) {
-  const byDuration = codexRateLimitWindows(snap, { at });
-  if (byDuration.fiveHour || byDuration.weekly) return byDuration;
-  return {
-    fiveHour: mapCodexRateLimitWindow(snap?.primary),
-    weekly: mapCodexRateLimitWindow(snap?.secondary),
-  };
-}
-
 async function probeCodexUsage() {
   const at = new Date().toISOString();
   try {
     const body = await fetchCodexRateLimits();
-    const snap = body?.rateLimitsByLimitId?.codex || body?.rateLimits;
-    if (!snap) throw new Error('rate limits missing');
-    const windows = mapCodexRateLimits(snap, at);
+    const windows = extractCodexRateLimitsSnapshot(body, { at });
+    if (!windows.fiveHour && !windows.weekly) throw new Error('rate limits missing');
     setProviderUsage('codex', {
-      fiveHour: windows.fiveHour,
-      weekly: windows.weekly,
+      fiveHour: windows.fiveHour || USAGE.codex.fiveHour,
+      weekly: windows.weekly || USAGE.codex.weekly,
       at,
       source: 'codex-app-server',
     });

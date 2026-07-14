@@ -138,8 +138,54 @@ export function codexRateLimitWindows(rateLimits, { at = new Date().toISOString(
   return out;
 }
 
+function mapCodexRateLimitWindow(win, atMs = Date.now()) {
+  if (!win || typeof win !== 'object') return null;
+  return normalizeUsageWindow({
+    usedPct: win.usedPct ?? win.usedPercent ?? win.used_percent ?? win.used_percentage,
+    resetsAt: win.resetsAt ?? win.resets_at ?? win.reset ?? win.resets_in_seconds,
+  }, atMs);
+}
+
+function mapCodexRateLimitsSnapshot(snap, { at = new Date().toISOString() } = {}) {
+  const byDuration = codexRateLimitWindows(snap, { at });
+  if (byDuration.fiveHour || byDuration.weekly) return byDuration;
+  const atMs = Date.parse(at) || Date.now();
+  return {
+    fiveHour: mapCodexRateLimitWindow(snap?.primary, atMs),
+    weekly: mapCodexRateLimitWindow(snap?.secondary, atMs),
+  };
+}
+
+function addCodexRateLimitCandidate(candidates, candidate) {
+  if (candidate && typeof candidate === 'object') candidates.push(candidate);
+}
+
+export function extractCodexRateLimitsSnapshot(body, { at = new Date().toISOString() } = {}) {
+  if (!body || typeof body !== 'object') return {};
+  const candidates = [];
+  const byLimitId = body.rateLimitsByLimitId || body.rate_limits_by_limit_id;
+  if (byLimitId && typeof byLimitId === 'object') {
+    addCodexRateLimitCandidate(candidates, byLimitId.codex);
+    for (const [limitId, candidate] of Object.entries(byLimitId)) {
+      if (limitId === 'codex') continue;
+      addCodexRateLimitCandidate(candidates, candidate);
+    }
+  }
+  addCodexRateLimitCandidate(candidates, body.rateLimits || body.rate_limits);
+  if (body.primary || body.secondary) addCodexRateLimitCandidate(candidates, body);
+
+  const out = {};
+  for (const candidate of candidates) {
+    const windows = mapCodexRateLimitsSnapshot(candidate, { at });
+    if (!out.fiveHour && windows.fiveHour) out.fiveHour = windows.fiveHour;
+    if (!out.weekly && windows.weekly) out.weekly = windows.weekly;
+    if (out.fiveHour && out.weekly) break;
+  }
+  return out;
+}
+
 export function applyCodexRateLimits(rateLimits, { at = new Date().toISOString(), source = 'codex-stream' } = {}) {
-  const windows = codexRateLimitWindows(rateLimits, { at });
+  const windows = extractCodexRateLimitsSnapshot(rateLimits, { at });
   let changed = false;
   for (const [window, data] of Object.entries(windows)) {
     changed = setProviderWindow('codex', window, data, { at, source }) || changed;

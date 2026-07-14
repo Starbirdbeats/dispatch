@@ -38,40 +38,57 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
 export function parseLine(line, state) {
   let obj;
   try { obj = JSON.parse(line); } catch { return null; }
+  const payload = obj.type === 'event_msg' && obj.payload && typeof obj.payload === 'object' ? obj.payload : null;
+  const event = payload || obj;
 
-  const sid = obj.thread_id || obj.session_id || obj.msg?.session_id
+  const sid = event.thread_id || event.session_id || obj.thread_id || obj.session_id || obj.msg?.session_id
+    || (event.type === 'session.created' ? event.session?.id : null)
     || (obj.type === 'session.created' ? obj.session?.id : null);
   if (sid) state.sessionId = sid;
 
-  if (obj.method === 'thread/tokenUsage/updated' && obj.params?.tokenUsage) {
-    applyThreadTokenUsage(obj.params.tokenUsage, state);
+  if (event.method === 'thread/tokenUsage/updated') {
+    captureRateLimits(
+      state,
+      event.params?.rateLimits,
+      event.params?.rate_limits,
+      event.params?.tokenUsage?.rateLimits,
+      event.params?.tokenUsage?.rate_limits,
+    );
+    if (event.params?.tokenUsage) applyThreadTokenUsage(event.params.tokenUsage, state);
     return null;
   }
 
-  const tokenCount = obj.type === 'token_count' ? obj : (obj.msg?.type === 'token_count' ? obj.msg : null);
+  const tokenCount = event.type === 'token_count' ? event : (obj.msg?.type === 'token_count' ? obj.msg : null);
   if (tokenCount) {
     applyTokenCount(tokenCount, state);
     return null;
   }
 
   // Current schema
-  if (obj.type === 'thread.started') return { kind: 'system', text: `codex thread ${obj.thread_id}` };
-  if (obj.type === 'item.completed' && obj.item) {
-    const it = obj.item;
+  if (event.type === 'thread.started') return { kind: 'system', text: `codex thread ${event.thread_id}` };
+  if (event.type === 'item.completed' && event.item) {
+    const it = event.item;
     if (it.type === 'agent_message' && it.text) { state.finalText = it.text; return { kind: 'text', text: it.text }; }
     if (it.type === 'reasoning' && it.text) return { kind: 'thinking', text: truncate(it.text) };
     if (it.type === 'command_execution') return { kind: 'tool', text: `$ ${truncate(it.command || '')}` };
     if (it.type === 'file_change') return { kind: 'tool', text: `edit: ${(it.changes || []).map((c) => c.path).join(', ')}` };
     return null;
   }
-  if (obj.type === 'turn.completed') {
-    state.exitInfo = { usage: obj.usage };
-    if (!state.usage && obj.usage) applyUsageFallback(obj.usage, state);
+  if (event.type === 'turn.completed') {
+    captureRateLimits(
+      state,
+      event.rateLimits,
+      event.rate_limits,
+      event.usage?.rateLimits,
+      event.usage?.rate_limits,
+    );
+    state.exitInfo = { usage: event.usage };
+    if (!state.usage && event.usage) applyUsageFallback(event.usage, state);
     return { kind: 'result', text: 'turn completed' };
   }
-  if (obj.type === 'turn.failed') {
-    state.exitInfo = { error: obj.error };
-    return { kind: 'error', text: `turn failed: ${JSON.stringify(obj.error)}` };
+  if (event.type === 'turn.failed') {
+    state.exitInfo = { error: event.error };
+    return { kind: 'error', text: `turn failed: ${JSON.stringify(event.error)}` };
   }
 
   // Legacy schema
@@ -88,6 +105,7 @@ export function parseLine(line, state) {
 function applyThreadTokenUsage(tokenUsage, state) {
   const total = tokenUsage.total || tokenUsage.total_token_usage || tokenUsage.totalTokenUsage;
   const model = tokenUsage.model || state.model || '';
+  captureRateLimits(state, tokenUsage.rateLimits, tokenUsage.rate_limits);
   applyUsageFallback(total, state, {
     model,
     windowTokens: tokenUsage.modelContextWindow || tokenUsage.model_context_window || CODEX_CONTEXT_WINDOW,
@@ -100,7 +118,7 @@ function applyTokenCount(obj, state) {
   const total = usage?.total_tokens ?? usage?.totalTokens;
   const model = info.model || obj.model || state.model || '';
   if (model) state.model = model;
-  state.rateLimits = obj.rate_limits || obj.rateLimits || info.rate_limits || info.rateLimits || state.rateLimits;
+  captureRateLimits(state, obj.rate_limits, obj.rateLimits, info.rate_limits, info.rateLimits);
   if (Number.isFinite(Number(total))) {
     state.usage = {
       contextTokens: Number(total),
@@ -111,6 +129,13 @@ function applyTokenCount(obj, state) {
   } else if (usage) {
     applyUsageFallback(usage, state, { model, windowTokens: info.model_context_window || info.modelContextWindow });
   }
+}
+
+function captureRateLimits(state, ...candidates) {
+  const rateLimits = candidates.find((candidate) => (
+    candidate && typeof candidate === 'object' && Object.keys(candidate).length > 0
+  ));
+  if (rateLimits) state.rateLimits = rateLimits;
 }
 
 function applyUsageFallback(usage, state, { model = state.model || '', windowTokens = CODEX_CONTEXT_WINDOW } = {}) {

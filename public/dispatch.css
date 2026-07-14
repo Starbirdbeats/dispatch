@@ -536,7 +536,8 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 .overrides-grid .h { color: var(--fg-faint); text-transform: uppercase; font-size: 9px; letter-spacing: 0.1em; }
 .overrides-grid select, .overrides-grid input { font-size: 10px; padding: 4px 6px; }
 
-.commentbox { display: flex; gap: 8px; margin-top: 12px; }
+.commentbox { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.commentbox .paste-thumbs { flex-basis: 100%; margin-bottom: -2px; }
 .commentbox textarea { min-height: 44px; flex: 1; }
 
 /* ---- diagnosis badge on cards ---- */

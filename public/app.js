@@ -8,6 +8,8 @@ const S = {
   liveContext: {},     // ticketId -> latest live context snapshot
   transcript: null,    // current transcript tab view state
   commentDraft: '',
+  commentThumbs: [],
+  commentThumbTicketId: null,
   mobilePhase: 0,      // <760px board: which phase (column index) is on screen
   railExpanded: {},    // desktop rail: colId -> showing all chips past the +N cap
 };
@@ -898,8 +900,9 @@ function appendPasteThumb(strip, file) {
   img.alt = file.name;
   img.title = file.name;
   strip.appendChild(img);
+  return { name: file.name, url: img.src };
 }
-function wirePasteImages(ta, onImages) {
+function wirePasteImages(ta, onImages, onThumbs) {
   if (!ta) return;
   ta.addEventListener('paste', async (e) => {
     const dt = e.clipboardData;
@@ -914,7 +917,8 @@ function wirePasteImages(ta, onImages) {
     });
     if (!valid.length) return;
     const strip = ensurePasteThumbStrip(ta);
-    valid.forEach((file) => appendPasteThumb(strip, file));
+    const thumbs = valid.map((file) => appendPasteThumb(strip, file));
+    if (onThumbs) onThumbs(thumbs);
     await onImages(valid);
   });
 }
@@ -1385,6 +1389,19 @@ function renderModal() {
   if (S.modal.type === 'archive') renderArchiveModal();
 }
 
+function clearCommentThumbs() {
+  for (const th of S.commentThumbs || []) {
+    if (th.url) URL.revokeObjectURL(th.url);
+  }
+  S.commentThumbs = [];
+  S.commentThumbTicketId = null;
+}
+
+function resetCommentThumbsForTicket(ticketId) {
+  if (S.commentThumbTicketId && S.commentThumbTicketId !== ticketId) clearCommentThumbs();
+  if (ticketId) S.commentThumbTicketId = ticketId;
+}
+
 /* ---------- URL-state routing: every modal open/tab is reflected in location.hash,
    so a hard refresh (or a shared/bookmarked link) lands back on the same view. ---------- */
 function modalToHash(modal) {
@@ -1427,6 +1444,8 @@ function writeModalHash(modal, { push }) {
 // Opens a *new* modal (as opposed to switching tabs inside the one that's already
 // open) — always pushes, so Back steps out to whatever was open before, or the board.
 function pushModal(modal) {
+  if (modal?.type === 'ticket' && modal.id !== S.modal?.id) resetCommentThumbsForTicket(modal.id);
+  else if (modal?.type !== 'ticket') clearCommentThumbs();
   S.modal = modal;
   renderModal();
   writeModalHash(modal, { push: true });
@@ -1446,6 +1465,8 @@ function renderForHash() {
     S.modal = null; S.transcript = null; $('#modal-root').innerHTML = '';
     return;
   }
+  if (modal?.type === 'ticket' && modal.id !== S.modal?.id) resetCommentThumbsForTicket(modal.id);
+  else if (modal?.type !== 'ticket') clearCommentThumbs();
   S.modal = modal;
   if (modal) renderModal();
   else { S.transcript = null; $('#modal-root').innerHTML = ''; }
@@ -1913,7 +1934,14 @@ async function uploadTicketFiles(t, fileList) {
   }).catch(alertErr);
 }
 
+function pasteThumbsHTML(thumbs = []) {
+  return `<div class="paste-thumbs">${thumbs.map((th) =>
+    `<img class="paste-thumb" src="${esc(th.url)}" alt="${esc(th.name)}" title="${esc(th.name)}">`
+  ).join('')}</div>`;
+}
+
 function renderActivity(body, t) {
+  resetCommentThumbsForTicket(t.id);
   const c = cols().find((x) => x.id === t.columnId) || {};
   const running = S.data.runs.running.includes(t.id) || S.data.runs.queued.includes(t.id);
   const agentIdle = c.role === 'agent' && !running;
@@ -1936,6 +1964,7 @@ function renderActivity(body, t) {
     <div id="wake-panel"></div>
 
     <div class="commentbox">
+      ${pasteThumbsHTML(S.commentThumbs)}
       <textarea id="f-comment" placeholder="${agentIdle ? 'comment — an agent will pick this up in ~60s' : (agentRunning ? 'comment — pick who picks this up next; it starts once the current run finishes' : 'comment — the current run will see this on its next turn')}">${esc(S.commentDraft)}</textarea>
       <button class="btn" id="btn-comment">[ POST ]</button>
     </div>
@@ -1947,7 +1976,10 @@ function renderActivity(body, t) {
     </div>` : ''}`;
 
   $('#f-comment').oninput = (e) => { S.commentDraft = e.target.value; };
-  wirePasteImages($('#f-comment'), (files) => uploadTicketFiles(t, files));
+  wirePasteImages($('#f-comment'), (files) => uploadTicketFiles(t, files), (thumbs) => {
+    resetCommentThumbsForTicket(t.id);
+    S.commentThumbs = (S.commentThumbs || []).concat(thumbs);
+  });
   if (canWake) {
     const syncWakeHarness = () => {
       const h = normalizeHarnessChoice({ type: $('#cw-type').value, model: $('#cw-model').value, effort: $('#cw-effort').value }, {});
@@ -1969,6 +2001,7 @@ function renderActivity(body, t) {
       effort: $('#cw-effort').value,
     } : null;
     S.commentDraft = '';
+    clearCommentThumbs();
     await api(`/api/tickets/${t.id}/comment`, 'POST', { text, wakeHarness })
       .then((r) => toast(
         r.scheduled

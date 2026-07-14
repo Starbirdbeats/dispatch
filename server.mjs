@@ -205,7 +205,8 @@ async function refreshUpdateStatus({ forceBroadcast = false } = {}) {
     const next = await checkUpdateStatus({ git });
     const changed = next.behind !== updateStatus.behind
       || next.ahead !== updateStatus.ahead
-      || Boolean(next.error) !== Boolean(updateStatus.error);
+      || next.state !== updateStatus.state
+      || next.error !== updateStatus.error;
     updateStatus = next;
     if (forceBroadcast || changed) broadcast({ type: 'state-changed' });
     return updateStatus;

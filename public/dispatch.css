@@ -626,6 +626,8 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
   transition: background .12s steps(2), color .12s steps(2), transform .12s steps(2);
 }
 .update-fab:hover { background: var(--red); color: var(--bg); transform: translate(-1px, -1px); }
+.update-fab.is-error { color: var(--fg-faint); border-color: var(--fg-faint); }
+.update-fab.is-error:hover { background: var(--bg-2); color: var(--fg); }
 .update-fab:disabled { color: var(--fg-faint); border-color: var(--bg-2); cursor: not-allowed; box-shadow: none; }
 .update-fab[hidden] { display: none; }
 @media (max-width: 760px) { .update-fab { right: 12px; bottom: 12px; font-size: 11px; } }

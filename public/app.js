@@ -1034,6 +1034,15 @@ function renderUpdateButton() {
   if (!btn) return;
   const u = S.data?.updateStatus;
   const behind = u && !u.error ? (u.behind || 0) : 0;
+  btn.classList.toggle('is-error', Boolean(u?.error));
+  btn.dataset.updateError = u?.error || '';
+  btn.title = u?.error ? `Update check failed: ${u.error}` : '';
+  btn.disabled = false;
+  if (u?.error) {
+    btn.hidden = false;
+    btn.textContent = '[ UPDATE ? ]';
+    return;
+  }
   btn.hidden = behind <= 0;
   if (behind > 0) btn.textContent = `[ ↑ UPDATE ${behind} ]`;
 }
@@ -2901,6 +2910,10 @@ $('#btn-settings').onclick = () => pushModal({ type: 'settings' });
 $('#btn-archive').onclick = () => pushModal({ type: 'archive' });
 $('#btn-update').onclick = async (e) => {
   const btn = e.currentTarget;
+  if (btn.dataset.updateError) {
+    toast(`UPDATE CHECK FAILED — ${btn.dataset.updateError}`, true);
+    return;
+  }
   btn.disabled = true;
   try {
     const r = await api('/api/update/apply', 'POST', {});

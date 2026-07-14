@@ -21,16 +21,28 @@ export function createGitRunner(cwd) {
 
 export async function checkUpdateStatus({ git }) {
   const checkedAt = new Date().toISOString();
+  const localRef = 'refs/heads/main';
+  const remoteRef = 'refs/remotes/origin/main';
   try {
     await git(['fetch', '--quiet', 'origin', 'main']);
-    await git(['rev-parse', '--verify', '--quiet', 'refs/heads/main']);
-    await git(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main']);
-    const behindOut = await git(['rev-list', '--count', 'refs/heads/main..refs/remotes/origin/main']);
-    const aheadOut = await git(['rev-list', '--count', 'refs/remotes/origin/main..refs/heads/main']);
+    await git(['rev-parse', '--verify', '--quiet', localRef]);
+    await git(['rev-parse', '--verify', '--quiet', remoteRef]);
+    const behindOut = await git(['rev-list', '--count', `${localRef}..${remoteRef}`]);
+    const aheadOut = await git(['rev-list', '--count', `${remoteRef}..${localRef}`]);
     const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => null);
     const { behind, ahead } = parseAheadBehind(behindOut, aheadOut);
-    return { behind, ahead, branch, error: null, checkedAt };
+    const state = behind > 0 ? 'update-available' : 'up-to-date';
+    return { behind, ahead, branch, state, error: null, checkedAt, localRef, remoteRef };
   } catch (e) {
-    return { behind: 0, ahead: 0, branch: null, error: e.message || String(e), checkedAt };
+    return {
+      behind: 0,
+      ahead: 0,
+      branch: null,
+      state: 'status-error',
+      error: e.message || String(e),
+      checkedAt,
+      localRef,
+      remoteRef,
+    };
   }
 }

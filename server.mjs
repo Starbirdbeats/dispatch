@@ -850,12 +850,12 @@ app.post('/api/tickets/:id/comment', (req, res) => {
   if (!text) return res.status(400).json({ error: 'empty comment' });
   store.appendActivity(t.id, { kind: 'comment', by: 'human', text });
 
-  // A comment on a parked ticket is an answer. Schedule a wake ~60s out (visible countdown,
+  // A comment in an agent column is an answer. Schedule a wake ~60s out (visible countdown,
   // cancellable) rather than firing instantly, and let the human pick which harness picks it up.
   const col = store.column(t.columnId);
   const running = t.status === 'running' || t.activeRun || runner.snapshot().running.includes(t.id) || runner.snapshot().queued.includes(t.id);
   let scheduled = false;
-  if (col?.role === 'agent' && !running) {
+  if (col?.role === 'agent') {
     const wh = normalizeHarnessOverride(req.body.wakeHarness);
     t.pendingWake = { at: Date.now() + WAKE_DELAY_MS, harness: wh, by: 'human' };
     store.saveTicket(t.id);

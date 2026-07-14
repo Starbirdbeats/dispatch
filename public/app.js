@@ -1893,7 +1893,9 @@ async function uploadTicketFiles(t, fileList) {
 function renderActivity(body, t) {
   const c = cols().find((x) => x.id === t.columnId) || {};
   const running = S.data.runs.running.includes(t.id) || S.data.runs.queued.includes(t.id);
-  const canWake = c.role === 'agent' && !running;
+  const agentIdle = c.role === 'agent' && !running;
+  const agentRunning = c.role === 'agent' && running;
+  const canWake = agentIdle || agentRunning;
   // harness the pickup will use: current one-shot > column default; dropdowns let you steer it
   const base = { ...effective(t, c), ...(t.oneShotHarness || {}) };
   const hType = base.type === 'human' ? 'claude' : (base.type || 'claude');
@@ -1911,7 +1913,7 @@ function renderActivity(body, t) {
     <div id="wake-panel"></div>
 
     <div class="commentbox">
-      <textarea id="f-comment" placeholder="${canWake ? 'comment — an agent will pick this up in ~60s' : 'comment — the current run will see this on its next turn'}">${esc(S.commentDraft)}</textarea>
+      <textarea id="f-comment" placeholder="${agentIdle ? 'comment — an agent will pick this up in ~60s' : (agentRunning ? 'comment — pick who picks this up next; it starts once the current run finishes' : 'comment — the current run will see this on its next turn')}">${esc(S.commentDraft)}</textarea>
       <button class="btn" id="btn-comment">[ POST ]</button>
     </div>
     ${canWake ? `<div class="wake-harness">
@@ -1945,7 +1947,11 @@ function renderActivity(body, t) {
     } : null;
     S.commentDraft = '';
     await api(`/api/tickets/${t.id}/comment`, 'POST', { text, wakeHarness })
-      .then((r) => toast(r.scheduled ? 'COMMENT POSTED — AGENT PICKUP SCHEDULED' : (r.running ? 'COMMENT POSTED — CURRENT RUN WILL SEE IT' : 'COMMENT POSTED')))
+      .then((r) => toast(
+        r.scheduled
+          ? (r.running ? 'COMMENT POSTED — PICKS UP WHEN CURRENT RUN FINISHES' : 'COMMENT POSTED — AGENT PICKUP SCHEDULED')
+          : (r.running ? 'COMMENT POSTED — CURRENT RUN WILL SEE IT' : 'COMMENT POSTED')
+      ))
       .catch(alertErr);
   };
 
@@ -1972,9 +1978,10 @@ function renderWakePanel(t) {
   const live = S.data.tickets.find((x) => x.id === t.id) || t;
   if (!live.pendingWake) { el.innerHTML = ''; return; }
   const h = live.pendingWake.harness;
+  const running = S.data.runs.running.includes(t.id) || S.data.runs.queued.includes(t.id);
   el.innerHTML = `
     <div class="wake-count">
-      <span class="wake-t" data-wakeclock="${live.pendingWake.at}">T-0:60</span>
+      <span class="wake-t" data-wakeclock="${live.pendingWake.at}" ${running ? 'data-wake-running="1"' : ''}>T-0:60</span>
       <span class="wake-who">→ ${esc(h ? `${h.type || 'default'} · ${h.model || 'default'} · ${h.effort || 'default'}` : 'column default')} picks up your comment</span>
       <button class="btn" id="wake-now">[ PICK UP NOW ]</button>
       <button class="btn btn-danger" id="wake-cancel">[ CANCEL ]</button>
@@ -2659,7 +2666,7 @@ setInterval(() => {
   }
   for (const el of document.querySelectorAll('[data-wakeclock]')) {
     const ms = Number(el.dataset.wakeclock) - now;
-    el.textContent = ms <= 0 ? 'starting…' : fmtCountdown(ms);
+    el.textContent = ms <= 0 ? (el.dataset.wakeRunning ? 'queued — waits for the current run' : 'starting…') : fmtCountdown(ms);
   }
   for (const el of document.querySelectorAll('[data-retryclock]')) {
     const ms = Number(el.dataset.retryclock) - now;

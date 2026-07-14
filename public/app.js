@@ -1248,9 +1248,11 @@ function stationEl(c) {
     body.appendChild(btn);
   }
   if (c.role === 'intake') {
-    const drop = document.createElement('div');
-    drop.className = 'chip-drop';
-    drop.textContent = '· · · DROP TICKET · · ·';
+    const drop = document.createElement('button');
+    drop.type = 'button';
+    drop.className = 'chip-drop chip-drop-action';
+    drop.textContent = '· · · CREATE / DROP TICKET · · ·';
+    drop.onclick = () => openNewTicketModal(c.id);
     body.appendChild(drop);
   }
   $('.cfg', el).onclick = (e) => { e.stopPropagation(); pushModal({ type: 'column', id: c.id }); };
@@ -1382,10 +1384,11 @@ function renderMobileBoard(board) {
     body.appendChild(empty);
   }
   // every phase gets a drop target on mobile; tapping it opens the new-ticket form
-  const drop = document.createElement('div');
-  drop.className = 'chip-drop';
-  drop.textContent = '· · · DROP TICKET · · ·';
-  drop.onclick = () => { S.newAttachments = []; S.newOverrides = {}; clearNewPasteThumbs(); pushModal({ type: 'new' }); };
+  const drop = document.createElement('button');
+  drop.type = 'button';
+  drop.className = 'chip-drop chip-drop-action';
+  drop.textContent = '· · · CREATE / DROP TICKET · · ·';
+  drop.onclick = () => openNewTicketModal(c.id);
   body.appendChild(drop);
   const prevN = idx > 0 ? list[idx - 1].name : '';
   const nextN = idx < list.length - 1 ? list[idx + 1].name : '';
@@ -1541,6 +1544,13 @@ function pushModal(modal) {
   S.modal = modal;
   renderModal();
   writeModalHash(modal, { push: true });
+}
+
+function openNewTicketModal(columnId = null) {
+  S.newAttachments = [];
+  S.newOverrides = {};
+  clearNewPasteThumbs();
+  pushModal(columnId ? { type: 'new', columnId } : { type: 'new' });
 }
 
 // Single source of truth for "what does the current hash mean" — runs on boot and on
@@ -2322,6 +2332,11 @@ function renderNewModal() {
       <div class="hint">unscheduled backlog tickets start immediately if a run slot is free, otherwise on the next sweep (every ${S.data.board.settings.autoDispatchEveryMin || 5} min). a scheduled ticket waits for its timestamp.</div>
     </div>`,
     `<button class="btn btn-accent" id="n-create">[ CREATE ]</button>`);
+  const preferredColumnId = S.modal?.columnId;
+  const columnSelect = $('#n-col');
+  if (preferredColumnId && [...columnSelect.options].some((opt) => opt.value === preferredColumnId)) {
+    columnSelect.value = preferredColumnId;
+  }
   renderNewOverrides();
   wireDropzone('n-att-drop', 'n-att-input', 'n-att-browse', async (files) => {
     S.newAttachments = (S.newAttachments || []).concat(await readUploads(files));
@@ -2901,7 +2916,7 @@ setInterval(() => {
 }, 1000);
 
 /* ---------- boot ---------- */
-$('#btn-new').onclick = () => { S.newAttachments = []; S.newOverrides = {}; clearNewPasteThumbs(); pushModal({ type: 'new' }); };
+$('#btn-new').onclick = () => openNewTicketModal();
 $('#btn-settings').onclick = () => pushModal({ type: 'settings' });
 $('#btn-archive').onclick = () => pushModal({ type: 'archive' });
 $('#btn-update').onclick = async (e) => {

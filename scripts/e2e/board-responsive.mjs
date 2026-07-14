@@ -82,6 +82,21 @@ async function seedTicket(base, title, root) {
     await page.$eval('#modal-close', (el) => el.click());
     await page.waitForFunction(() => !document.querySelector('#overlay'));
 
+    // the intake drop target is also a create affordance, preselecting that station
+    const dropText = await backlogStation.evaluate((s) => s.querySelector('.chip-drop-action')?.textContent || '');
+    assert.match(dropText, /CREATE \/ DROP TICKET/, 'desktop drop target advertises create/drop');
+    await backlogStation.evaluate((s) => s.querySelector('.chip-drop-action').click());
+    await page.waitForSelector('#overlay #n-title');
+    assert.equal(await page.evaluate(() => location.hash), '#new', 'drop target opens new-ticket modal');
+    assert.equal(await page.$eval('#n-col', (el) => el.value), backlog.id, 'desktop drop target preselects intake column');
+    const createdTitle = 'Created from rail drop target';
+    await page.type('#n-title', createdTitle);
+    await page.$eval('#n-create', (el) => el.click());
+    await page.waitForFunction(() => !document.querySelector('#overlay'));
+    const afterCreate = await fetch(`${harness.base}/api/state`).then((r) => r.json());
+    const created = afterCreate.tickets.find((t) => t.title === createdTitle);
+    assert.equal(created?.columnId, backlog.id, 'desktop drop target creates the ticket in intake');
+
     // ---- MOBILE (<760px): one phase per screen ----
     await page.setViewport({ width: 390, height: 844 });
     await page.reload({ waitUntil: 'networkidle2' });
@@ -92,6 +107,13 @@ async function seedTicket(base, title, root) {
     assert.equal(dotCount, colCount, 'one pager dot per phase');
     assert.equal(await page.$$eval('.mdots span.on', (e) => e.length), 1, 'exactly one active dot');
     assert.ok(await page.$eval('.mprev', (b) => b.disabled), 'prev disabled on first phase');
+
+    await page.$eval('.mbody .chip-drop-action', (el) => el.click());
+    await page.waitForSelector('#overlay #n-col');
+    assert.equal(await page.evaluate(() => location.hash), '#new', 'mobile drop target opens new-ticket modal');
+    assert.equal(await page.$eval('#n-col', (el) => el.value), backlog.id, 'mobile drop target preselects visible phase');
+    await page.$eval('#modal-close', (el) => el.click());
+    await page.waitForFunction(() => !document.querySelector('#overlay'));
 
     // ticket modal tabs stay usable on phone-sized viewports: the strip scrolls
     // horizontally, preserves 44px touch targets, and keeps the active tab visible.

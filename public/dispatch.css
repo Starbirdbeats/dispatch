@@ -307,7 +307,14 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; background: v
 .chip-actions { margin-left: auto; }
 .chip-more { border: 1px dashed var(--line); background: none; color: var(--fg-faint); font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.1em; text-transform: uppercase; padding: 6px; cursor: pointer; }
 .chip-more:hover { color: var(--fg); border-color: var(--fg-dim); }
-.chip-drop { border: 1px dashed var(--line); padding: 10px; text-align: center; font-size: 8px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-faint); }
+.chip-drop {
+  display: block; width: 100%; border: 1px dashed var(--line); border-radius: 0; padding: 10px;
+  text-align: center; font-family: var(--mono); font-size: 8px; line-height: 1.2; letter-spacing: 0.14em; text-transform: uppercase;
+  background: transparent; color: var(--fg-faint);
+}
+.chip-drop-action { cursor: pointer; }
+.chip-drop-action:hover,
+.chip-drop-action:focus-visible { border-color: var(--fg-dim); background: var(--bg-1); color: var(--fg); }
 
 /* ---- desktop: in-flight tracker ---- */
 .inflight { border-top: 1px solid var(--line); padding: 16px 20px 22px; background: var(--bg-1); }

@@ -796,14 +796,22 @@ function wireStepperHandlers() {
 
   $('#s-preset-apply').onclick = async () => {
     const preset = $('#s-preset').value;
+    const btn = $('#s-preset-apply');
     try {
-      $('#s-preset-apply').textContent = '[ APPLYING… ]';
+      btn.textContent = '[ APPLYING… ]';
+      btn.disabled = true;
       await api('/api/setup/preset', 'POST', { preset });
       await loadState();
       renderSettingsModal();
       toast(`PRESET APPLIED: ${setupPresetLabel(preset.toLowerCase())}`);
     } catch (e) { alertErr(e); }
-    finally { const b = $('#s-preset-apply'); if (b) b.textContent = '[ APPLY PRESET ]'; }
+    finally {
+      const b = $('#s-preset-apply');
+      if (b) {
+        b.textContent = '[ APPLY PRESET ]';
+        b.disabled = false;
+      }
+    }
   };
   $('#s-setup-complete').onclick = async () => {
     try {

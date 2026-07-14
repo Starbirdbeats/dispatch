@@ -117,7 +117,7 @@ Every ticket owns `<dataDir>/tickets/<id>/DOSSIER.md` — a running hand-off doc
 
 Rules enforced by the run engine:
 1. Every agent run receives the dossier path and is instructed to **read it first**.
-2. Every run must **append a Work Log entry** before finishing (what was done, what the next phase needs to know). Read-only runs should try the dossier write first; if the sandbox denies it, they put the entry in the optional control-block `work_log` field and the engine appends it.
+2. Every run must **append a Work Log entry** before finishing (what was done, what the next phase needs to know). Read-only runs must not write the workspace repo, but may write the ticket dossier in the ticket data dir. If the sandbox denies that dossier write, they put the entry in the optional control-block `work_log` field and the engine appends it.
 3. The run prompt includes the last N activity items (comments, moves) so human comments on the ticket reach the agent too.
 
 Codex picking up Build reads Claude's plan from the dossier — zero re-explanation. Claude picking up Review reads Codex's work log the same way.
@@ -187,7 +187,7 @@ A ticket cannot enter a `terminal` column without `human_test` populated — eit
 
 - **Puppeteer:** workspaces get standard tool access; the composed prompt tells agents Puppeteer is available (`npm i puppeteer`) for browser automation/scraping/UI verification.
 - **Chrome extension (Claude in Chrome):** per-column/per-ticket toggle adds `--chrome` to Claude runs for real-browser driving. Claude-only; Codex tickets needing a browser use Puppeteer.
-- **Permissions:** per-column defaults — Planning/Review run `--permission-mode auto` (claude) / `--sandbox read-only` (codex, review only); Build runs `acceptEdits` / `workspace-write`. A per-ticket "dangerous" toggle unlocks `bypassPermissions` / `danger-full-access` for trusted workspaces, off by default, visually loud when on. Read-only tickets force Claude to manual mode with `Write`/`Edit` allowed only inside the ticket data dir, and force Codex to `read-only`; Codex can still hand off through the optional `work_log`/`plan` control fields that the engine writes into the dossier.
+- **Permissions:** per-column defaults — Planning/Review run `--permission-mode auto` (claude) / `--sandbox read-only` (codex, review only); Build runs `acceptEdits` / `workspace-write`. A per-ticket "dangerous" toggle unlocks `bypassPermissions` / `danger-full-access` for trusted workspaces, off by default, visually loud when on. Read-only tickets force Claude to manual mode with `Write`/`Edit` allowed only inside the ticket data dir, and force Codex into `workspace-write` with disk-wide read access but `writable_roots` limited to the ticket data dir. That lets agents update the dossier while preventing workspace repo edits.
 
 ## 8. UI spec
 

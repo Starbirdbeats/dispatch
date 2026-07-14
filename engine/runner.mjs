@@ -161,7 +161,7 @@ export class Runner {
     }
     // READ-ONLY tickets: force sandbox to look-but-don't-touch, whatever the column configured.
     if (ticket.readOnly && h.type !== 'human') {
-      h.permissions = h.type === 'codex' ? 'read-only' : 'manual';
+      h.permissions = h.type === 'codex' ? 'workspace-write' : 'manual';
       h.readOnly = true;
     }
     return h;

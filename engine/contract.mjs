@@ -12,7 +12,7 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
   lines.push('\n## Ticket');
   lines.push(`Title: ${ticket.title}`);
   if (ticket.description) lines.push(`Description:\n${ticket.description}`);
-  lines.push(`Workspace (your cwd): ${ticket.workspace}`);
+  lines.push(`Workspace repo to inspect: ${ticket.workspace}`);
 
   lines.push('\n## Shared context — READ FIRST');
   lines.push(`The ticket dossier lives at: ${dossierPath}`);
@@ -29,7 +29,7 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
 
   if (ticket.readOnly) {
     lines.push('\n## READ-ONLY TICKET');
-    lines.push('This ticket is READ-ONLY: analyse/read the repo for context only. Do NOT attempt to edit workspace files, run migrations, or commit — the goal is understanding, not changes. You must still complete the hand-off. Try the normal dossier Work Log/Plan update first; if your sandbox denies the dossier write, do not retry. Instead include the Work Log entry body as "work_log" in your control block, and include "plan" only if this phase produced or updated the plan. Dispatch will write those fields into the dossier for you.');
+    lines.push('This ticket is READ-ONLY: analyse/read the repo for context only. Do NOT attempt to edit workspace files, run migrations, or commit — the goal is understanding, not changes. You may still edit the ticket dossier in the ticket data dir. Codex read-only runs may have their cwd set to the ticket data dir instead of the workspace; use the absolute workspace path above when reading the repo. You must still complete the hand-off. Try the normal dossier Work Log/Plan update first; if your sandbox denies the dossier write, do not retry. Instead include the Work Log entry body as "work_log" in your control block, and include "plan" only if this phase produced or updated the plan. Dispatch will write those fields into the dossier for you.');
   }
 
   lines.push('\n## Tooling notes');

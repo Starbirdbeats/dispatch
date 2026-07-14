@@ -18,7 +18,7 @@ test('harnessFor marks read-only tickets and forces provider sandbox modes', () 
   const codex = runner.harnessFor(ticket, {
     harness: { type: 'codex', model: 'gpt-5.5', effort: 'xhigh', permissions: 'workspace-write' },
   });
-  assert.equal(codex.permissions, 'read-only');
+  assert.equal(codex.permissions, 'workspace-write');
   assert.equal(codex.readOnly, true);
 });
 

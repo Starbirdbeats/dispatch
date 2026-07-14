@@ -34,12 +34,19 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir }) {
 }
 
 function buildAllowedTools(harness, dataDir) {
-  const configured = harness.allowedTools?.trim();
-  const rules = configured ? [configured] : [];
   if (harness.readOnly && dataDir) {
     const dataPattern = absoluteClaudePathPattern(dataDir);
-    rules.push(`Write(${dataPattern}/**)`, `Edit(${dataPattern}/**)`);
+    return [
+      'Read',
+      'Glob',
+      'Grep',
+      'LS',
+      `Write(${dataPattern}/**)`,
+      `Edit(${dataPattern}/**)`,
+    ].join(' ');
   }
+  const configured = harness.allowedTools?.trim();
+  const rules = configured ? [configured] : [];
   return rules.join(' ').trim();
 }
 

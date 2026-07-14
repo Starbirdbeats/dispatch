@@ -88,7 +88,8 @@ boot re-queues it. (Closes the "queued jobs evaporate" hole.)
 ## 3. What stays the same
 
 Adapters, prompt contract, control-block parsing, Done gate, bounce logic, UI protocol. Read-only
-runs may include optional `work_log` and `plan` fields in the control block when their sandbox
+runs may write the ticket dossier in the ticket data dir, but must not write the workspace repo.
+They may still include optional `work_log` and `plan` fields in the control block if their sandbox
 blocks direct dossier writes; the finalizer writes those fields exactly once with the rest of
 post-run handling.
 This is a runner+service refactor; nothing above the engine layer notices.

@@ -16,17 +16,20 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
   // workspace-write blocks network by default — opt in per column/ticket (npm, ssh to MSI, etc.)
   if (harness.network) args.push('-c', 'sandbox_workspace_write.network_access=true');
 
-  const sandbox = harness.permissions || 'workspace-write';
+  const readOnly = Boolean(harness.readOnly);
+  const sandbox = readOnly ? 'workspace-write' : (harness.permissions || 'workspace-write');
   // .git is kept read-only inside workspace-write unless listed as a writable root,
   // which would block the "commit your work" contract of Build-style phases.
   const gitDir = path.join(workspace, '.git');
-  const roots = JSON.stringify([dataDir, gitDir]);
+  const roots = JSON.stringify(readOnly ? [dataDir] : [dataDir, gitDir]);
+  if (readOnly) args.push('-c', 'sandbox_permissions=["disk-full-read-access"]');
   if (resume) {
     // `exec resume` has no --sandbox/-C/--add-dir flags; config overrides cover it.
     args.push('-c', `sandbox_mode="${sandbox}"`);
     args.push('-c', `sandbox_workspace_write.writable_roots=${roots}`);
   } else {
-    args.push('--sandbox', sandbox, '-C', workspace, '--add-dir', dataDir);
+    args.push('--sandbox', sandbox, '-C', readOnly ? dataDir : workspace);
+    if (!readOnly) args.push('--add-dir', dataDir);
     args.push('-c', `sandbox_workspace_write.writable_roots=${roots}`);
   }
   args.push(prompt);

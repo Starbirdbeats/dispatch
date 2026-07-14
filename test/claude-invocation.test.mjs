@@ -17,17 +17,21 @@ test('read-only Claude invocation allows dossier writes in the ticket data dir o
       model: 'claude-fable-5',
       effort: 'high',
       permissions: 'manual',
-      allowedTools: 'Read Grep',
+      allowedTools: 'Bash(git *) Write(/tmp/other/**)',
       readOnly: true,
     },
   });
 
   const allowed = allowedToolsArg(args);
   assert.ok(allowed);
-  assert.match(allowed, /\bRead Grep\b/);
+  assert.match(allowed, /\bRead\b/);
+  assert.match(allowed, /\bGlob\b/);
+  assert.match(allowed, /\bGrep\b/);
+  assert.match(allowed, /\bLS\b/);
   assert.match(allowed, /Write\(\/\/tmp\/dispatch-ticket\/\*\*\)/);
   assert.match(allowed, /Edit\(\/\/tmp\/dispatch-ticket\/\*\*\)/);
   assert.doesNotMatch(allowed, /\bBash\b/);
+  assert.doesNotMatch(allowed, /\/tmp\/other/);
 });
 
 test('non-read-only Claude invocation leaves allowedTools behavior unchanged', () => {

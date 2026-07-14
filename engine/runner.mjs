@@ -800,11 +800,13 @@ export class Runner {
       }
       case 'bounce': {
         const target = store.columnByName(control.target_column);
+        const configuredCap = Number.isFinite(ticket.maxBounces) ? ticket.maxBounces : store.board?.settings?.maxBounces;
+        const cap = Number.isFinite(configuredCap) && configuredCap >= 0 ? Math.floor(configuredCap) : MAX_BOUNCES;
         ticket.bounces = (ticket.bounces || 0) + 1;
-        if (!target || ticket.bounces > MAX_BOUNCES) {
+        if (!target || ticket.bounces > cap) {
           ticket.status = 'awaiting-human';
-          ticket.stuckReason = { kind: 'bounce-limit', at: nowIso(), detail: !target ? `The agent tried to bounce to "${control.target_column}", which doesn't exist.` : `This ticket has bounced ${ticket.bounces} times (limit ${MAX_BOUNCES}) — the phases are disagreeing and it needs your call.` };
-          store.appendActivity(ticket.id, { kind: 'system', by: 'engine', text: !target ? `bounce target "${control.target_column}" not found` : `bounce limit (${MAX_BOUNCES}) hit — needs a human decision` });
+          ticket.stuckReason = { kind: 'bounce-limit', at: nowIso(), detail: !target ? `The agent tried to bounce to "${control.target_column}", which doesn't exist.` : `This ticket has bounced ${ticket.bounces} times (limit ${cap}) — the phases are disagreeing and it needs your call.` };
+          store.appendActivity(ticket.id, { kind: 'system', by: 'engine', text: !target ? `bounce target "${control.target_column}" not found` : `bounce limit (${cap}) hit — needs a human decision` });
           break;
         }
         ticket.status = 'idle';

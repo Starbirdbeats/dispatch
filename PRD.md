@@ -73,6 +73,7 @@ Any column's harness is editable in the UI. Columns can be added, removed, reord
   overrides: {                  // per-ticket harness override, wins over column default
     [columnId]: { type?, model?, effort?, permissions? }
   },
+  maxBounces: number | null,    // null inherits the board default; 0 pauses on first bounce
   sessions: {                   // native session continuity per harness
     claude: uuid | null,        // claude -p --session-id / --resume
     codex: uuid | null          // codex exec resume <uuid>
@@ -176,7 +177,7 @@ Both subscriptions are already OAuth-authed on Starbird (Claude Max, ChatGPT) �
 - Ticket enters an `autoRun` agent column → run is **queued**. Global concurrency cap: 2 (configurable) — protects rate limits on both subscriptions.
 - JSONL events stream from the child process → parsed → pushed over WebSocket to the UI (live transcript in the ticket modal).
 - Exit 0 + valid control block → apply action. Nonzero exit or timeout (default 30 min, configurable) → `error` status, transcript attached, no move.
-- **Bounce:** an agent can send a ticket backward (Review → Build) with a comment; the receiving harness resumes its own session and reads the bounce comment. Bounce loop cap: 3, then `flag_human`.
+- **Bounce:** an agent can send a ticket backward (Review → Build) with a comment; the receiving harness resumes its own session and reads the bounce comment. Bounce loop cap is configurable per ticket, inherits the board default when blank, and defaults to 3 before pausing for human intervention.
 - Manual controls always win: run/re-run/stop buttons, drag to any column (drag into an autoRun column offers to start a run).
 
 ### Done gate

@@ -206,6 +206,13 @@ async function refreshModelRegistry() {
   finally { document.querySelectorAll('.refresh-models').forEach((b) => b.classList.remove('spin')); }
 }
 const effective = (t, c) => ({ ...c.harness, ...(t.overrides?.[c.id] || {}) });
+const boardMaxBounces = () => S.data.board.settings.maxBounces ?? 3;
+function parseMaxBouncesInput(sel, fallback = null) {
+  const v = $(sel).value.trim();
+  if (v === '') return fallback;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? Math.max(0, n) : fallback;
+}
 
 /* Diagnose a ticket into a plain-language state the UI can act on.
    tone drives colour: live/ok = calm, warn = amber (self-recovering), stuck = red (needs you). */
@@ -1158,7 +1165,7 @@ function renderMobileBoard(board) {
   const drop = document.createElement('div');
   drop.className = 'chip-drop';
   drop.textContent = '· · · DROP TICKET · · ·';
-  drop.onclick = () => { S.newAttachments = []; pushModal({ type: 'new' }); };
+  drop.onclick = () => { S.newAttachments = []; S.newOverrides = {}; pushModal({ type: 'new' }); };
   body.appendChild(drop);
   const prevN = idx > 0 ? list[idx - 1].name : '';
   const nextN = idx < list.length - 1 ? list[idx + 1].name : '';
@@ -1583,6 +1590,58 @@ function handleCustomModel(sel) {
   return false;
 }
 
+function overridesGridHTML(draft) {
+  const agentCols = cols().filter((c) => c.role === 'agent');
+  return `<div class="overrides-wrap"><div class="overrides-grid">
+    <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div><div class="h">PERMS</div>
+    ${agentCols.map((c) => {
+      const o = draft[c.id] || {};
+      const n = normalizeOverrideForColumn(o, c);
+      if (n.model !== (o.model || '') || n.effort !== (o.effort || '') || n.permissions !== (o.permissions || '')) {
+        setOverrideDraft(draft, c.id, { ...o, model: n.model, effort: n.effort, permissions: n.permissions });
+      }
+      const effType = n.type;
+      const sameHarnessType = !o.type || o.type === c.harness.type;
+      const defaultModelLabel = sameHarnessType ? `default (${c.harness.model || '—'})` : 'default';
+      const defaultEffortLabel = sameHarnessType ? `default (${c.harness.effort || '—'})` : 'default';
+      const defaultPermsLabel = sameHarnessType ? `default (${c.harness.permissions || '—'})` : 'default';
+      const disabledWarning = effType !== 'human' && !isProviderEnabled(effType) && o.type
+        ? '<div class="setup-pill warn">disabled in setup</div>'
+        : '';
+      return `<div>${esc(c.name)}</div>
+        <div><select data-ov="${c.id}:type">
+          <option value="" ${o.type ? '' : 'selected'}>default (${esc(c.harness.type)})</option>
+          ${providerTypeOptions(o.type, { includeHuman: false, includeCurrent: true })}
+        </select>${disabledWarning}</div>
+        <div class="model-cell"><select data-ov="${c.id}:model">${harnessOptions('model', effType, n.model || '', defaultModelLabel)}</select>${refreshBtn()}</div>
+        <div><select data-ov="${c.id}:effort">${harnessOptions('effort', effType, n.effort || '', defaultEffortLabel, n.model || (sameHarnessType ? c.harness.model : ''))}</select></div>
+        <div><select data-ov="${c.id}:permissions">${harnessOptions('permissions', effType, n.permissions || '', defaultPermsLabel)}</select></div>`;
+    }).join('')}
+  </div></div>`;
+}
+
+function wireOverridesGrid(root, draft, refresh) {
+  for (const sel of root.querySelectorAll('[data-ov]')) {
+    sel.onchange = () => {
+      if (sel.dataset.ov.endsWith(':model') && !handleCustomModel(sel)) return;
+      const [colId, key] = sel.dataset.ov.split(':');
+      const v = sel.value.trim();
+      if (v) (draft[colId] ||= {})[key] = v;
+      else if (draft[colId]) { delete draft[colId][key]; if (!Object.keys(draft[colId]).length) delete draft[colId]; }
+      // type changes which models/efforts/perms apply; model changes which efforts apply
+      if (key === 'type' || key === 'model') {
+        const c = cols().find((x) => x.id === colId);
+        if (c) {
+          const o = draft[colId] || {};
+          const n = normalizeOverrideForColumn(o, c);
+          setOverrideDraft(draft, colId, { ...o, ...(o.type ? { type: o.type } : {}), model: n.model, effort: n.effort, permissions: n.permissions });
+        }
+        refresh();
+      }
+    };
+  }
+}
+
 const workspacePicker = (id, value) => `
   <div class="workspace-picker" data-wp="${esc(id)}">
     <input id="${esc(id)}" value="${esc(value)}" autocomplete="off">
@@ -1639,12 +1698,15 @@ function wireWorkspacePicker(id) {
 function renderOverview(body, t) {
   if (S.ovDraft?.id !== t.id) S.ovDraft = { id: t.id, ov: structuredClone(t.overrides || {}) };
   const draft = S.ovDraft.ov;
-  const agentCols = cols().filter((c) => c.role === 'agent');
   body.innerHTML = `
     <div class="kv">
       <div class="k">ID</div><div>${t.id}</div>
       <div class="k">WORKSPACE</div><div>${workspacePicker('f-ws', t.workspace)}</div>
       <div class="k">SCHEDULED</div><div><input id="f-sched" type="datetime-local" value="${esc(t.scheduledAt || '')}"></div>
+      <div class="k">BOUNCE LIMIT</div><div>
+        <input id="f-maxbounce" type="number" min="0" value="${t.maxBounces ?? ''}" placeholder="default (${boardMaxBounces()})" style="width:90px">
+        <span class="skip-note">blank = board default; how many times it can be sent back before pausing for you</span>
+      </div>
       <div class="k">MODE</div><div>
         <label class="check-row inline"><input type="checkbox" id="f-readonly" ${t.readOnly ? 'checked' : ''}> <span>read-only (agents can't modify the repo)</span></label>
         ${t.skip?.length ? `<div class="skip-note">skipping: ${t.skip.map((cid) => esc(cols().find((c) => c.id === cid)?.name || cid)).join(', ')}</div>` : ''}
@@ -1661,55 +1723,11 @@ function renderOverview(body, t) {
     ${dropzoneHTML('ov-att-drop', 'ov-att-input', 'ov-att-browse')}
     <div class="att-list" id="ov-att-list"></div>
     <label class="f">PER-COLUMN HARNESS OVERRIDES ("default" = column config)</label>
-    <div class="overrides-wrap"><div class="overrides-grid">
-      <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div><div class="h">PERMS</div>
-      ${agentCols.map((c) => {
-        const o = draft[c.id] || {};
-        const n = normalizeOverrideForColumn(o, c);
-        if (n.model !== (o.model || '') || n.effort !== (o.effort || '') || n.permissions !== (o.permissions || '')) {
-          setOverrideDraft(draft, c.id, { ...o, model: n.model, effort: n.effort, permissions: n.permissions });
-        }
-        const effType = n.type;
-        const rowType = o.type || c.harness.type;
-        const sameHarnessType = !o.type || o.type === c.harness.type;
-        const defaultModelLabel = sameHarnessType ? `default (${c.harness.model || '—'})` : 'default';
-        const defaultEffortLabel = sameHarnessType ? `default (${c.harness.effort || '—'})` : 'default';
-        const defaultPermsLabel = sameHarnessType ? `default (${c.harness.permissions || '—'})` : 'default';
-        const disabledWarning = effType !== 'human' && !isProviderEnabled(effType) && o.type
-          ? '<div class="setup-pill warn">disabled in setup</div>'
-          : '';
-        return `<div>${esc(c.name)}</div>
-          <div><select data-ov="${c.id}:type">
-            <option value="" ${o.type ? '' : 'selected'}>default (${esc(c.harness.type)})</option>
-            ${providerTypeOptions(o.type, { includeHuman: false, includeCurrent: true })}
-          </select>${disabledWarning}</div>
-          <div class="model-cell"><select data-ov="${c.id}:model">${harnessOptions('model', effType, n.model || '', defaultModelLabel)}</select>${refreshBtn()}</div>
-          <div><select data-ov="${c.id}:effort">${harnessOptions('effort', effType, n.effort || '', defaultEffortLabel, n.model || (sameHarnessType ? c.harness.model : ''))}</select></div>
-          <div><select data-ov="${c.id}:permissions">${harnessOptions('permissions', effType, n.permissions || '', defaultPermsLabel)}</select></div>`;
-      }).join('')}
-    </div></div>
+    ${overridesGridHTML(draft)}
     <div class="hint">claude efforts go up to max; codex up to xhigh. "custom…" under model takes any id the CLI accepts.</div>
     <div style="margin-top:14px"><button class="btn" id="btn-save-ticket">[ SAVE CHANGES ]</button></div>`;
 
-  for (const sel of body.querySelectorAll('[data-ov]')) {
-    sel.onchange = () => {
-      if (sel.dataset.ov.endsWith(':model') && !handleCustomModel(sel)) return;
-      const [colId, key] = sel.dataset.ov.split(':');
-      const v = sel.value.trim();
-      if (v) (draft[colId] ||= {})[key] = v;
-      else if (draft[colId]) { delete draft[colId][key]; if (!Object.keys(draft[colId]).length) delete draft[colId]; }
-      // type changes which models/efforts/perms apply; model changes which efforts apply
-      if (key === 'type' || key === 'model') {
-        const c = cols().find((x) => x.id === colId);
-        if (c) {
-          const o = draft[colId] || {};
-          const n = normalizeOverrideForColumn(o, c);
-          setOverrideDraft(draft, colId, { ...o, ...(o.type ? { type: o.type } : {}), model: n.model, effort: n.effort, permissions: n.permissions });
-        }
-        renderOverview(body, t);
-      }
-    };
-  }
+  wireOverridesGrid(body, draft, () => renderOverview(body, t));
   wireWorkspacePicker('f-ws');
 
   $('#btn-save-ticket').onclick = async () => {
@@ -1719,6 +1737,7 @@ function renderOverview(body, t) {
       scheduledAt: $('#f-sched').value || null,
       readOnly: $('#f-readonly').checked,
       overrides: draft,
+      maxBounces: parseMaxBouncesInput('#f-maxbounce', null),
     }).then(() => toast('TICKET SAVED')).catch(alertErr);
   };
 
@@ -1983,7 +2002,16 @@ function renderColumnModal(draftOverride) {
 }
 
 /* ---- new ticket modal ---- */
+function renderNewOverrides() {
+  const box = $('#n-ov');
+  if (!box) return;
+  S.newOverrides ||= {};
+  box.innerHTML = overridesGridHTML(S.newOverrides);
+  wireOverridesGrid(box, S.newOverrides, renderNewOverrides);
+}
+
 function renderNewModal() {
+  S.newOverrides ||= {};
   shell('NEW TICKET', `
     <div class="panel-body">
       <label class="f">TITLE</label><input id="n-title" autofocus>
@@ -1994,17 +2022,23 @@ function renderNewModal() {
       <select id="n-col">${cols().map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
       <label class="f">SCHEDULE FOR (optional — leave blank for the next backlog sweep)</label>
       <input id="n-sched" type="datetime-local">
+      <label class="f">REVIEW / BOUNCE LIMIT (blank = board default: ${boardMaxBounces()})</label>
+      <input id="n-maxbounce" type="number" min="0" placeholder="default (${boardMaxBounces()})">
       <label class="check-row"><input type="checkbox" id="n-readonly"> <span>READ-ONLY — agents may only read the repo for context (no edits, no commits)</span></label>
       <div id="n-skip-wrap" class="skip-wrap" hidden>
         <div class="skip-lbl">skip these phases (nothing to build/verify on a read-only ticket):</div>
         ${cols().filter((c) => c.role === 'agent').map((c) => `<label class="check-row sub"><input type="checkbox" class="n-skip" value="${c.id}" ${/build/i.test(c.name) ? 'checked' : ''}> <span>${esc(c.name)}</span></label>`).join('')}
       </div>
+      <label class="f">PER-COLUMN HARNESS OVERRIDES ("default" = phase config)</label>
+      <div id="n-ov"></div>
+      <div class="hint">claude efforts go up to max; codex up to xhigh. "custom…" under model takes any id the CLI accepts.</div>
       <label class="f">ATTACHMENTS (listed in the dossier for the agents to read — max ${MAX_ATTACH_MB}MB each)</label>
       ${dropzoneHTML('n-att-drop', 'n-att-input', 'n-att-browse')}
       <div class="att-list" id="n-att-list"></div>
       <div class="hint">unscheduled backlog tickets start immediately if a run slot is free, otherwise on the next sweep (every ${S.data.board.settings.autoDispatchEveryMin || 5} min). a scheduled ticket waits for its timestamp.</div>
     </div>`,
     `<button class="btn btn-accent" id="n-create">[ CREATE ]</button>`);
+  renderNewOverrides();
   wireDropzone('n-att-drop', 'n-att-input', 'n-att-browse', async (files) => {
     S.newAttachments = (S.newAttachments || []).concat(await readUploads(files));
     renderStagedAttachments();
@@ -2021,9 +2055,11 @@ function renderNewModal() {
       workspace: $('#n-ws').value.trim(),
       columnId: $('#n-col').value,
       scheduledAt: $('#n-sched').value || null,
+      maxBounces: parseMaxBouncesInput('#n-maxbounce', null),
+      overrides: S.newOverrides || {},
       readOnly, skip,
       attachments: (S.newAttachments || []).map(({ name, type, size, dataB64 }) => ({ name, type, size, dataB64 })),
-    }).then((r) => { S.newAttachments = []; toast(r.started ? `CREATED — STARTED → ${r.started.toUpperCase()}` : 'TICKET CREATED'); closeAndReload(); }).catch(alertErr);
+    }).then((r) => { S.newAttachments = []; S.newOverrides = {}; toast(r.started ? `CREATED — STARTED → ${r.started.toUpperCase()}` : 'TICKET CREATED'); closeAndReload(); }).catch(alertErr);
   };
 }
 
@@ -2243,6 +2279,9 @@ function renderSettingsModal() {
       <label class="f">MAX CONCURRENT RUNS <output>${(s.maxConcurrent ?? 2) <= 0 ? 'paused' : ''}</output></label><input id="s-cap" type="number" min="0" max="8" value="${s.maxConcurrent ?? 2}">
       <div class="hint" style="margin-top:4px">0 = pause the engine (nothing new runs; queued work waits until you raise it).</div>
       <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
+      <label class="f">REVIEW / BOUNCE LIMIT (times a ticket can be sent back before it pauses for you)</label>
+      <input id="s-maxbounce" type="number" min="0" value="${s.maxBounces ?? 3}">
+      <div class="hint" style="margin-top:4px">0 = pause on the first bounce. Per-ticket overrides live on each ticket.</div>
       <label class="f">DEFAULT WORKSPACE</label>${workspacePicker('s-ws', s.defaultWorkspace)}
       <label class="f">STALL WATCHDOG (MINUTES — resume orphaned tickets after this dwell; 0 = off)</label>
       <input id="s-stall" type="number" min="0" value="${s.stallAfterMin ?? 10}">
@@ -2445,6 +2484,7 @@ function renderSettingsModal() {
       await api('/api/settings', 'PATCH', {
         maxConcurrent: Number.isFinite(+$('#s-cap').value) ? Math.max(0, Math.min(8, +$('#s-cap').value)) : 2,
         runTimeoutMin: Number($('#s-to').value) || 30,
+        maxBounces: parseMaxBouncesInput('#s-maxbounce', s.maxBounces ?? 3),
         defaultWorkspace: $('#s-ws').value.trim(),
         autoDispatch: Boolean($('#s-auto').value),
         autoDispatchEveryMin: Number($('#s-every').value) || 5,
@@ -2505,7 +2545,7 @@ setInterval(() => {
 }, 1000);
 
 /* ---------- boot ---------- */
-$('#btn-new').onclick = () => { S.newAttachments = []; pushModal({ type: 'new' }); };
+$('#btn-new').onclick = () => { S.newAttachments = []; S.newOverrides = {}; pushModal({ type: 'new' }); };
 $('#btn-settings').onclick = () => pushModal({ type: 'settings' });
 $('#btn-archive').onclick = () => pushModal({ type: 'archive' });
 $('#btn-pause').onclick = () => {

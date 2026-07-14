@@ -747,11 +747,11 @@ app.get('/api/fs/dirs', (req, res) => {
 
 // ---- tickets ----
 app.post('/api/tickets', (req, res) => {
-  const { title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip } = req.body;
+  const { title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip, maxBounces } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: 'title required' });
   const att = checkAttachments(attachments);
   if (!att.ok) return res.status(att.status).json({ error: att.error });
-  const t = store.createTicket({ title: title.trim(), description, workspace, columnId, overrides, scheduledAt, attachments: att.files, readOnly, skip });
+  const t = store.createTicket({ title: title.trim(), description, workspace, columnId, overrides, scheduledAt, attachments: att.files, readOnly, skip, maxBounces });
   broadcast({ type: 'state-changed' });
 
   const col = store.column(t.columnId);
@@ -775,6 +775,12 @@ app.patch('/api/tickets/:id', (req, res) => {
   if (!t) return res.status(404).json({ error: 'not found' });
   for (const k of ['title', 'description', 'workspace', 'overrides', 'humanTest', 'scheduledAt', 'readOnly', 'skip']) {
     if (k in req.body) t[k] = req.body[k];
+  }
+  if ('maxBounces' in req.body) {
+    const n = req.body.maxBounces;
+    t.maxBounces = (n === null || n === '')
+      ? null
+      : (Number.isFinite(+n) && +n >= 0 ? Math.floor(+n) : t.maxBounces);
   }
   store.saveTicket(t.id);
   broadcast({ type: 'state-changed' });
@@ -992,7 +998,12 @@ app.delete('/api/columns/:id', (req, res) => {
 });
 
 app.patch('/api/settings', (req, res) => {
-  Object.assign(store.board.settings, req.body);
+  const body = { ...req.body };
+  if ('maxBounces' in body) {
+    const n = Number(body.maxBounces);
+    body.maxBounces = Number.isFinite(n) && n >= 0 ? Math.floor(n) : (store.board.settings.maxBounces ?? 3);
+  }
+  Object.assign(store.board.settings, body);
   store.saveBoard();
   runner.pump(); // raising the cap (or un-pausing) should drain any queued work immediately
   broadcast({ type: 'state-changed' });

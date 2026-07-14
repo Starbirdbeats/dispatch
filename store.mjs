@@ -14,6 +14,7 @@ const DEFAULT_BOARD = {
   settings: {
     maxConcurrent: 2,
     runTimeoutMin: 30,
+    maxBounces: 3,
     defaultWorkspace: path.join(os.homedir(), 'git'),
     autoDispatch: true,          // sweep intake columns and start pipelines automatically
     autoDispatchEveryMin: 5,
@@ -307,7 +308,7 @@ export class Store {
     reconcileActiveClock(ticket, this.column(ticket.columnId), now);
   }
 
-  createTicket({ title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip }) {
+  createTicket({ title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip, maxBounces }) {
     const id = `t-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     this.board.ticketSeq = (this.board.ticketSeq || 0) + 1;
     this.saveBoard();
@@ -326,6 +327,9 @@ export class Store {
       context: {},
       status: 'idle',
       bounces: 0,
+      maxBounces: (maxBounces === null || maxBounces === '')
+        ? null
+        : (Number.isFinite(+maxBounces) && +maxBounces >= 0 ? Math.floor(+maxBounces) : null),
       humanTest: null,
       startedAt: null,       // set when work first begins (enters an agent phase / first run)
       completedAt: null,     // set when it lands in a terminal column

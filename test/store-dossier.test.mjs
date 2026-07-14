@@ -38,3 +38,28 @@ test('store appends work log entries and replaces plan inside dossier sections',
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test('createTicket stores maxBounces as integer or null inheritance', async () => {
+  const { store, dataDir } = await tempStore();
+  try {
+    const inherited = store.createTicket({
+      title: 'Inherited cap',
+      description: '',
+      workspace: dataDir,
+      attachments: [],
+      maxBounces: null,
+    });
+    const capped = store.createTicket({
+      title: 'Explicit cap',
+      description: '',
+      workspace: dataDir,
+      attachments: [],
+      maxBounces: '2.9',
+    });
+
+    assert.equal(inherited.maxBounces, null);
+    assert.equal(capped.maxBounces, 2);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

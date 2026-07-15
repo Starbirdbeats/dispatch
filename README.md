@@ -104,6 +104,12 @@ flow and land wherever that CLI keeps them (keyring / config dir).
 
 If a phase uses a disabled provider, Dispatch will pause that phase and ask for Setup before continuing.
 
+The top usage strip is separate from Settings auth. Claude agent runs can be authenticated
+through the CLI/keyring even when Dispatch cannot read an OAuth token for Anthropic account
+usage APIs; in that case the usage meters show unavailable rather than treating Claude as
+logged out. Set `CLAUDE_CODE_OAUTH_TOKEN` only if you intentionally want Dispatch to use a
+readable Claude OAuth token for usage/model enrichment.
+
 ## Data and secrets
 
 - Board + tickets are stored in `DISPATCH_DATA` (defaults to `~/dispatch-data`).
@@ -182,9 +188,10 @@ npm run screenshots
 - Disabled-provider warning behavior in phase CFG
 - URL-state routing: every modal/tab is reflected in `location.hash`, a hard refresh
   restores it, and Back/Forward walk modal history without ever navigating out of the app
-- Responsive board: at ≥760px the board is a pipeline rail of phase "stations" (capped at
-  4 chips + "+N more") with an in-flight tracker below; at <760px it collapses to one phase
-  per screen with prev/next + dot pager + swipe
+- Responsive board: at ≥760px the board splits into a scrollable pipeline rail in the top half
+  and a scrollable in-flight tracker pinned to the bottom half; at <760px it collapses to one
+  phase per screen with prev/next + dot pager + swipe, while the in-flight tracker stays pinned
+  to the bottom
 
 `npm run screenshots` regenerates `docs/screenshots/*.png` for the README setup flow.
 
@@ -193,10 +200,13 @@ npm run screenshots
 The board adapts at a **760px** breakpoint:
 
 - **Desktop (≥760px)** — a horizontal *pipeline rail*: each phase is a station (accent-coloured
-  by role/harness) showing its ticket chips, connected by `▸`. Below it, an *in-flight tracker*
-  lists running/queued tickets with a per-ticket phase-progress bar and live `T+` elapsed.
+  by role/harness) showing its ticket chips, connected by `▸`. The rail is pinned to the top
+  half of the board and each station scrolls vertically when it has more tickets than fit.
+  Below it, an *in-flight tracker* stays pinned to the bottom half and scrolls its running/queued
+  rows with a per-ticket phase-progress bar and live `T+` elapsed.
 - **Mobile (<760px)** — one phase per screen with `‹ ›` controls, a dot pager, and swipe to move
-  along the line; tickets render as full-width cards.
+  along the line; tickets render as full-width cards above a bottom-pinned in-flight tracker
+  that scrolls its own running/queued rows.
 
 Both views share the same click/drag wiring: clicking a chip, card, or tracker row opens the
 ticket modal (and updates the URL), and station `CFG` opens the phase config.

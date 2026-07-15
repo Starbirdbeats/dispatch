@@ -60,6 +60,7 @@ export function loadUsageCache() {
         source: cached[provider].source || null,
         ...(cached[provider].plan ? { plan: String(cached[provider].plan) } : {}),
         ...(cached[provider].error ? { error: String(cached[provider].error) } : {}),
+        ...(cached[provider].note ? { note: String(cached[provider].note) } : {}),
       };
     }
   } catch { /* empty cache is fine */ }
@@ -75,16 +76,21 @@ export function saveUsageCache() {
   } catch { /* cache is best-effort */ }
 }
 
-export function setProviderUsage(provider, { fiveHour = null, weekly = null, at = new Date().toISOString(), source = 'unknown', error = null } = {}) {
-  if (!USAGE[provider]) return false;
-  const next = {
+export function buildProviderUsage(previous = {}, { fiveHour = null, weekly = null, at = new Date().toISOString(), source = 'unknown', error = null, note = null } = {}) {
+  return {
     fiveHour: normalizeUsageWindow(fiveHour) || null,
     weekly: normalizeUsageWindow(weekly) || null,
     at,
     source,
-    ...(USAGE[provider].plan ? { plan: USAGE[provider].plan } : {}),  // plan comes from local auth files, not the usage APIs — survive refreshes
+    ...(previous.plan ? { plan: previous.plan } : {}),  // plan comes from local auth files, not the usage APIs — survive refreshes
     ...(error ? { error: String(error).slice(0, 240) } : {}),
+    ...(!error && note ? { note: String(note).slice(0, 240) } : {}),
   };
+}
+
+export function setProviderUsage(provider, opts = {}) {
+  if (!USAGE[provider]) return false;
+  const next = buildProviderUsage(USAGE[provider], opts);
   const before = JSON.stringify(USAGE[provider]);
   USAGE[provider] = next;
   const changed = before !== JSON.stringify(next);
@@ -115,6 +121,7 @@ export function setProviderWindow(provider, window, data, { at = new Date().toIS
     source,
   };
   delete USAGE[provider].error;
+  delete USAGE[provider].note;
   const changed = before !== JSON.stringify(USAGE[provider]);
   if (changed) saveUsageCache();
   return changed;

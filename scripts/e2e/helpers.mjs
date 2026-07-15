@@ -227,6 +227,11 @@ export async function startDispatchServer(overrides = {}) {
     base,
     port,
     child,
+    root: harness.root,
+    dataDir: harness.dataDir,
+    home: harness.home,
+    bin: harness.bin,
+    envFile: harness.envFile,
     cleanup: async () => {
       if (!child.killed) child.kill('SIGTERM');
       await waitForProcessExit(child, 5000).catch(() => {

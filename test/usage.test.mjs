@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { parseLine } from '../engine/codex.mjs';
 import { contextSnapshot } from '../engine/limits.mjs';
 import {
+  buildProviderUsage,
   codexRateLimitWindows,
   extractCodexRateLimitsSnapshot,
   normalizePercent,
@@ -24,6 +25,26 @@ test('normalizeUsageWindow preserves already-normalized used percentages', () =>
   });
   assert.equal(normalizeUsageWindow({ usedPercent: 0.7 })?.usedPct, 0.7);
   assert.equal(normalizeUsageWindow({ used_percent: 99.95 })?.usedPct, 100);
+});
+
+test('buildProviderUsage stores non-error notes separately from errors', () => {
+  const state = buildProviderUsage({ plan: 'max' }, {
+    at: '2026-07-11T10:00:00.000Z',
+    source: 'claude-cli-auth',
+    note: 'usage unavailable',
+  });
+  assert.equal(state.plan, 'max');
+  assert.equal(state.source, 'claude-cli-auth');
+  assert.equal(state.note, 'usage unavailable');
+  assert.equal(state.error, undefined);
+
+  const errorState = buildProviderUsage({}, {
+    source: 'claude-oauth-usage',
+    note: 'will be suppressed',
+    error: 'usage API 401',
+  });
+  assert.equal(errorState.error, 'usage API 401');
+  assert.equal(errorState.note, undefined);
 });
 
 test('codexRateLimitWindows classifies windows by duration, not primary/secondary names', () => {

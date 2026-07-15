@@ -1,9 +1,9 @@
 // e2e: Providers → 4C guided stepper + subscription auth flow.
 // Boots with BOTH providers unauthenticated, then drives the real login pipeline against
 // fake CLIs: click AUTHENTICATE → server spawns `claude auth login` / `codex login` →
-// captures the OAuth URL → client "opens" it → claude's one-time code is pasted back →
-// the pill flips to AUTHENTICATED without a page reload. window.open is stubbed so no real
-// network navigation happens.
+// captures the OAuth URL → client exposes it as the pending login link → claude's
+// one-time code is pasted back → the pill flips to AUTHENTICATED without a page reload.
+// window.open is stubbed for the initial blank popup so no real network navigation happens.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -35,7 +35,7 @@ async function stubWindowOpen(page) {
   });
 }
 
-const openedUrls = (page) => page.evaluate(() => (window.__opened || []).map((o) => o.url).filter(Boolean));
+const authHref = (page, type) => page.$eval(`[data-auth-open="${type}"]`, (el) => el.href);
 
 // On any failure, print what the app actually looked like — which guard fired, what the
 // server thought was pending, what the last toast said — so a flake is diagnosable from
@@ -88,8 +88,8 @@ async function dumpFailureState(page, harness, pageErrors) {
     await page.waitForSelector('[data-auth-code-input="claude"]');
     assert.ok(await page.$('[data-auth-open="claude"]'), 'OPEN LOGIN PAGE missing for claude');
     assert.ok(await page.$('[data-auth-cancel="claude"]'), 'CANCEL missing for claude');
-    const claudeUrls = await openedUrls(page);
-    assert.ok(claudeUrls.some((u) => /^https:\/\/claude\.com\/cai\/oauth/.test(u)), `expected claude auth URL to open, saw: ${JSON.stringify(claudeUrls)}`);
+    const claudeHref = await authHref(page, 'claude');
+    assert.ok(/^https:\/\/claude\.com\/cai\/oauth/.test(claudeHref), `expected claude auth link, saw: ${JSON.stringify(claudeHref)}`);
 
     // paste the code and submit → CLI writes creds, exits 0, server re-probes, pill flips
     await page.type('[data-auth-code-input="claude"]', 'GOOD-CODE');
@@ -104,8 +104,8 @@ async function dumpFailureState(page, harness, pageErrors) {
     await page.waitForSelector('[data-auth-cancel="codex"]');
     assert.ok(await page.$('[data-auth-open="codex"]'), 'OPEN LOGIN PAGE missing for codex');
     assert.equal(await page.$('[data-auth-code-input="codex"]'), null, 'codex must NOT show a code input (localhost-callback flow)');
-    const codexUrls = await openedUrls(page);
-    assert.ok(codexUrls.some((u) => /^https:\/\/auth\.openai\.com/.test(u)), `expected codex auth URL to open, saw: ${JSON.stringify(codexUrls)}`);
+    const codexHref = await authHref(page, 'codex');
+    assert.ok(/^https:\/\/auth\.openai\.com/.test(codexHref), `expected codex auth link, saw: ${JSON.stringify(codexHref)}`);
 
     await page.$eval('[data-auth-cancel="codex"]', (el) => el.click());
     await page.waitForSelector('.step-auth [data-auth="codex"]'); // back to idle AUTHENTICATE

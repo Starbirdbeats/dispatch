@@ -9,7 +9,7 @@ fallback; never an LLM's memory (it can't know models newer than its training).
 
 | # | Claude | Codex |
 |---|--------|-------|
-| 1 | **Anthropic Models API** — `GET api.anthropic.com/v1/models`, authenticated with Claude Code's own OAuth token (`~/.claude/.credentials.json`, `anthropic-beta: oauth-2025-04-20`). Returns the live model list **with a `capabilities.effort` object per model** → exact supported effort levels. | **`codex app-server` JSON-RPC `model/list`** — the ChatGPT-authed picker list. Returns per-model `supportedReasoningEfforts` **and `defaultReasoningEffort`**, and reflects what *this account* can actually run. |
+| 1 | **Anthropic Models API** — `GET api.anthropic.com/v1/models`, authenticated with Claude Code's readable OAuth token (`CLAUDE_CODE_OAUTH_TOKEN` or `~/.claude/.credentials.json`, `anthropic-beta: oauth-2025-04-20`). Returns the live model list **with a `capabilities.effort` object per model** → exact supported effort levels. | **`codex app-server` JSON-RPC `model/list`** — the ChatGPT-authed picker list. Returns per-model `supportedReasoningEfforts` **and `defaultReasoningEffort`**, and reflects what *this account* can actually run. |
 | 2 | Docs scrape: `platform.claude.com` models overview (models only, regex-parsed, junk-filtered) | Docs scrape: `developers.openai.com/codex/models` |
 | 3 | Last successful cache (`~/dispatch-data/models-cache.json`, versioned) | same |
 | 4 | Built-in seed (4 curated models per provider) | same |
@@ -43,7 +43,7 @@ the refresh report/toast (`claude: unreachable (kept cache)`).
 
 | Scenario | Behavior |
 |---|---|
-| OAuth token expired / credentials missing | Claude falls to docs scrape |
+| OAuth token expired / credentials missing / keyring-only auth | Claude falls to docs scrape |
 | `codex` binary missing / app-server hangs (20 s timeout) | Codex falls to docs scrape |
 | Docs pages also unreachable | Cache (or seed) retained, `ok:false` + per-source errors reported |
 | Cache schema changes | `CACHE_VERSION` mismatch → cache ignored, next refresh rebuilds it |
@@ -62,6 +62,9 @@ authoritative-replace semantics, in-use survival marking.
 
 ## Security note
 
-The Claude OAuth token is read fresh from disk per refresh, sent only to `api.anthropic.com`,
-and never logged or cached in memory. If Anthropic ever scopes it away from `/v1/models`,
-the chain degrades to the docs scrape automatically.
+The Claude OAuth token is read fresh from `CLAUDE_CODE_OAUTH_TOKEN` or disk per refresh,
+sent only to `api.anthropic.com`, and never logged or cached in memory. Modern Claude Code
+may keep auth material only in the CLI/keyring; that still authenticates agent runs, but
+model and usage enrichment degrade to fallback data unless a readable OAuth token is
+available. If Anthropic ever scopes the token away from `/v1/models`, the chain degrades
+to the docs scrape automatically.

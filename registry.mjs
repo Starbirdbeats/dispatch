@@ -62,13 +62,49 @@ const CACHE_VERSION = 2;
 
 /* ================= source 1a: Anthropic Models API (OAuth) ================= */
 
+export const CLAUDE_OAUTH_TOKEN_MISSING = 'CLAUDE_OAUTH_TOKEN_MISSING';
+export const CLAUDE_OAUTH_TOKEN_EXPIRED = 'CLAUDE_OAUTH_TOKEN_EXPIRED';
+export const CLAUDE_OAUTH_TOKEN_UNREADABLE = 'CLAUDE_OAUTH_TOKEN_UNREADABLE';
+
+export class ClaudeOAuthTokenError extends Error {
+  constructor(code, message, cause = null) {
+    super(message);
+    this.name = 'ClaudeOAuthTokenError';
+    this.code = code;
+    if (cause) this.cause = cause;
+  }
+}
+
+export function isClaudeOAuthTokenUnavailable(err) {
+  return err instanceof ClaudeOAuthTokenError
+    && [CLAUDE_OAUTH_TOKEN_MISSING, CLAUDE_OAUTH_TOKEN_UNREADABLE].includes(err.code);
+}
+
 export function readClaudeOAuthToken() {
+  // Claude Code may keep the token in a keyring; when an env token is provided it is
+  // the only readable OAuth material Dispatch has for account usage/model APIs.
+  const envToken = String(process.env.CLAUDE_CODE_OAUTH_TOKEN || '').trim();
+  if (envToken) return envToken;
+
   // Claude Code refreshes this file itself; read fresh every time, never cache or log it.
-  const creds = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8'));
+  let creds;
+  try {
+    creds = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8'));
+  } catch (e) {
+    throw new ClaudeOAuthTokenError(
+      e.code === 'ENOENT' ? CLAUDE_OAUTH_TOKEN_MISSING : CLAUDE_OAUTH_TOKEN_UNREADABLE,
+      'claude oauth token unavailable',
+      e,
+    );
+  }
   const oauth = creds.claudeAiOauth || creds;
-  if (oauth.expiresAt && Date.now() > oauth.expiresAt) throw new Error('claude oauth token expired');
-  if (!oauth.accessToken) throw new Error('no claude oauth token');
-  return oauth.accessToken;
+  const token = String(oauth.accessToken || '').trim();
+  if (!token) throw new ClaudeOAuthTokenError(CLAUDE_OAUTH_TOKEN_MISSING, 'claude oauth token unavailable');
+  const expiresAt = Number(oauth.expiresAt);
+  if (Number.isFinite(expiresAt) && expiresAt > 0 && Date.now() > expiresAt) {
+    throw new ClaudeOAuthTokenError(CLAUDE_OAUTH_TOKEN_EXPIRED, 'claude oauth token expired');
+  }
+  return token;
 }
 
 // capabilities.effort → ordered effort list; explicit [] means "model takes no effort param"
@@ -370,7 +406,7 @@ export async function probe() {
     } else if (parsed.authenticated === false) {
       result.claude.authenticated = false;
       result.claude.authDetail = parsed.detail || 'not authenticated';
-    } else if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
+    } else if (String(process.env.CLAUDE_CODE_OAUTH_TOKEN || '').trim() || String(process.env.ANTHROPIC_API_KEY || '').trim()) {
       result.claude.authenticated = true;
       result.claude.authDetail = 'authenticated · api key';
     } else {

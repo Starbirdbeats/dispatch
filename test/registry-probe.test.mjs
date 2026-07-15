@@ -4,7 +4,13 @@ import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { probe } from '../registry.mjs';
+import {
+  CLAUDE_OAUTH_TOKEN_EXPIRED,
+  CLAUDE_OAUTH_TOKEN_MISSING,
+  ClaudeOAuthTokenError,
+  probe,
+  readClaudeOAuthToken,
+} from '../registry.mjs';
 
 async function withSandbox(env, fn) {
   // Snapshot the env-key fallbacks too so a key set in the outer environment can't leak
@@ -39,6 +45,60 @@ function setupFakeClaude(dir, token = 'fake-token-abc') {
   };
   fs.writeFileSync(path.join(dir, '.claude', '.credentials.json'), JSON.stringify(creds), 'utf8');
 }
+
+function captureThrown(fn) {
+  try {
+    fn();
+  } catch (e) {
+    return e;
+  }
+  assert.fail('expected function to throw');
+}
+
+test('readClaudeOAuthToken uses CLAUDE_CODE_OAUTH_TOKEN when provided', async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'dispatch-probe-token-env-'));
+  try {
+    await withSandbox({ HOME: home, PATH: process.env.PATH, CLAUDE_CODE_OAUTH_TOKEN: ' env-token-abc ' }, async () => {
+      assert.equal(readClaudeOAuthToken(), 'env-token-abc');
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('readClaudeOAuthToken reports an empty credentials token as missing', async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'dispatch-probe-token-missing-'));
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: '', expiresAt: 0 } }), 'utf8');
+    await withSandbox({ HOME: home, PATH: process.env.PATH }, async () => {
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      const err = captureThrown(() => readClaudeOAuthToken());
+      assert.ok(err instanceof ClaudeOAuthTokenError);
+      assert.equal(err.code, CLAUDE_OAUTH_TOKEN_MISSING);
+      assert.doesNotMatch(err.message, /fake-token|env-token/i);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('readClaudeOAuthToken reports an expired credentials token separately', async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'dispatch-probe-token-expired-'));
+  try {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'expired-token', expiresAt: Date.now() - 1000 } }), 'utf8');
+    await withSandbox({ HOME: home, PATH: process.env.PATH }, async () => {
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      const err = captureThrown(() => readClaudeOAuthToken());
+      assert.ok(err instanceof ClaudeOAuthTokenError);
+      assert.equal(err.code, CLAUDE_OAUTH_TOKEN_EXPIRED);
+      assert.doesNotMatch(err.message, /expired-token/);
+    });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test('probe reports installed+authenticated CLI states when both providers are present', async () => {
   const home = mkdtempSync(path.join(os.tmpdir(), 'dispatch-probe-auth-'));

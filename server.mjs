@@ -19,6 +19,7 @@ import {
 } from './engine/envfile.mjs';
 import { AUTH_COMMANDS, createAuthSessions } from './engine/authflow.mjs';
 import { checkUpdateStatus, createGitRunner, parseAheadBehind } from './engine/update-status.mjs';
+import { inspectWorkspaceResolution, resolveWorkspace } from './engine/workspace-resolution.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENV_FILE = path.resolve(process.env.DISPATCH_ENV_FILE || path.join(__dirname, '.env'));
@@ -37,7 +38,7 @@ const [{ Store, DATA_DIR, providerEnabled, enabledProviders }, { Runner }, notif
 ]);
 const { telegramConfig, sendTelegram, detectChats } = notify;
 const { USAGE, extractCodexRateLimitsSnapshot, loadUsageCache, setProviderUsage, setProviderPlan } = usage;
-const { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe, readClaudeOAuthToken } = registry;
+const { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe, readClaudeOAuthToken, isClaudeOAuthTokenUnavailable } = registry;
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
 
 const BOOT_ID = crypto.randomUUID(); // stale open tabs self-reload when this changes
@@ -287,6 +288,16 @@ async function probeClaudeUsage() {
     });
     return USAGE.claude;
   } catch (e) {
+    if (isClaudeOAuthTokenUnavailable(e)) {
+      setProviderUsage('claude', {
+        fiveHour: null,
+        weekly: null,
+        at,
+        source: 'claude-cli-auth',
+        note: 'Usage unavailable: Claude auth is handled by the CLI, but Dispatch cannot read an OAuth token for account usage.',
+      });
+      return USAGE.claude;
+    }
     setProviderUsage('claude', { fiveHour: null, weekly: null, at, source: 'claude-oauth-usage', error: e.message });
     return USAGE.claude;
   }
@@ -889,6 +900,41 @@ app.post('/api/tickets/:id/move', (req, res) => {
   // Moving a ticket puts it back in play — it must not stay hidden in the archive.
   if (t.archived) { delete t.archived; delete t.archivedAt; store.saveTicket(t.id); }
   res.json(t);
+});
+
+app.get('/api/tickets/:id/workspace-resolution', async (req, res) => {
+  const t = store.tickets.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json(await inspectWorkspaceResolution({ workspace: t.workspace, ticket: t }));
+  } catch (e) {
+    res.status(409).json({ error: e.message || 'could not inspect workspace' });
+  }
+});
+
+app.post('/api/tickets/:id/workspace-resolution', async (req, res) => {
+  const t = store.tickets.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  try {
+    const result = await resolveWorkspace({
+      workspace: t.workspace,
+      ticket: t,
+      action: String(req.body?.action || ''),
+      message: req.body?.message,
+    });
+    if (result.action !== 'noop') {
+      store.appendActivity(t.id, {
+        kind: 'system',
+        by: 'human',
+        text: `resolved workspace blocker by ${result.action === 'commit' ? 'committing' : 'stashing'} ${result.before.changeCount} change(s)`,
+      });
+    }
+    store.saveTicket(t.id);
+    broadcast({ type: 'state-changed' });
+    res.json(result);
+  } catch (e) {
+    res.status(409).json({ error: e.message || 'could not resolve workspace' });
+  }
 });
 
 // Archive is a soft flag: the ticket keeps its column, dossier, and transcripts but drops

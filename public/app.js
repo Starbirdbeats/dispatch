@@ -11,8 +11,9 @@ const S = {
   commentThumbs: [],
   commentThumbTicketId: null,
   newPasteThumbs: [],
+  confirmAction: null,
+  workspaceResolve: null,
   mobilePhase: 0,      // <760px board: which phase (column index) is on screen
-  railExpanded: {},    // desktop rail: colId -> showing all chips past the +N cap
 };
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -20,20 +21,60 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 /* ---------- appearance prefs (device-local, not server state) ---------- */
 const PREFS_KEY = 'dispatch.appearance';
-const DEFAULT_PREFS = { fontPx: 20, uiScale: 1, transcriptShowTools: true };
+const TRANSCRIPT_KINDS = ['system', 'text', 'tool', 'thinking', 'error', 'result'];
+const DEFAULT_TRANSCRIPT_KIND_COLORS = {
+  system: '#2f6379',
+  text: '#2e2a20',
+  tool: '#7b5a14',
+  thinking: '#675a43',
+  error: '#a8321e',
+  result: '#557427',
+};
+const DEFAULT_PREFS = {
+  fontPx: 20,
+  uiScale: 1,
+  transcriptShowTools: true,
+  transcriptKindColors: { ...DEFAULT_TRANSCRIPT_KIND_COLORS },
+};
+const HEX_COLOR_RE = /^#[0-9a-f]{6}$/i;
+function safeHexColor(value, fallback) {
+  const v = String(value || '').trim();
+  return HEX_COLOR_RE.test(v) ? v.toLowerCase() : fallback;
+}
+function normalizeTranscriptColors(colors = {}) {
+  return Object.fromEntries(TRANSCRIPT_KINDS.map((kind) => [
+    kind,
+    safeHexColor(colors?.[kind], DEFAULT_TRANSCRIPT_KIND_COLORS[kind]),
+  ]));
+}
+function normalizePrefs(prefs = {}) {
+  const fontPx = Number(prefs.fontPx);
+  const uiScale = Number(prefs.uiScale);
+  return {
+    ...DEFAULT_PREFS,
+    ...prefs,
+    fontPx: Number.isFinite(fontPx) ? Math.max(12, Math.min(32, fontPx)) : DEFAULT_PREFS.fontPx,
+    uiScale: Number.isFinite(uiScale) ? Math.max(0.7, Math.min(1.6, uiScale)) : DEFAULT_PREFS.uiScale,
+    transcriptKindColors: normalizeTranscriptColors(prefs.transcriptKindColors),
+  };
+}
 function loadPrefs() {
-  try { return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; }
-  catch { return { ...DEFAULT_PREFS }; }
+  try { return normalizePrefs(JSON.parse(localStorage.getItem(PREFS_KEY) || '{}')); }
+  catch { return normalizePrefs(); }
 }
 function applyPrefs(p) {
+  const prefs = normalizePrefs(p);
   // Single paper palette — no theme switch. Font size + UI scale stay device-local.
-  document.documentElement.style.setProperty('--base-font', `${p.fontPx}px`);
-  document.documentElement.style.zoom = String(p.uiScale);
+  document.documentElement.style.setProperty('--base-font', `${prefs.fontPx}px`);
+  document.documentElement.style.zoom = String(prefs.uiScale);
+  for (const [kind, color] of Object.entries(prefs.transcriptKindColors)) {
+    document.documentElement.style.setProperty(`--tr-kind-${kind}`, color);
+  }
 }
 function savePrefs(p) {
-  S.prefs = p;
-  try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch {}
-  applyPrefs(p);
+  S.prefs = normalizePrefs(p);
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(S.prefs)); } catch {}
+  applyPrefs(S.prefs);
 }
 
 /* ---------- minimal, XSS-safe markdown → HTML (no deps) ----------
@@ -253,6 +294,8 @@ function diagnose(t, c) {
   return { kind: 'done', tone: 'ok', label: 'DONE', stuck: false, headline: 'Complete', detail: t.humanTest ? 'See the human-test steps in Overview.' : '' };
 }
 const STUCK_HEADLINES = {
+  'branch-dirty': 'Stuck: workspace has uncommitted changes',
+  'branch-unavailable': 'Stuck: Dispatch could not prepare the branch',
   'hold-limit': 'Stuck: the phase keeps finishing without advancing',
   'no-control-block': 'Stuck: the agent didn’t say what to do next',
   'bounce-limit': 'Stuck: the phases keep bouncing it back and forth',
@@ -362,6 +405,7 @@ function fmtResetDay(iso) {
 function usageSourceLabel(source) {
   const s = String(source || '').toLowerCase();
   if (s.includes('oauth')) return 'OAUTH';
+  if (s.includes('auth')) return 'AUTH';
   if (s.includes('api')) return 'API';
   return '';
 }
@@ -387,7 +431,7 @@ function usageWindowHTML(label, win, provider, kind) {
 
 function usageProviderHTML(provider) {
   const u = S.data.usage?.[provider] || {};
-  const title = [u.source, u.at ? `updated ${fmtTs(u.at)}` : '', u.error ? `error: ${u.error}` : ''].filter(Boolean).join(' · ');
+  const title = [u.source, u.at ? `updated ${fmtTs(u.at)}` : '', u.error ? `error: ${u.error}` : '', u.note || ''].filter(Boolean).join(' · ');
   // "MAX·OAUTH" / "PLUS·OAUTH" when the CLI auth file exposes a tier; source-derived otherwise
   const plan = u.plan ? String(u.plan).toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ')[0] : '';
   const src = plan ? `${plan}·OAUTH` : usageSourceLabel(u.source);
@@ -554,7 +598,9 @@ function stepAuthRow(type) {
       </div>
       <div class="step-auth-cmd">
         <code>${esc(pending.command || cmd)}</code>
-        <button class="btn btn-accent" data-auth-open="${type}" ${pending.url ? '' : 'disabled'}>OPEN LOGIN PAGE ↗</button>
+        ${pending.url
+          ? `<a class="btn btn-accent" href="${esc(pending.url)}" target="_blank" rel="noopener noreferrer" data-auth-open="${type}">OPEN LOGIN PAGE ↗</a>`
+          : `<button class="btn btn-accent" disabled>OPEN LOGIN PAGE ↗</button>`}
       </div>
       ${pending.needsCode ? `<div class="step-auth-cmd">
         <input class="step-code" data-auth-code-input="${type}" placeholder="paste the code from the browser" autocomplete="off" spellcheck="false">
@@ -754,12 +800,17 @@ function wireStepperHandlers() {
       }
     });
   }
-  // OPEN LOGIN PAGE ↗ : re-open the pending session's URL (popup lost / opened elsewhere).
-  for (const btn of document.querySelectorAll('[data-auth-open]')) {
-    btn.addEventListener('click', () => {
-      const url = setupInfo().authPending?.[btn.dataset.authOpen]?.url;
-      if (url) window.open(url, '_blank');
-      else toast('no login URL yet — click AUTHENTICATE again', true);
+  // OPEN LOGIN PAGE ↗ : a real <a target="_blank"> so the browser opens the tab natively.
+  // window.open() gets silently swallowed in mobile / in-app / popup-blocked browsers (the
+  // "nothing happens" bug); a genuine anchor click is honored where window.open isn't. The
+  // href already carries the URL — this handler only copies it as a backup (best-effort;
+  // navigator.clipboard is absent over plain http) and never preventDefaults the open.
+  for (const link of document.querySelectorAll('a[data-auth-open]')) {
+    link.addEventListener('click', () => {
+      const url = setupInfo().authPending?.[link.dataset.authOpen]?.url;
+      if (!url) return;
+      const copied = navigator.clipboard?.writeText(url);
+      if (copied) copied.then(() => toast('opening login page — link copied as a backup')).catch(() => {});
     });
   }
   // SUBMIT CODE → : forward the one-time code to the CLI's stdin (claude flow).
@@ -1055,7 +1106,7 @@ function renderTopbar() {
   const cap = S.data.board.settings.maxConcurrent ?? 2;
   const paused = cap <= 0;
   $('#queueinfo').innerHTML = paused
-    ? `<span class="paused-flag">⏸ PAUSED</span> · RUN <b>${r.running.length}</b> · Q <b>${r.queued.length}</b>`
+    ? `<span class="paused-flag">⏸ PAUSED</span> · RUN <b>${r.running.length}</b> · QUEUE <b>${r.queued.length}</b>`
     : `RUN <b>${r.running.length}</b> · QUEUE <b>${r.queued.length}</b> · CAP <b>${cap}</b>`;
   $('#btn-new').textContent = mqMobile.matches ? '+ TICKET' : '[ + TICKET ]';  // mobile bar drops the brackets
   const pauseBtn = $('#btn-pause');
@@ -1078,7 +1129,7 @@ function renderTopbar() {
 }
 
 /* Board = design 3a: desktop (≥760px) is the 1c pipeline rail + in-flight tracker;
-   mobile (<760px) is the 2a one-phase-per-screen swipe view. */
+   mobile (<760px) is the 2a one-phase-per-screen swipe view + pinned in-flight tracker. */
 const mqMobile = window.matchMedia('(max-width: 760px)');
 mqMobile.addEventListener('change', () => { if (S.data) render(); }); // topbar labels + board layout both flip
 
@@ -1154,10 +1205,16 @@ function wireTicketActionButtons(root = document) {
 async function archiveTicket(id, { closeTicketModal = false } = {}) {
   const t = S.data.tickets.find((x) => x.id === id);
   const active = S.data.runs.running.includes(id) || S.data.runs.queued.includes(id);
-  const msg = active
-    ? `Archive "${t?.title || id}" and stop its queued/running work? It will be hidden from the board but kept in the archive.`
-    : `Archive "${t?.title || id}"? It will be hidden from the board but kept in the archive.`;
-  if (!confirm(msg)) return;
+  const ok = await confirmTicketAction({
+    title: 'Archive ticket?',
+    meta: ticketActionMeta(t, id),
+    summary: active
+      ? 'This stops queued/running work, hides the ticket from the board, and keeps it in the archive.'
+      : 'This hides the ticket from the board and keeps it in the archive.',
+    callout: 'Restore from [ ARCHIVE ] in the top bar, or Settings -> Engine -> Archive -> [ OPEN ARCHIVE ].',
+    confirmLabel: '[ ARCHIVE TICKET ]',
+  });
+  if (!ok) return;
   try {
     await api(`/api/tickets/${id}/archive`, 'POST', {});
     toast('ARCHIVED');
@@ -1169,7 +1226,14 @@ async function archiveTicket(id, { closeTicketModal = false } = {}) {
 async function deleteTicket(id, { closeTicketModal = false, archived = false } = {}) {
   const t = S.data.tickets.find((x) => x.id === id);
   const noun = archived ? 'archived ticket' : 'ticket';
-  if (!confirm(`Permanently delete ${noun} "${t?.title || id}" + dossier + transcripts + attachments?`)) return;
+  const ok = await confirmTicketAction({
+    title: `Delete ${noun}?`,
+    meta: ticketActionMeta(t, id, archived),
+    summary: 'This permanently deletes the ticket, dossier, transcripts, and attachments.',
+    callout: 'Deleted ticket information cannot be retrieved from Dispatch.',
+    confirmLabel: '[ DELETE FOREVER ]',
+  });
+  if (!ok) return;
   try {
     await api(`/api/tickets/${id}`, 'DELETE');
     toast('DELETED');
@@ -1236,17 +1300,7 @@ function stationEl(c) {
     </div>
     <div class="station-body"></div>`;
   const body = $('.station-body', el);
-  const CAP = 4;
-  const expanded = S.railExpanded[c.id];
-  const shown = expanded ? tickets : tickets.slice(0, CAP);
-  for (const t of shown) body.appendChild(chipEl(t, c));
-  if (tickets.length > CAP) {
-    const btn = document.createElement('button');
-    btn.className = 'chip-more';
-    btn.textContent = expanded ? 'SHOW LESS' : `+${tickets.length - CAP} MORE`;
-    btn.onclick = () => { S.railExpanded[c.id] = !expanded; renderBoard(); };
-    body.appendChild(btn);
-  }
+  for (const t of tickets) body.appendChild(chipEl(t, c));
   if (c.role === 'intake') {
     const drop = document.createElement('button');
     drop.type = 'button';
@@ -1397,12 +1451,16 @@ function renderMobileBoard(board) {
   hint.innerHTML = `${prevN ? '‹ ' : ''}SWIPE · ${[prevN && esc(prevN), nextN && esc(nextN)].filter(Boolean).join('&nbsp;&nbsp;|&nbsp;&nbsp;')}${nextN ? ' ›' : ''}`;
   body.appendChild(hint);
   board.appendChild(body);
+  board.appendChild(inflightEl());
 
   const go = (d) => { const n = idx + d; if (n >= 0 && n < list.length) { S.mobilePhase = n; renderBoard(); } };
   $('.mprev', nav).onclick = () => go(-1);
   $('.mnext', nav).onclick = () => go(1);
   let x0 = null;
-  board.ontouchstart = (e) => { x0 = e.touches[0].clientX; };
+  board.ontouchstart = (e) => {
+    if (e.target.closest?.('.inflight')) { x0 = null; return; }
+    x0 = e.touches[0].clientX;
+  };
   board.ontouchend = (e) => {
     if (x0 == null) return;
     const dx = e.changedTouches[0].clientX - x0;
@@ -1437,6 +1495,7 @@ function closeModal() {
   // history.back() is only safe because initHistoryFromLocation() guarantees a
   // "board" entry sits beneath every modal we ever push — see below.
   if (history.state?.modal) { history.back(); return; }
+  dismissWorkspaceResolve();
   clearCommentThumbs();
   clearNewPasteThumbs();
   S.modal = null; S.transcript = null; $('#modal-root').innerHTML = '';
@@ -1460,6 +1519,223 @@ function toast(text, isError = false) {
   toastTimer = setTimeout(() => el.classList.remove('show'), isError ? 7000 : 2600);
 }
 function alertErr(e) { toast(`ERROR — ${e.message}`, true); }
+
+function ticketActionConfirmEnabled() {
+  return S.data?.board?.settings?.confirmTicketArchiveDelete !== false;
+}
+
+function ticketActionBoardLabel(t, archived = false) {
+  if (archived || t?.archived) return 'Archive';
+  return cols().find((c) => c.id === t?.columnId)?.name || 'Board';
+}
+
+function ticketActionMeta(t, id, archived = false) {
+  return [
+    { key: 'TICKET', value: ticketNo(t) || id },
+    { key: 'TITLE', value: t?.title || id },
+    { key: 'BOARD', value: ticketActionBoardLabel(t, archived) },
+  ];
+}
+
+function ensureConfirmRoot() {
+  let root = $('#confirm-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'confirm-root';
+    document.body.appendChild(root);
+  }
+  return root;
+}
+
+function dismissTicketActionConfirm(result = false) {
+  if (!S.confirmAction) return false;
+  const current = S.confirmAction;
+  S.confirmAction = null;
+  $('#confirm-root')?.remove();
+  current.resolve(Boolean(result));
+  return true;
+}
+
+function renderTicketActionConfirm() {
+  const cfg = S.confirmAction;
+  if (!cfg) return;
+  const root = ensureConfirmRoot();
+  const meta = cfg.meta.map((row) => `
+    <div class="confirm-meta-row">
+      <span class="confirm-meta-key">${esc(row.key)}</span>
+      <span class="confirm-meta-value" title="${esc(row.value)}">${esc(row.value)}</span>
+    </div>`).join('');
+  root.innerHTML = `
+    <div class="confirm-overlay" id="confirm-overlay">
+      <section class="confirm-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <div class="confirm-kicker">ARE YOU SURE?</div>
+        <h3 class="confirm-title" id="confirm-title">${esc(cfg.title)}</h3>
+        <div class="confirm-meta" aria-label="Ticket details">${meta}</div>
+        <p class="confirm-summary">${esc(cfg.summary)}</p>
+        <div class="confirm-callout"><span class="confirm-caret">&gt;</span><span>${esc(cfg.callout)}</span></div>
+        <label class="confirm-disable">
+          <input type="checkbox" id="confirm-disable-ticket-actions">
+          <span>Don't ask again for archive &amp; delete actions</span>
+        </label>
+        <div class="confirm-foot">
+          <div class="confirm-note" id="confirm-disable-note">Change this later in Settings -> Engine -> Ticket Safety.</div>
+          <button type="button" class="confirm-btn confirm-cancel" id="confirm-cancel"><span class="confirm-button-text">[ CANCEL ]</span></button>
+          <button type="button" class="confirm-btn confirm-ok" id="confirm-ok"><span class="confirm-button-text">${esc(cfg.confirmLabel)}</span></button>
+        </div>
+      </section>
+    </div>`;
+  $('#confirm-overlay').onclick = (e) => { if (e.target.id === 'confirm-overlay') dismissTicketActionConfirm(false); };
+  $('#confirm-cancel').onclick = () => dismissTicketActionConfirm(false);
+  $('#confirm-ok').onclick = () => dismissTicketActionConfirm(true);
+  $('#confirm-disable-ticket-actions').onchange = async (e) => {
+    const input = e.currentTarget;
+    if (!input.checked) return;
+    input.disabled = true;
+    try {
+      await api('/api/settings', 'PATCH', { confirmTicketArchiveDelete: false });
+      S.data.board.settings.confirmTicketArchiveDelete = false;
+      $('#confirm-disable-note').textContent = 'Disabled. Re-enable it in Settings -> Engine -> Ticket Safety.';
+    } catch (err) {
+      input.checked = false;
+      input.disabled = false;
+      alertErr(err);
+    }
+  };
+  setTimeout(() => $('#confirm-cancel')?.focus(), 0);
+}
+
+function confirmTicketAction(cfg) {
+  if (!ticketActionConfirmEnabled()) return Promise.resolve(true);
+  dismissTicketActionConfirm(false);
+  return new Promise((resolve) => {
+    S.confirmAction = { ...cfg, resolve };
+    renderTicketActionConfirm();
+  });
+}
+
+function ensureWorkspaceResolveRoot() {
+  let root = $('#workspace-resolve-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'workspace-resolve-root';
+    document.body.appendChild(root);
+  }
+  return root;
+}
+
+function dismissWorkspaceResolve() {
+  if (!S.workspaceResolve) return false;
+  S.workspaceResolve = null;
+  $('#workspace-resolve-root')?.remove();
+  return true;
+}
+
+function workspaceResolveChangeHTML(change) {
+  return `<div class="workspace-resolve-change"><span>${esc(change.code || '??')}</span><b>${esc(change.path || '')}</b></div>`;
+}
+
+function renderWorkspaceResolve() {
+  const st = S.workspaceResolve;
+  if (!st) return;
+  const root = ensureWorkspaceResolveRoot();
+  const data = st.data;
+  const changes = data?.changes || [];
+  const omitted = data?.changeCount > changes.length ? data.changeCount - changes.length : 0;
+  const options = data?.options || [];
+  const optionHTML = options.map((opt) => {
+    const busy = st.applying === opt.action;
+    const accent = opt.action === 'commit' || opt.action === 'retry';
+    return `
+      <div class="workspace-resolve-option">
+        <button type="button" class="btn ${accent ? 'btn-accent' : ''}" data-resolve-action="${esc(opt.action)}" ${st.applying ? 'disabled' : ''}>[ ${busy ? 'WORKING…' : esc(opt.label)} ]</button>
+        <div>${esc(opt.detail || '')}</div>
+      </div>`;
+  }).join('');
+  root.innerHTML = `
+    <div class="confirm-overlay" id="workspace-resolve-overlay">
+      <div class="workspace-resolve-panel" role="dialog" aria-modal="true" aria-labelledby="workspace-resolve-title">
+        <div class="confirm-head">
+          <div>
+            <div class="confirm-kicker">RESOLVE WORKSPACE</div>
+            <h3 id="workspace-resolve-title">Uncommitted changes block this ticket</h3>
+          </div>
+        </div>
+        <div class="workspace-resolve-body">
+          <div class="confirm-ticket">${esc(st.ticketLabel || st.ticketId)}</div>
+          ${st.loading ? '<div class="workspace-resolve-empty">loading available options…</div>' : ''}
+          ${st.error ? `<div class="workspace-resolve-error">${esc(st.error)}</div>` : ''}
+          ${data ? `
+            <div class="workspace-resolve-meta">
+              <span>workspace</span><b>${esc(data.workspace)}</b>
+              <span>branch</span><b>${esc(data.branch || 'HEAD')}</b>
+            </div>
+            ${data.dirty ? `
+              <div class="workspace-resolve-changes">
+                ${changes.map(workspaceResolveChangeHTML).join('')}
+                ${omitted ? `<div class="workspace-resolve-more">+ ${omitted} more change(s)</div>` : ''}
+              </div>
+              <label class="f">Commit message</label>
+              <input id="workspace-resolve-message" value="${esc(data.defaultMessage || '')}" ${st.applying ? 'disabled' : ''}>
+            ` : '<div class="workspace-resolve-empty">workspace is clean now</div>'}
+            <div class="workspace-resolve-options">${optionHTML}</div>
+          ` : ''}
+        </div>
+        <div class="confirm-foot">
+          <button type="button" class="btn" id="workspace-resolve-cancel" ${st.applying ? 'disabled' : ''}>[ CANCEL ]</button>
+        </div>
+      </div>
+    </div>`;
+  $('#workspace-resolve-overlay').onclick = (e) => { if (e.target.id === 'workspace-resolve-overlay' && !st.applying) dismissWorkspaceResolve(); };
+  $('#workspace-resolve-cancel').onclick = () => dismissWorkspaceResolve();
+  for (const b of root.querySelectorAll('[data-resolve-action]')) {
+    b.onclick = () => applyWorkspaceResolution(b.dataset.resolveAction, $('#workspace-resolve-message')?.value || '');
+  }
+}
+
+async function retryTicketPhase(ticketId) {
+  const r = await api(`/api/tickets/${ticketId}/run`, 'POST', {});
+  toast(r.queued ? 'RUN QUEUED' : `NOT QUEUED: ${r.reason || 'unknown'}`, !r.queued);
+  await loadState();
+}
+
+async function applyWorkspaceResolution(action, message) {
+  const st = S.workspaceResolve;
+  if (!st || st.applying) return;
+  if (action === 'retry') {
+    const ticketId = st.ticketId;
+    dismissWorkspaceResolve();
+    await retryTicketPhase(ticketId).catch(alertErr);
+    return;
+  }
+  S.workspaceResolve = { ...st, applying: action };
+  renderWorkspaceResolve();
+  try {
+    await api(`/api/tickets/${st.ticketId}/workspace-resolution`, 'POST', { action, message });
+    toast(action === 'commit' ? 'WORKSPACE COMMITTED — RETRYING' : 'WORKSPACE STASHED — RETRYING');
+    const ticketId = st.ticketId;
+    dismissWorkspaceResolve();
+    await retryTicketPhase(ticketId);
+  } catch (e) {
+    S.workspaceResolve = { ...st, applying: null, error: e.message };
+    renderWorkspaceResolve();
+  }
+}
+
+async function openWorkspaceResolve(t) {
+  dismissWorkspaceResolve();
+  S.workspaceResolve = { ticketId: t.id, ticketLabel: `${ticketNo(t)} · ${t.title}`, loading: true, error: null, data: null, applying: null };
+  renderWorkspaceResolve();
+  try {
+    const data = await api(`/api/tickets/${t.id}/workspace-resolution`);
+    if (!S.workspaceResolve || S.workspaceResolve.ticketId !== t.id) return;
+    S.workspaceResolve = { ...S.workspaceResolve, loading: false, data };
+    renderWorkspaceResolve();
+  } catch (e) {
+    if (!S.workspaceResolve || S.workspaceResolve.ticketId !== t.id) return;
+    S.workspaceResolve = { ...S.workspaceResolve, loading: false, error: e.message };
+    renderWorkspaceResolve();
+  }
+}
 
 function shell(title, bodyHTML, footHTML = '') {
   $('#modal-root').innerHTML = `
@@ -1564,6 +1840,7 @@ function renderForHash() {
   if (missing) {
     toast(`${modal.type === 'ticket' ? 'TICKET' : 'COLUMN'} NOT FOUND`, true);
     history.replaceState({ modal: false }, '', location.pathname + location.search);
+    dismissWorkspaceResolve();
     S.modal = null; S.transcript = null; $('#modal-root').innerHTML = '';
     return;
   }
@@ -1572,7 +1849,7 @@ function renderForHash() {
   if (modal?.type !== 'new') clearNewPasteThumbs();
   S.modal = modal;
   if (modal) renderModal();
-  else { S.transcript = null; $('#modal-root').innerHTML = ''; }
+  else { dismissWorkspaceResolve(); S.transcript = null; $('#modal-root').innerHTML = ''; }
 }
 window.addEventListener('hashchange', renderForHash);
 
@@ -1655,6 +1932,125 @@ function transcriptRecord(raw) {
   return null;
 }
 
+function transcriptKind(raw) {
+  const kind = String(raw || 'text').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  return kind || 'text';
+}
+
+function transcriptKindColor(kind, prefs = S.prefs) {
+  const safeKind = TRANSCRIPT_KINDS.includes(kind) ? kind : 'text';
+  return safeHexColor(prefs?.transcriptKindColors?.[safeKind], DEFAULT_TRANSCRIPT_KIND_COLORS[safeKind]);
+}
+
+function transcriptJsonPayload(text) {
+  const raw = String(text ?? '');
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  const fenced = raw.match(/(?:^|\n)```(?:json)?[^\S\n]*\r?\n([\s\S]*?)\r?\n?```\s*$/i);
+  if (fenced) {
+    try {
+      return {
+        prefix: raw.slice(0, fenced.index).trimEnd(),
+        value: JSON.parse(fenced[1].trim()),
+        markdownPrefix: true,
+      };
+    } catch {}
+  }
+
+  const parseCandidate = (candidate, prefix = '') => {
+    const body = candidate.trim();
+    if (!/^[{\[]/.test(body)) return null;
+    try { return { prefix: prefix.trimEnd(), value: JSON.parse(body) }; }
+    catch { return null; }
+  };
+
+  const full = parseCandidate(trimmed);
+  if (full) return full;
+
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] !== '{' && raw[i] !== '[') continue;
+    const parsed = parseCandidate(raw.slice(i), raw.slice(0, i));
+    if (parsed) return parsed;
+  }
+  return null;
+}
+
+function transcriptJsonBlockHTML(value) {
+  try {
+    const json = JSON.stringify(value, null, 2);
+    return json === undefined ? null : `<pre class="transcript-json"><code>${esc(json)}</code></pre>`;
+  } catch {
+    return null;
+  }
+}
+
+// A string value long/multiline enough that it should render as labelled fields.
+const TRANSCRIPT_PROSE_LEN = 160;
+function transcriptIsProse(v) {
+  return typeof v === 'string' && (v.length > TRANSCRIPT_PROSE_LEN || v.includes('\n'));
+}
+
+function transcriptFieldLabel(key) {
+  return String(key || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+
+function transcriptFieldValueHTML(key, v) {
+  if (String(key) === 'human_test' && typeof v === 'string') {
+    return `<div class="tr-field-val human-test-field">${formatHumanTest(v)}</div>`;
+  }
+  if (v !== null && typeof v === 'object') {
+    return transcriptJsonBlockHTML(v) || `<div class="tr-field-val scalar">${esc(String(v))}</div>`;
+  }
+  const text = typeof v === 'string' ? v : String(v);
+  return `<div class="tr-field-val${transcriptIsProse(v) ? ' prose' : ' scalar'}">${esc(text)}</div>`;
+}
+
+// Render a plain object as labelled key/value rows. Nested structures fall back
+// to a compact JSON block; prose values stay fully expanded for readability.
+// Returns null unless the object carries at least one prose value worth the layout.
+function transcriptFieldsHTML(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const keys = Object.keys(value);
+  if (!keys.length || !keys.some((k) => transcriptIsProse(value[k]))) return null;
+  const rows = keys.map((key) => `<div class="tr-field">`
+    + `<div class="tr-field-key">${esc(transcriptFieldLabel(key))}</div>`
+    + `<div class="tr-field-value">${transcriptFieldValueHTML(key, value[key])}</div>`
+    + `</div>`).join('');
+  return `<div class="tr-fields">${rows}</div>`;
+}
+
+function transcriptStructuredHTML(value) {
+  return transcriptFieldsHTML(value) || transcriptJsonBlockHTML(value);
+}
+
+function transcriptPrefixHTML(parsed) {
+  if (!parsed?.prefix) return '';
+  if (parsed.markdownPrefix) return `<div class="tr-prose">${renderMarkdown(parsed.prefix)}</div>`;
+  return `<span class="tr-prefix">${esc(parsed.prefix)}</span>`;
+}
+
+function transcriptBodyHTML(text, jsonValue) {
+  if (jsonValue !== undefined) {
+    const block = transcriptStructuredHTML(jsonValue);
+    if (block) {
+      const prefix = String(text ?? '').trim() ? `<span class="tr-prefix">${esc(text)}</span>` : '';
+      return { html: `${prefix}${block}`, hasJson: true };
+    }
+  }
+  const parsed = transcriptJsonPayload(text);
+  if (!parsed) return { html: esc(text), hasJson: false };
+  const prefix = transcriptPrefixHTML(parsed);
+  return {
+    html: `${prefix}${transcriptStructuredHTML(parsed.value)}`,
+    hasJson: true,
+  };
+}
+
 /* ---- ticket modal ---- */
 const TICKET_TABS = ['overview', 'activity', 'transcript', 'dossier'];
 
@@ -1677,7 +2073,7 @@ function renderTicketModal() {
      <button class="btn" id="btn-archive-ticket">[ ARCHIVE ]</button>
      <button class="btn btn-danger" id="btn-del">[ DELETE ]</button>`
   );
-  $('.tabs button.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  $('.tabs button.active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
 
   for (const b of document.querySelectorAll('[data-tab]')) {
     b.onclick = () => { S.modal.tab = b.dataset.tab; renderTicketModal(); writeModalHash(S.modal, { push: false }); };
@@ -1714,6 +2110,7 @@ function renderDiagBanner(t) {
   // action buttons only where they make sense
   const acts = [];
   if (dx.stuck || dx.kind === 'hold' || dx.kind === 'idle-agent') {
+    if (dx.kind === 'branch-dirty') acts.push('<button class="btn btn-accent" data-dx="resolve-workspace">[ RESOLVE WORKSPACE ]</button>');
     acts.push(`<button class="btn" data-dx="run">[ ${dx.stuck ? 'RETRY THIS PHASE' : 'RUN NOW'} ]</button>`);
     if (nextCol) acts.push(`<button class="btn" data-dx="advance" data-col="${nextCol.id}">[ FORCE → ${esc(nextCol.name.toUpperCase())} ]</button>`);
     if (prevAgent) acts.push(`<button class="btn" data-dx="advance" data-col="${prevAgent.id}">[ ↩ ${esc(prevAgent.name.toUpperCase())} ]</button>`);
@@ -1736,6 +2133,8 @@ function renderDiagBanner(t) {
       const kind = b.dataset.dx;
       if (kind === 'run') {
         api(`/api/tickets/${t.id}/run`, 'POST', {}).then((r) => toast(r.queued ? 'RUN QUEUED' : `NOT QUEUED: ${r.reason || '?'}`, !r.queued)).catch(alertErr);
+      } else if (kind === 'resolve-workspace') {
+        openWorkspaceResolve(t);
       } else if (kind === 'advance') {
         api(`/api/tickets/${t.id}/move`, 'POST', { columnId: b.dataset.col }).then(() => { toast('MOVED'); }).catch(alertErr);
       }
@@ -1770,6 +2169,11 @@ function harnessOptions(kind, type, current, defaultLabel, modelId) {
 
 function registryModels(type) {
   return S.data.registry[type]?.models || [];
+}
+
+function registryPermission(type, current) {
+  const perms = S.data.registry[type]?.permissions || [];
+  return perms.includes(current) ? current : '';
 }
 
 function modelSupportsEffort(type, modelId, effort) {
@@ -2207,9 +2611,11 @@ function renderTranscript(body, t) {
 function appendTranscriptLine(ev, { box = $('#transcript'), preserveScroll = true, force = false } = {}) {
   if (!box || !ev?.text || (!force && !transcriptVisible(ev))) return false;
   const pinned = preserveScroll && box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  const kind = transcriptKind(ev.kind);
+  const body = transcriptBodyHTML(ev.text, ev.json);
   const div = document.createElement('div');
-  div.className = `ln k-${ev.kind || 'text'}`;
-  div.innerHTML = `<span class="tag">${esc(ev.kind || 'text')}</span>${esc(ev.text)}`;
+  div.className = `ln k-${kind}${body.hasJson ? ' has-json' : ''}`;
+  div.innerHTML = `<span class="tag">${esc(kind)}</span><span class="msg">${body.html}</span>`;
   box.appendChild(div);
   if (pinned) box.scrollTop = box.scrollHeight;
   return true;
@@ -2609,6 +3015,17 @@ async function loadSystemPromptSettings() {
 /* ---- settings modal ---- */
 const SETTINGS_TABS = ['engine', 'providers', 'environment', 'system', 'notify', 'appearance'];
 
+function transcriptColorControlsHTML(prefs) {
+  return `<div class="transcript-color-grid">
+    ${TRANSCRIPT_KINDS.map((kind) => `
+      <label class="tr-color-row">
+        <span class="tr-color-name">${esc(kind)}</span>
+        <span class="tr-color-sample k-${kind}"><span class="tag">${esc(kind)}</span></span>
+        <input type="color" data-tr-color="${esc(kind)}" value="${esc(transcriptKindColor(kind, prefs))}" aria-label="${esc(kind)} transcript label color">
+      </label>`).join('')}
+  </div>`;
+}
+
 function renderSettingsModal() {
   const s = S.data.board.settings;
   const agentCols = cols().filter((c) => c.role === 'agent');
@@ -2651,22 +3068,28 @@ function renderSettingsModal() {
       <div class="disk-row">
         <span>ARCHIVED TICKETS: <b>${S.data.tickets.filter((t) => t.archived).length}</b></span>
         <button class="btn" id="s-open-archive">[ OPEN ARCHIVE ]</button>
-      </div>`)}
+      </div>
+
+      <hr class="sep">
+      <div class="section-head">TICKET SAFETY</div>
+      <label class="check-row inline"><input type="checkbox" id="s-confirm-ticket-actions" ${s.confirmTicketArchiveDelete !== false ? 'checked' : ''}> <span>confirm archive/delete ticket actions</span></label>
+      <div class="hint">when on, archive and delete buttons ask for confirmation and explain where archived tickets can be restored.</div>`)}
 
       ${pane('providers', `
       <div id="s-stepper">${setupStepperHTML(s)}</div>
 
       <hr class="sep">
-      <div class="section-head">PHASE DEFAULTS <span>(harness, model &amp; effort per column)</span></div>
-      <div class="overrides-wrap"><div class="overrides-grid" style="grid-template-columns:110px 110px 1fr 1fr">
-        <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div>
+      <div class="section-head">PHASE DEFAULTS <span>(harness, model, effort &amp; permissions per column)</span></div>
+      <div class="overrides-wrap"><div class="overrides-grid phase-defaults-grid">
+        <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div><div class="h">PERMS</div>
         ${agentCols.map((c) => `
           <div>${esc(c.name)}</div>
           <div><select data-pd="${c.id}:type">${providerTypeOptions(c.harness.type, { includeHuman: true, disabledOk: false, showWarnings: true })}</select></div>
           <div class="model-cell"><select data-pd="${c.id}:model" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('model', c.harness.type, c.harness.model || '', '—')}</select>${refreshBtn()}</div>
-          <div><select data-pd="${c.id}:effort" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', c.harness.type, c.harness.effort || '', '— (CLI default)', c.harness.model)}</select></div>`).join('')}
+          <div><select data-pd="${c.id}:effort" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', c.harness.type, c.harness.effort || '', '— (CLI default)', c.harness.model)}</select></div>
+          <div><select data-pd="${c.id}:permissions" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('permissions', c.harness.type, registryPermission(c.harness.type, c.harness.permissions || ''), '— (provider default)')}</select></div>`).join('')}
       </div></div>
-      <div class="hint">any phase can run any provider — presets in step 3 are just shortcuts. Permissions, network &amp; tools live in each column's CFG panel.</div>
+      <div class="hint">any phase can run any provider — presets in step 3 are just shortcuts. Network &amp; tools live in each column's CFG panel.</div>
       <div class="hint" id="s-models-meta">${['claude', 'codex'].map((ty) => {
         const m = S.data.registry[ty]?.meta || {};
         const age = m.fetchedAt ? fmtDur(Date.now() - Date.parse(m.fetchedAt)) + ' ago' : 'never';
@@ -2704,6 +3127,10 @@ function renderSettingsModal() {
       <input id="s-font" type="range" min="12" max="32" step="1" value="${p.fontPx}">
       <label class="f">UI SIZE <output id="s-ui-val">${Math.round(p.uiScale * 100)}%</output></label>
       <input id="s-ui" type="range" min="0.7" max="1.6" step="0.05" value="${p.uiScale}">
+      <hr class="sep">
+      <div class="section-head">TRANSCRIPT LABEL COLORS <span>(this device only)</span></div>
+      ${transcriptColorControlsHTML(p)}
+      <button class="btn" id="s-tr-colors-reset" style="margin-top:8px">[ RESET LABEL COLORS ]</button>
       <button class="btn" id="s-appear-reset" style="margin-top:8px">[ RESET APPEARANCE ]</button>`)}
     </div>`,
     `<button class="btn btn-accent" id="s-save">[ SAVE SETTINGS ]</button>`);
@@ -2749,14 +3176,15 @@ function renderSettingsModal() {
   const rowType = (colId) => document.querySelector(`[data-pd="${colId}:type"]`)?.value
     || cols().find((c) => c.id === colId)?.harness.type || 'claude';
 
-  // Switching a phase's harness re-fills model + effort with THAT provider's registry
+  // Switching a phase's harness re-fills model + effort + permissions with THAT provider's registry
   // (reset to CLI default — the old values belong to the other provider). HUMAN takes
-  // neither, so both selects grey out.
+  // none, so the selects grey out.
   for (const sel of document.querySelectorAll('[data-pd$=":type"]')) sel.onchange = () => {
     const colId = sel.dataset.pd.split(':')[0];
     const type = sel.value;
     const model = document.querySelector(`[data-pd="${colId}:model"]`);
     const eff = document.querySelector(`[data-pd="${colId}:effort"]`);
+    const perms = document.querySelector(`[data-pd="${colId}:permissions"]`);
     const human = type === 'human';
     if (model) {
       model.innerHTML = human ? '<option value="">—</option>' : harnessOptions('model', type, '', '—');
@@ -2765,6 +3193,10 @@ function renderSettingsModal() {
     if (eff) {
       eff.innerHTML = human ? '<option value="">—</option>' : harnessOptions('effort', type, '', '— (CLI default)', '');
       eff.disabled = human;
+    }
+    if (perms) {
+      perms.innerHTML = human ? '<option value="">—</option>' : harnessOptions('permissions', type, '', '— (provider default)');
+      perms.disabled = human;
     }
   };
   $('#s-tg-detect').onclick = () => {
@@ -2802,6 +3234,25 @@ function renderSettingsModal() {
   // Appearance — device-local, applies live and persists immediately (no server round-trip).
   $('#s-font').oninput = (e) => { savePrefs({ ...S.prefs, fontPx: Number(e.target.value) }); $('#s-font-val').textContent = `${e.target.value}px`; };
   $('#s-ui').oninput = (e) => { savePrefs({ ...S.prefs, uiScale: Number(e.target.value) }); $('#s-ui-val').textContent = `${Math.round(e.target.value * 100)}%`; };
+  for (const input of document.querySelectorAll('[data-tr-color]')) {
+    input.oninput = (e) => {
+      const kind = e.target.dataset.trColor;
+      if (!TRANSCRIPT_KINDS.includes(kind)) return;
+      savePrefs({
+        ...S.prefs,
+        transcriptKindColors: {
+          ...S.prefs.transcriptKindColors,
+          [kind]: safeHexColor(e.target.value, DEFAULT_TRANSCRIPT_KIND_COLORS[kind]),
+        },
+      });
+      transcriptRenderCurrent();
+    };
+  }
+  $('#s-tr-colors-reset').onclick = () => {
+    savePrefs({ ...S.prefs, transcriptKindColors: { ...DEFAULT_TRANSCRIPT_KIND_COLORS } });
+    renderSettingsModal();
+    transcriptRenderCurrent();
+  };
   $('#s-appear-reset').onclick = () => { savePrefs({ ...DEFAULT_PREFS }); renderSettingsModal(); };
   $('#s-system-save').onclick = async () => {
     const btn = $('#s-system-save');
@@ -2828,17 +3279,20 @@ function renderSettingsModal() {
       await Promise.all(agentCols.map((c) => {
         const d = phaseDefaults[c.id] || {};
         const typeChanged = d.type && d.type !== c.harness.type;
-        if (!typeChanged && !d.model && !d.effort) return null;
+        const permissionsChanged = 'permissions' in d && d.permissions !== (c.harness.permissions || '');
+        if (!typeChanged && !d.model && !d.effort && !permissionsChanged) return null;
         const harness = { ...c.harness };
         if (typeChanged) {
-          // Provider swap: take model/effort from the refilled selects verbatim — empty
+          // Provider swap: take model/effort/permissions from the refilled selects verbatim — empty
           // means CLI default; the previous values belonged to the other provider.
           harness.type = d.type;
           harness.model = d.model || '';
           harness.effort = d.effort || '';
+          harness.permissions = d.permissions || '';
         } else {
           if (d.model) harness.model = d.model;
           if (d.effort) harness.effort = d.effort;
+          if (permissionsChanged) harness.permissions = d.permissions || '';
         }
         return api(`/api/columns/${c.id}`, 'PATCH', { harness });
       }).filter(Boolean));
@@ -2861,6 +3315,7 @@ function renderSettingsModal() {
         autoDispatchEveryMin: Number($('#s-every').value) || 5,
         stallAfterMin: Number($('#s-stall').value),
         keepRunsPerTicket: Math.max(1, Number($('#s-keepruns').value) || 5),
+        confirmTicketArchiveDelete: $('#s-confirm-ticket-actions').checked,
         telegram: {
           enabled: Boolean($('#s-tg-on').value),
           chatId: $('#s-tg-chat').value.trim(),
@@ -2977,7 +3432,14 @@ function toggleTopMenu() {
 }
 $('#btn-menu').onclick = (e) => { e.stopPropagation(); toggleTopMenu(); };
 
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeTopMenu(); requestCloseModal(); } });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeTopMenu();
+    if (dismissWorkspaceResolve()) return;
+    if (dismissTicketActionConfirm(false)) return;
+    requestCloseModal();
+  }
+});
 document.addEventListener('click', (e) => {
   if (e.target.closest('.refresh-models')) { e.preventDefault(); refreshModelRegistry(); }
   if (!e.target.closest('#topmenu') && !e.target.closest('#btn-menu')) closeTopMenu();

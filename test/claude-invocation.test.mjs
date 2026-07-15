@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildInvocation } from '../engine/claude.mjs';
+import { buildInvocation, parseLine } from '../engine/claude.mjs';
 
 function allowedToolsArg(args) {
   const idx = args.indexOf('--allowedTools');
@@ -50,4 +50,31 @@ test('non-read-only Claude invocation leaves allowedTools behavior unchanged', (
     harness: { type: 'claude', permissions: 'acceptEdits' },
   });
   assert.equal(allowedToolsArg(unset.args), null);
+});
+
+test('Claude tool events preserve full structured input for transcript rendering', () => {
+  const longCommand = `printf '${'x'.repeat(240)}'`;
+  const event = {
+    type: 'assistant',
+    message: {
+      model: 'claude-fable-5',
+      content: [{
+        type: 'tool_use',
+        name: 'Bash',
+        input: {
+          command: longCommand,
+          description: 'Exercise a long tool payload that used to be truncated before transcript rendering',
+        },
+      }],
+    },
+  };
+
+  const out = parseLine(JSON.stringify(event), {});
+  assert.deepEqual(out, [{
+    kind: 'tool',
+    text: 'Bash',
+    json: event.message.content[0].input,
+  }]);
+  assert.equal(out[0].json.command, longCommand);
+  assert.doesNotMatch(JSON.stringify(out[0]), /…/);
 });

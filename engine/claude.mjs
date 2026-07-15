@@ -92,7 +92,11 @@ export function parseLine(line, state) {
       const out = [];
       for (const p of parts) {
         if (p.type === 'text' && p.text?.trim()) out.push({ kind: 'text', text: p.text });
-        if (p.type === 'tool_use') out.push({ kind: 'tool', text: `${p.name} ${summarizeInput(p.input)}` });
+        if (p.type === 'tool_use') {
+          const ev = { kind: 'tool', text: p.name || 'tool' };
+          if (p.input !== undefined) ev.json = p.input;
+          out.push(ev);
+        }
       }
       return out.length ? out : null;
     }
@@ -103,11 +107,4 @@ export function parseLine(line, state) {
     default:
       return null;
   }
-}
-
-function summarizeInput(input) {
-  try {
-    const s = JSON.stringify(input);
-    return s.length > 160 ? s.slice(0, 160) + '…' : s;
-  } catch { return ''; }
 }

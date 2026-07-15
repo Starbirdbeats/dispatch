@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import puppeteer from 'puppeteer';
 import { startDispatchServer } from './helpers.mjs';
 
-async function seedTicket(base, title, root) {
+async function seedTicket(base, title, root, extra = {}) {
   return fetch(`${base}/api/tickets`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ title, workspace: root }),
+    body: JSON.stringify({ title, workspace: root, ...extra }),
   }).then((r) => r.json());
 }
 
@@ -22,16 +22,28 @@ async function seedTicket(base, title, root) {
 
   try {
     // Pause the engine first so seeded intake tickets aren't auto-dispatched out of
-    // the backlog — keeps the +N cap assertion deterministic.
+    // the backlog and seeded agent tickets stay queued in the in-flight tracker.
     await fetch(`${harness.base}/api/settings`, {
       method: 'PATCH', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ maxConcurrent: 0 }),
     });
-    // Seed 6 backlog tickets so the +N cap (4) triggers and the rail has content.
-    for (let i = 1; i <= 6; i++) await seedTicket(harness.base, `Rail ticket ${i}`, harness.root);
+    const seededState = await fetch(`${harness.base}/api/state`).then((r) => r.json());
+    const seededBacklog = seededState.board.columns.find((c) => c.role === 'intake');
+    const seededAgent = seededState.board.columns.find((c) => c.role === 'agent');
+    assert.ok(seededBacklog, 'default board has an intake column');
+    assert.ok(seededAgent, 'default board has an agent column');
+
+    // Seed enough backlog tickets to force a vertical station scroll, and enough
+    // queued agent tickets to force a vertical in-flight scroll.
+    const railTicketCount = 12;
+    const queuedTicketCount = 9;
+    for (let i = 1; i <= railTicketCount; i++) await seedTicket(harness.base, `Rail ticket ${i}`, harness.root);
+    for (let i = 1; i <= queuedTicketCount; i++) {
+      await seedTicket(harness.base, `Queued tracker ticket ${i}`, harness.root, { columnId: seededAgent.id });
+    }
 
     // ---- DESKTOP (≥760px): pipeline rail + in-flight tracker ----
-    await page.setViewport({ width: 1440, height: 960 });
+    await page.setViewport({ width: 1440, height: 640 });
     await page.goto(harness.base, { waitUntil: 'networkidle2' });
     await page.waitForSelector('.rail');
 
@@ -48,32 +60,67 @@ async function seedTicket(base, title, root) {
       assert.ok(await page.$(`.station .cfg[data-cfg="${col.id}"]`), `CFG present for ${col.id}`);
     }
 
-    // +N more cap: backlog has 6 tickets, cap 4 -> 4 chips + a "+2 MORE" button
     const backlog = state.board.columns.find((c) => c.role === 'intake');
     const backlogStation = await page.evaluateHandle((cid) => {
       return [...document.querySelectorAll('.station')].find((s) => s.querySelector(`.cfg[data-cfg="${cid}"]`));
     }, backlog.id);
-    const chipsBefore = await backlogStation.evaluate((s) => s.querySelectorAll('.chip').length);
-    assert.equal(chipsBefore, 4, 'station caps at 4 chips');
-    const moreText = await backlogStation.evaluate((s) => s.querySelector('.chip-more')?.textContent);
-    assert.equal(moreText, '+2 MORE', 'shows +N MORE for the overflow');
-    await backlogStation.evaluate((s) => s.querySelector('.chip-more').click());
-    await page.waitForFunction((cid) => {
-      const st = [...document.querySelectorAll('.station')].find((s) => s.querySelector(`.cfg[data-cfg="${cid}"]`));
-      return st && st.querySelectorAll('.chip').length === 6;
-    }, {}, backlog.id);
-    const lessText = await page.evaluate((cid) => {
-      const st = [...document.querySelectorAll('.station')].find((s) => s.querySelector(`.cfg[data-cfg="${cid}"]`));
-      return st.querySelector('.chip-more')?.textContent;
-    }, backlog.id);
-    assert.equal(lessText, 'SHOW LESS', 'expanded station offers SHOW LESS');
 
-    // in-flight tracker exists; progress bars have one segment per column
+    const split = await page.$eval('#board', (board) => {
+      const rail = document.querySelector('.rail');
+      const inflight = document.querySelector('.inflight');
+      const br = board.getBoundingClientRect();
+      const rr = rail.getBoundingClientRect();
+      const ir = inflight.getBoundingClientRect();
+      return {
+        display: getComputedStyle(board).display,
+        boardHeight: br.height,
+        railHeight: rr.height,
+        inflightHeight: ir.height,
+        inflightTop: ir.top - br.top,
+      };
+    });
+    assert.equal(split.display, 'grid', 'desktop board uses a grid split');
+    assert.ok(Math.abs(split.railHeight - split.boardHeight / 2) <= 2, `rail should occupy half the board, got ${JSON.stringify(split)}`);
+    assert.ok(Math.abs(split.inflightHeight - split.boardHeight / 2) <= 2, `in-flight should occupy half the board, got ${JSON.stringify(split)}`);
+    assert.ok(Math.abs(split.inflightTop - split.boardHeight / 2) <= 2, `in-flight should start at the lower half, got ${JSON.stringify(split)}`);
+
+    const stationScroll = await backlogStation.evaluate((s, expectedCount) => {
+      const body = s.querySelector('.station-body');
+      body.scrollTop = body.scrollHeight;
+      return {
+        chips: s.querySelectorAll('.chip').length,
+        hasMore: Boolean(s.querySelector('.chip-more')),
+        overflowY: getComputedStyle(body).overflowY,
+        scrollable: body.scrollHeight > body.clientHeight,
+        scrolled: body.scrollTop > 0,
+      };
+    }, railTicketCount);
+    assert.equal(stationScroll.chips, railTicketCount, 'desktop station renders every ticket in the scroll body');
+    assert.equal(stationScroll.hasMore, false, 'desktop station no longer uses +N MORE');
+    assert.ok(['auto', 'scroll'].includes(stationScroll.overflowY), `station body should scroll vertically, got ${stationScroll.overflowY}`);
+    assert.ok(stationScroll.scrollable, 'overflowing station body has vertical overflow');
+    assert.ok(stationScroll.scrolled, 'overflowing station body accepts vertical scroll');
+
+    // in-flight tracker exists, is pinned in the lower half, and scrolls its own rows.
     await page.waitForSelector('.inflight');
     const headText = await page.$eval('.inflight-head', (e) => e.textContent);
     assert.match(headText, /IN FLIGHT/, 'in-flight header');
-    // no runs seeded -> empty-state row
-    assert.ok(await page.$('.inflight-empty'), 'empty in-flight state when nothing is running');
+    assert.match(headText, new RegExp(`${queuedTicketCount} QUEUED`), 'in-flight header counts queued rows');
+    assert.equal(await page.$$eval('.track-row', (els) => els.length), queuedTicketCount, 'one in-flight row per queued ticket');
+    const segCount = await page.$$eval('.track-row:first-child .seg', (els) => els.length);
+    assert.equal(segCount, colCount, 'tracker progress bar has one segment per column');
+    const trackScroll = await page.$eval('.track', (track) => {
+      track.scrollTop = track.scrollHeight;
+      return {
+        overflowY: getComputedStyle(track).overflowY,
+        scrollable: track.scrollHeight > track.clientHeight,
+        scrolled: track.scrollTop > 0,
+      };
+    });
+    assert.ok(['auto', 'scroll'].includes(trackScroll.overflowY), `in-flight track should scroll vertically, got ${trackScroll.overflowY}`);
+    assert.ok(trackScroll.scrollable, 'overflowing in-flight track has vertical overflow');
+    assert.ok(trackScroll.scrolled, 'overflowing in-flight track accepts vertical scroll');
+    assert.ok(!(await page.$('.inflight-empty')), 'in-flight empty state is hidden when rows exist');
 
     // clicking a chip opens the ticket modal and writes the hash (URL routing preserved)
     await page.$eval('.station .chip', (el) => el.click());
@@ -102,6 +149,52 @@ async function seedTicket(base, title, root) {
     await page.reload({ waitUntil: 'networkidle2' });
     await page.waitForSelector('.mphase-nav');
     assert.ok(!(await page.$('.rail')), 'rail is not rendered on mobile');
+    await page.waitForSelector('#board.mobile .inflight');
+
+    const mobileHeadText = await page.$eval('#board.mobile .inflight-head', (e) => e.textContent);
+    assert.match(mobileHeadText, /IN FLIGHT/, 'mobile in-flight header');
+    assert.match(mobileHeadText, new RegExp(`${queuedTicketCount} QUEUED`), 'mobile in-flight header counts queued rows');
+
+    const mobileLayout = await page.$eval('#board', (board) => {
+      const body = board.querySelector('.mbody');
+      const inflight = board.querySelector('.inflight');
+      const track = board.querySelector('.track');
+      body.scrollTop = body.scrollHeight;
+      track.scrollTop = track.scrollHeight;
+      const br = board.getBoundingClientRect();
+      const mr = body.getBoundingClientRect();
+      const ir = inflight.getBoundingClientRect();
+      const tr = track.getBoundingClientRect();
+      const rows = [...board.querySelectorAll('.track-row')].map((row) => row.getBoundingClientRect());
+      return {
+        display: getComputedStyle(board).display,
+        boardOverflowY: getComputedStyle(board).overflowY,
+        bodyOverflowY: getComputedStyle(body).overflowY,
+        bodyScrollable: body.scrollHeight > body.clientHeight,
+        bodyScrolled: body.scrollTop > 0,
+        trackOverflowY: getComputedStyle(track).overflowY,
+        trackOverflowX: getComputedStyle(track).overflowX,
+        trackScrollable: track.scrollHeight > track.clientHeight,
+        trackScrolled: track.scrollTop > 0,
+        trackRows: rows.length,
+        inflightBottomDelta: Math.abs(ir.bottom - br.bottom),
+        phaseAboveTracker: mr.bottom <= ir.top + 1,
+        rowsFitTrack: rows.every((r) => r.left >= tr.left - 1 && r.right <= tr.right + 1),
+      };
+    });
+    assert.equal(mobileLayout.display, 'flex', 'mobile board uses a constrained flex column');
+    assert.equal(mobileLayout.boardOverflowY, 'hidden', 'mobile board itself does not scroll');
+    assert.ok(mobileLayout.inflightBottomDelta <= 1, `mobile in-flight should be pinned to board bottom, got ${JSON.stringify(mobileLayout)}`);
+    assert.ok(mobileLayout.phaseAboveTracker, `mobile phase content should end above in-flight, got ${JSON.stringify(mobileLayout)}`);
+    assert.ok(['auto', 'scroll'].includes(mobileLayout.bodyOverflowY), `mobile phase body should scroll vertically, got ${mobileLayout.bodyOverflowY}`);
+    assert.ok(mobileLayout.bodyScrollable, 'overflowing mobile phase body has vertical overflow');
+    assert.ok(mobileLayout.bodyScrolled, 'overflowing mobile phase body accepts vertical scroll');
+    assert.ok(['auto', 'scroll'].includes(mobileLayout.trackOverflowY), `mobile in-flight track should scroll vertically, got ${mobileLayout.trackOverflowY}`);
+    assert.equal(mobileLayout.trackOverflowX, 'hidden', 'mobile in-flight rows fit without horizontal scrolling');
+    assert.ok(mobileLayout.trackScrollable, 'overflowing mobile in-flight track has vertical overflow');
+    assert.ok(mobileLayout.trackScrolled, 'overflowing mobile in-flight track accepts vertical scroll');
+    assert.equal(mobileLayout.trackRows, queuedTicketCount, 'mobile in-flight renders one row per queued ticket');
+    assert.ok(mobileLayout.rowsFitTrack, `mobile in-flight rows stay inside the track, got ${JSON.stringify(mobileLayout)}`);
 
     const dotCount = await page.$$eval('.mdots span', (els) => els.length);
     assert.equal(dotCount, colCount, 'one pager dot per phase');

@@ -61,11 +61,30 @@ test('prepareTicketBranch blocks branch switching when the workspace is dirty', 
         workspace: repo,
         ticket: { id: 't-dirty', seq: 8, title: 'Dirty branch' },
       }),
-      (err) => err instanceof BranchPrepError && err.kind === 'branch-dirty',
+      (err) => err instanceof BranchPrepError
+        && err.kind === 'branch-dirty'
+        && /1 uncommitted change;/.test(err.detail),
     );
     assert.equal(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main');
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('prepareTicketBranch rejects a workspace that is not a git work tree', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-not-git-'));
+  try {
+    assert.throws(
+      () => prepareTicketBranch({
+        workspace: dir,
+        ticket: { id: 't-nogit', seq: 10, title: 'No repo here' },
+      }),
+      (err) => err instanceof BranchPrepError
+        && err.kind === 'workspace-not-git'
+        && err.detail.includes(dir),
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

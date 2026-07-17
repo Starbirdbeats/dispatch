@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 
 const VALID_ACTIONS = new Set(['commit', 'stash']);
@@ -45,6 +46,48 @@ async function gitContext(workspace) {
     git(target, ['rev-parse', '--abbrev-ref', 'HEAD']).then((s) => s.trim()).catch(() => 'HEAD'),
   ]);
   return { workspace: target, root, branch };
+}
+
+export async function inspectWorkspaceStatus(workspace) {
+  const input = String(workspace || '').trim();
+  const status = {
+    input,
+    path: input ? path.resolve(input) : '',
+    exists: false,
+    isDirectory: false,
+    gitWorkTree: false,
+    branch: null,
+    dirty: false,
+    changeCount: 0,
+    error: null,
+  };
+  if (!input) return status;
+
+  try {
+    const stat = await fs.promises.stat(status.path);
+    status.exists = true;
+    status.isDirectory = stat.isDirectory();
+  } catch {
+    return status;
+  }
+  if (!status.isDirectory) return status;
+
+  try {
+    await git(status.path, ['rev-parse', '--is-inside-work-tree']);
+    status.gitWorkTree = true;
+  } catch {
+    return status;
+  }
+
+  try {
+    status.branch = (await git(status.path, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim() || 'HEAD';
+    const changes = parsePorcelain(await git(status.path, ['status', '--porcelain']));
+    status.dirty = changes.length > 0;
+    status.changeCount = changes.length;
+  } catch (err) {
+    status.error = cleanMessage(err?.message, 'could not read workspace git status');
+  }
+  return status;
 }
 
 export function defaultWorkspaceResolveMessage(ticket) {

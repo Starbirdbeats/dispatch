@@ -79,13 +79,16 @@ function currentBranch(workspace) {
   }
 }
 
-function dirty(workspace) {
-  return Boolean(git(workspace, ['status', '--porcelain']));
+function dirtyChangeCount(workspace) {
+  return git(workspace, ['status', '--porcelain']).split('\n').filter(Boolean).length;
 }
 
 export function prepareTicketBranch({ ticket, workspace }) {
   if (!canGit(workspace, ['rev-parse', '--is-inside-work-tree'])) {
-    throw new BranchPrepError('branch-unavailable', 'Workspace is not a Git work tree; cannot start this ticket on a branch.');
+    throw new BranchPrepError(
+      'workspace-not-git',
+      `Workspace is not a Git work tree: ${workspace}. Run git init (or point the ticket at a repo), or mark the ticket read-only.`,
+    );
   }
 
   const branchName = ticket?.branchName || ticketBranchName(ticket);
@@ -101,10 +104,11 @@ export function prepareTicketBranch({ ticket, workspace }) {
     };
   }
 
-  if (dirty(workspace)) {
+  const changeCount = dirtyChangeCount(workspace);
+  if (changeCount > 0) {
     throw new BranchPrepError(
       'branch-dirty',
-      `Workspace has uncommitted changes; clean or commit them before Dispatch switches to ${branchName}.`,
+      `Workspace has ${changeCount} uncommitted change${changeCount === 1 ? '' : 's'}; clean or commit them before Dispatch switches to ${branchName}.`,
     );
   }
 

@@ -19,7 +19,7 @@ import {
 } from './engine/envfile.mjs';
 import { AUTH_COMMANDS, createAuthSessions } from './engine/authflow.mjs';
 import { checkUpdateStatus, createGitRunner, formatGitUpdateError, parseAheadBehind } from './engine/update-status.mjs';
-import { inspectWorkspaceResolution, resolveWorkspace } from './engine/workspace-resolution.mjs';
+import { inspectWorkspaceResolution, inspectWorkspaceStatus, resolveWorkspace } from './engine/workspace-resolution.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENV_FILE = path.resolve(process.env.DISPATCH_ENV_FILE || path.join(__dirname, '.env'));
@@ -845,13 +845,34 @@ app.get('/api/fs/dirs', (req, res) => {
   }
 });
 
+app.get('/api/workspace/status', async (req, res) => {
+  const raw = String(req.query.path || '').trim();
+  if (!raw) return res.status(400).json({ error: 'path required' });
+  const expanded = raw === '~' ? os.homedir() : raw.replace(/^~(?=\/|$)/, os.homedir());
+  res.json(await inspectWorkspaceStatus(expanded));
+});
+
+// Workspace must be an existing directory before a ticket can carry it — a bad path can never
+// run (even read-only) and only surfaces at run time otherwise. Dirty/non-git are warnings only.
+function checkWorkspace(workspace) {
+  const raw = String(workspace ?? store.board.settings.defaultWorkspace ?? '').trim();
+  if (!raw) return { error: 'workspace required — pick a folder or set a default workspace in Settings' };
+  const expanded = raw === '~' ? os.homedir() : raw.replace(/^~(?=\/|$)/, os.homedir());
+  let stat = null;
+  try { stat = fs.statSync(expanded); } catch {}
+  if (!stat?.isDirectory()) return { error: `workspace is not an existing folder: ${raw}` };
+  return { workspace: path.resolve(expanded) };
+}
+
 // ---- tickets ----
 app.post('/api/tickets', (req, res) => {
   const { title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip, maxBounces } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: 'title required' });
+  const ws = checkWorkspace(workspace);
+  if (ws.error) return res.status(400).json({ error: ws.error });
   const att = checkAttachments(attachments);
   if (!att.ok) return res.status(att.status).json({ error: att.error });
-  const t = store.createTicket({ title: title.trim(), description, workspace, columnId, overrides, scheduledAt, attachments: att.files, readOnly, skip, maxBounces });
+  const t = store.createTicket({ title: title.trim(), description, workspace: ws.workspace, columnId, overrides, scheduledAt, attachments: att.files, readOnly, skip, maxBounces });
   broadcast({ type: 'state-changed' });
 
   const col = store.column(t.columnId);
@@ -873,6 +894,11 @@ app.post('/api/tickets', (req, res) => {
 app.patch('/api/tickets/:id', (req, res) => {
   const t = store.tickets.get(req.params.id);
   if (!t) return res.status(404).json({ error: 'not found' });
+  if ('workspace' in req.body) {
+    const ws = checkWorkspace(req.body.workspace);
+    if (ws.error) return res.status(400).json({ error: ws.error });
+    req.body.workspace = ws.workspace;
+  }
   for (const k of ['title', 'description', 'workspace', 'overrides', 'humanTest', 'scheduledAt', 'readOnly', 'skip']) {
     if (k in req.body) t[k] = req.body[k];
   }

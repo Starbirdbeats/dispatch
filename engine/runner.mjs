@@ -384,7 +384,16 @@ export class Runner {
     if (ticket.oneShotHarness) { delete ticket.oneShotHarness; store.saveTicket(ticketId); }
     const adapter = ADAPTERS[harness.type];
     if (!adapter) throw new Error(`unknown harness ${harness.type}`);
-    if (!fs.existsSync(ticket.workspace)) throw new Error(`workspace missing: ${ticket.workspace}`);
+    if (!fs.existsSync(ticket.workspace)) {
+      this._parkBranchFailure(ticket, new BranchPrepError(
+        'workspace-missing',
+        `Workspace folder does not exist: ${ticket.workspace}. Fix the workspace path in the ticket's Overview tab, then retry this phase.`,
+      ));
+      this._closeEntry(ticketId);
+      this.broadcast({ type: 'state-changed' });
+      this._pump();
+      return;
+    }
     if (!ticket.readOnly) {
       try {
         this._prepareBranch(ticket);
@@ -498,7 +507,7 @@ export class Runner {
     this.store.appendActivity(ticket.id, {
       kind: 'system',
       by: 'engine',
-      text: `branch prep failed: ${ticket.stuckReason.detail}`,
+      text: `${err.kind === 'workspace-missing' ? 'workspace check failed' : 'branch prep failed'}: ${ticket.stuckReason.detail}`,
     });
     this._maybeNotify(ticket);
     this.store.saveTicket(ticket.id);

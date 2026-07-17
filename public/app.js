@@ -296,6 +296,9 @@ function diagnose(t, c) {
 const STUCK_HEADLINES = {
   'branch-dirty': 'Stuck: workspace has uncommitted changes',
   'branch-unavailable': 'Stuck: Dispatch could not prepare the branch',
+  'workspace-missing': 'Stuck: the workspace folder doesn’t exist',
+  'workspace-not-git': 'Stuck: the workspace isn’t a Git repository',
+  'runner-crash': 'Stuck: the engine hit an error starting the run',
   'hold-limit': 'Stuck: the phase keeps finishing without advancing',
   'no-control-block': 'Stuck: the agent didn’t say what to do next',
   'bounce-limit': 'Stuck: the phases keep bouncing it back and forth',
@@ -410,16 +413,15 @@ function usageSourceLabel(source) {
   return '';
 }
 
-// One usage window: "5H ▓▓▓░ 38%" — the number is % REMAINING; the 5H meter fills
-// with what's left and tones green → amber → red as it drains; the weekly meter stays
-// muted ink. (Bar and number both show headroom, not consumption.)
+// One usage window: "5H ▓▓▓░ 38%" — the number is % REMAINING; the meter fills
+// with what's left and tones green → amber → red as it drains.
 function usageWindowHTML(label, win, provider, kind) {
   if (!win || !Number.isFinite(Number(win.usedPct))) {
     return `<span class="usage-window-block w${kind} missing"><span class="usage-window missing"><span class="usage-key">${label}</span><b>—</b></span></span>`;
   }
   const used = clamp(win.usedPct);
   const remaining = clamp(100 - used);
-  const tone = kind === '7d' ? 'muted' : meterTone(remaining);
+  const tone = meterTone(remaining);
   const resetAt = win.resetsAt ? (kind === '7d' ? fmtResetDay(win.resetsAt) : fmtResetIn(win.resetsAt)) : '';
   const resetText = resetAt ? `RST ${resetAt}` : '';
   const title = `${provider} ${label}: ${pctText(used)} used${resetText ? ` · ${resetText}` : ''}`;
@@ -429,16 +431,24 @@ function usageWindowHTML(label, win, provider, kind) {
   </span>`;
 }
 
+function providerIndicatorTone(provider) {
+  const h = S.data.health?.[provider];
+  if (!h) return 'muted';
+  if (!h.installed || !h.ok) return 'stuck';
+  if (h.authenticated) return 'live';
+  return 'warn';
+}
+
 function usageProviderHTML(provider) {
   const u = S.data.usage?.[provider] || {};
-  const title = [u.source, u.at ? `updated ${fmtTs(u.at)}` : '', u.error ? `error: ${u.error}` : '', u.note || ''].filter(Boolean).join(' · ');
+  const h = S.data.health?.[provider] || {};
+  const auth = h.installed ? (h.authenticated ? 'authenticated' : 'not authenticated') : 'not installed';
+  const title = [auth, h.authDetail || '', u.source, u.at ? `updated ${fmtTs(u.at)}` : '', u.error ? `error: ${u.error}` : '', u.note || ''].filter(Boolean).join(' · ');
   // "MAX·OAUTH" / "PLUS·OAUTH" when the CLI auth file exposes a tier; source-derived otherwise
   const plan = u.plan ? String(u.plan).toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ')[0] : '';
   const src = plan ? `${plan}·OAUTH` : usageSourceLabel(u.source);
-  // dot echoes the 5H tone (green = headroom, amber = running low, red = nearly spent)
-  const tone5 = Number.isFinite(Number(u.fiveHour?.usedPct)) ? meterTone(clamp(100 - u.fiveHour.usedPct)) : 'muted';
   return `<div class="usage-provider" title="${esc(title)}">
-    <div class="usage-top"><span class="usage-dot tone-${tone5}"></span><span class="usage-name">${provider}</span>${src ? `<span class="usage-src">${esc(src)}</span>` : ''}</div>
+    <div class="usage-top"><span class="usage-dot tone-${providerIndicatorTone(provider)}"></span><span class="usage-name">${provider}</span>${src ? `<span class="usage-src">${esc(src)}</span>` : ''}</div>
     ${usageWindowHTML('5H', u.fiveHour, provider, '5h')}
     ${usageWindowHTML('7D', u.weekly, provider, '7d')}
   </div>`;
@@ -2111,6 +2121,7 @@ function renderDiagBanner(t) {
   const acts = [];
   if (dx.stuck || dx.kind === 'hold' || dx.kind === 'idle-agent') {
     if (dx.kind === 'branch-dirty') acts.push('<button class="btn btn-accent" data-dx="resolve-workspace">[ RESOLVE WORKSPACE ]</button>');
+    if (dx.kind === 'workspace-missing' || dx.kind === 'workspace-not-git') acts.push('<button class="btn btn-accent" data-dx="edit-workspace">[ EDIT WORKSPACE ]</button>');
     acts.push(`<button class="btn" data-dx="run">[ ${dx.stuck ? 'RETRY THIS PHASE' : 'RUN NOW'} ]</button>`);
     if (nextCol) acts.push(`<button class="btn" data-dx="advance" data-col="${nextCol.id}">[ FORCE → ${esc(nextCol.name.toUpperCase())} ]</button>`);
     if (prevAgent) acts.push(`<button class="btn" data-dx="advance" data-col="${prevAgent.id}">[ ↩ ${esc(prevAgent.name.toUpperCase())} ]</button>`);
@@ -2135,6 +2146,10 @@ function renderDiagBanner(t) {
         api(`/api/tickets/${t.id}/run`, 'POST', {}).then((r) => toast(r.queued ? 'RUN QUEUED' : `NOT QUEUED: ${r.reason || '?'}`, !r.queued)).catch(alertErr);
       } else if (kind === 'resolve-workspace') {
         openWorkspaceResolve(t);
+      } else if (kind === 'edit-workspace') {
+        S.modal.tab = 'overview';
+        renderModal();
+        $('#f-ws')?.focus();
       } else if (kind === 'advance') {
         api(`/api/tickets/${t.id}/move`, 'POST', { columnId: b.dataset.col }).then(() => { toast('MOVED'); }).catch(alertErr);
       }
@@ -2323,6 +2338,7 @@ async function refreshWorkspacePicker(box, preferPath) {
     box.dataset.parent = r.parent;
     box.dataset.home = r.home;
     input.value = r.path;
+    box._onPath?.(r.path);
     select.innerHTML = [
       `<option value="">${esc(r.dirs.length ? `choose folder inside ${r.path}` : `no folders inside ${r.path}`)}</option>`,
       ...r.dirs.map((d) => `<option value="${esc(d.path)}">${esc(d.name)}/</option>`),
@@ -2332,10 +2348,11 @@ async function refreshWorkspacePicker(box, preferPath) {
   }
 }
 
-function wireWorkspacePicker(id) {
+function wireWorkspacePicker(id, { onPath } = {}) {
   const input = $(`#${id}`);
   const box = input?.closest('.workspace-picker');
   if (!box) return;
+  box._onPath = onPath || null;
   let timer = null;
   const schedule = () => {
     clearTimeout(timer);
@@ -2354,13 +2371,51 @@ function wireWorkspacePicker(id) {
   $('.wp-refresh', box).onclick = () => refreshWorkspacePicker(box);
 }
 
+// Live workspace health hint under a picker. Nonexistent paths are rejected by the server;
+// non-git and dirty are warnings only (a dirty repo can be clean by run time, and read-only
+// tickets never touch branches). Returns the refresh fn so callers can re-run it (e.g. when
+// the read-only checkbox flips).
+function wireWorkspaceStatus(inputId, statusId, isReadOnly) {
+  const input = $(`#${inputId}`);
+  const el = $(`#${statusId}`);
+  if (!input || !el) return null;
+  let timer = null;
+  let seq = 0;
+  const show = (cls, text) => { el.className = cls; el.textContent = text; };
+  const refresh = async () => {
+    const v = input.value.trim();
+    const mine = ++seq;
+    if (!v) { show('hint', ''); return; }
+    try {
+      const s = await api(`/api/workspace/status?path=${encodeURIComponent(v)}`);
+      if (mine !== seq || !document.getElementById(statusId)) return;
+      const ro = Boolean(isReadOnly?.());
+      const changes = `${s.changeCount} uncommitted change${s.changeCount === 1 ? '' : 's'}`;
+      if (!s.exists || !s.isDirectory) show('hint bad', 'folder does not exist — Dispatch will reject this path');
+      else if (!s.gitWorkTree && ro) show('hint', 'not a git repository — fine for a read-only ticket');
+      else if (!s.gitWorkTree) show('hint warn', 'not a git repository — the first run will park until this is a git work tree (or mark the ticket read-only)');
+      else if (s.error) show('hint', `git repo — couldn’t read status: ${s.error}`);
+      else if (s.dirty && !ro) show('hint warn', `git repo on ${s.branch} — ${changes}; must be clean before the first branch switch (resolvable later)`);
+      else show('hint', `git repo on ${s.branch}${s.dirty ? ` — ${changes}` : ''}`);
+    } catch (e) {
+      if (mine !== seq) return;
+      show('hint', `couldn’t check workspace: ${e.message}`);
+    }
+  };
+  const schedule = () => { clearTimeout(timer); timer = setTimeout(refresh, 350); };
+  input.addEventListener('input', schedule);
+  input.addEventListener('change', schedule);
+  refresh();
+  return refresh;
+}
+
 function renderOverview(body, t) {
   if (S.ovDraft?.id !== t.id) S.ovDraft = { id: t.id, ov: structuredClone(t.overrides || {}) };
   const draft = S.ovDraft.ov;
   body.innerHTML = `
     <div class="kv">
       <div class="k">ID</div><div>${t.id}</div>
-      <div class="k">WORKSPACE</div><div>${workspacePicker('f-ws', t.workspace)}</div>
+      <div class="k">WORKSPACE</div><div>${workspacePicker('f-ws', t.workspace)}<div class="hint" id="f-ws-status"></div></div>
       <div class="k">SCHEDULED</div><div><input id="f-sched" type="datetime-local" value="${esc(t.scheduledAt || '')}"></div>
       <div class="k">BOUNCE LIMIT</div><div>
         <input id="f-maxbounce" type="number" min="0" value="${t.maxBounces ?? ''}" placeholder="default (${boardMaxBounces()})" style="width:90px">
@@ -2387,7 +2442,9 @@ function renderOverview(body, t) {
     <div style="margin-top:14px"><button class="btn" id="btn-save-ticket">[ SAVE CHANGES ]</button></div>`;
 
   wireOverridesGrid(body, draft, () => renderOverview(body, t));
-  wireWorkspacePicker('f-ws');
+  const fWsStatus = wireWorkspaceStatus('f-ws', 'f-ws-status', () => $('#f-readonly').checked);
+  wireWorkspacePicker('f-ws', { onPath: fWsStatus });
+  $('#f-readonly').onchange = () => fWsStatus?.();
 
   $('#btn-save-ticket').onclick = async () => {
     await api(`/api/tickets/${t.id}`, 'PATCH', {
@@ -2718,6 +2775,7 @@ function renderNewModal() {
       <label class="f">DESCRIPTION / BRIEF</label><textarea id="n-desc" style="min-height:120px"></textarea>
       <label class="f">WORKSPACE (absolute path — the repo agents will work in)</label>
       ${workspacePicker('n-ws', S.data.board.settings.defaultWorkspace)}
+      <div class="hint" id="n-ws-status"></div>
       <label class="f">START IN</label>
       <select id="n-col">${cols().map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
       <label class="f">SCHEDULE FOR (optional — leave blank for the next backlog sweep)</label>
@@ -2765,8 +2823,9 @@ function renderNewModal() {
     });
     renderStagedAttachments();
   }, { onThumbs: (thumbs) => { S.newPasteThumbs = (S.newPasteThumbs || []).concat(thumbs); }, onRemoveThumb: removeNewThumb });
-  wireWorkspacePicker('n-ws');
-  $('#n-readonly').onchange = (e) => { $('#n-skip-wrap').hidden = !e.target.checked; };
+  const nWsStatus = wireWorkspaceStatus('n-ws', 'n-ws-status', () => $('#n-readonly').checked);
+  wireWorkspacePicker('n-ws', { onPath: nWsStatus });
+  $('#n-readonly').onchange = (e) => { $('#n-skip-wrap').hidden = !e.target.checked; nWsStatus?.(); };
   renderStagedAttachments();
   $('#n-create').onclick = () => {
     const readOnly = $('#n-readonly').checked;

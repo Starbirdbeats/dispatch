@@ -10,7 +10,7 @@ import { composePrompt, parseControlBlock } from './contract.mjs';
 import { telegramConfig, sendTelegram, renderMessage } from './notify.mjs';
 import { applyCodexRateLimits, USAGE } from './usage.mjs';
 import { contextSnapshot } from './limits.mjs';
-import { BranchPrepError, prepareTicketBranch } from './branching.mjs';
+import { BranchPrepError, isGitWorkTree, prepareTicketBranch } from './branching.mjs';
 import { REGISTRY } from '../registry.mjs';
 
 const ADAPTERS = { claude, codex };
@@ -79,6 +79,10 @@ function workspaceKey(workspace) {
   try { return fs.realpathSync(workspace); } catch { return path.resolve(workspace); }
 }
 
+function isDirectory(dir) {
+  try { return fs.statSync(dir).isDirectory(); } catch { return false; }
+}
+
 function normalizeModelAndEffort(h) {
   const reg = REGISTRY[h.type];
   if (!reg) return h;
@@ -108,6 +112,7 @@ export class Runner {
     this.broadcast = broadcast;
     this.queue = [];
     this.running = new Map(); // ticketId -> { runId, pollTimer, transcript, readOffset, buf }
+    this._gitWsCache = new Map(); // workspace realpath -> { git, at } — is-a-git-repo probe cache
   }
 
   snapshot() {
@@ -195,6 +200,33 @@ export class Runner {
     this.broadcast({ type: 'state-changed' });
     this._pump();
     return true;
+  }
+
+  // Force a queued ticket to start immediately, ignoring the concurrency cap.
+  // The per-workspace lock only bites for non-git workspaces (git repos get per-ticket
+  // worktrees, so they never contend). Even then a human can override it explicitly
+  // (ignoreWorkspaceLock) — two runs sharing one plain folder is on them.
+  forceStart(ticketId, { ignoreWorkspaceLock = false } = {}) {
+    const ticket = this.store.tickets.get(ticketId);
+    if (!ticket) return { started: false, reason: 'not found' };
+    if (ticket.activeRun || this.running.has(ticketId)) return { started: false, reason: 'already running' };
+    const idx = this.queue.findIndex((j) => j.ticketId === ticketId);
+    if (idx === -1) return { started: false, reason: 'not queued' };
+    const workspaceBusy = this._workspaceBusy(ticket.workspace, ticketId);
+    if (workspaceBusy && !ignoreWorkspaceLock) {
+      return { started: false, workspaceBusy: true, reason: 'another run is active in the same workspace — stop it first or point this ticket at a different workspace' };
+    }
+    const [job] = this.queue.splice(idx, 1);
+    this._saveQueue();
+    this.store.appendActivity(ticketId, {
+      kind: 'system',
+      by: 'human',
+      text: workspaceBusy
+        ? 'force-started: skipping the concurrency queue AND the workspace lock — another run shares this workspace'
+        : 'force-started: skipping the concurrency queue',
+    });
+    this._launch(job);
+    return { started: true };
   }
 
   parkForDisabledProvider(ticketId, type) {
@@ -330,22 +362,26 @@ export class Runner {
       if (jobIndex === -1) break;
       const [job] = this.queue.splice(jobIndex, 1);
       this._saveQueue();
-      this._run(job).catch((err) => {
-        const t = this.store.tickets.get(job.ticketId);
-        if (t) {
-          t.status = 'error';
-          t.stuckReason = { kind: 'runner-crash', at: nowIso(), detail: `The engine crashed while starting the run: ${err.message}` };
-          delete t.activeRun;
-          delete t.currentRun;
-          this.store.saveTicket(t.id);
-          this._maybeNotify(t);
-        }
-        this.store.appendActivity(job.ticketId, { kind: 'system', by: 'engine', text: `runner crash: ${err.message}` });
-        this._closeEntry(job.ticketId);
-        this.broadcast({ type: 'state-changed' });
-        this._pump();
-      });
+      this._launch(job);
     }
+  }
+
+  _launch(job) {
+    this._run(job).catch((err) => {
+      const t = this.store.tickets.get(job.ticketId);
+      if (t) {
+        t.status = 'error';
+        t.stuckReason = { kind: 'runner-crash', at: nowIso(), detail: `The engine crashed while starting the run: ${err.message}` };
+        delete t.activeRun;
+        delete t.currentRun;
+        this.store.saveTicket(t.id);
+        this._maybeNotify(t);
+      }
+      this.store.appendActivity(job.ticketId, { kind: 'system', by: 'engine', text: `runner crash: ${err.message}` });
+      this._closeEntry(job.ticketId);
+      this.broadcast({ type: 'state-changed' });
+      this._pump();
+    });
   }
 
   _nextStartableJobIndex() {
@@ -359,6 +395,10 @@ export class Runner {
   }
 
   _workspaceBusy(workspace, ticketId) {
+    // Git workspaces never contend: every write run happens in that ticket's private
+    // worktree, so N tickets can target one repo at once. The lock only still matters
+    // for non-git workspaces, where runs share the folder itself.
+    if (this._isGitWorkspace(workspace)) return false;
     const key = workspaceKey(workspace);
     for (const runningTicketId of this.running.keys()) {
       if (runningTicketId === ticketId) continue;
@@ -366,6 +406,16 @@ export class Runner {
       if (workspaceKey(runningTicket?.workspace) === key) return true;
     }
     return false;
+  }
+
+  _isGitWorkspace(workspace) {
+    const key = workspaceKey(workspace);
+    const hit = this._gitWsCache.get(key);
+    if (hit && Date.now() - hit.at < 60_000) return hit.git;
+    let git = false;
+    try { git = isGitWorkTree(key); } catch { /* treat as non-git */ }
+    this._gitWsCache.set(key, { git, at: Date.now() });
+    return git;
   }
 
   async _run({ ticketId }) {
@@ -384,19 +434,23 @@ export class Runner {
     if (ticket.oneShotHarness) { delete ticket.oneShotHarness; store.saveTicket(ticketId); }
     const adapter = ADAPTERS[harness.type];
     if (!adapter) throw new Error(`unknown harness ${harness.type}`);
-    if (!fs.existsSync(ticket.workspace)) {
+    if (!isDirectory(ticket.workspace)) {
       this._parkBranchFailure(ticket, new BranchPrepError(
         'workspace-missing',
-        `Workspace folder does not exist: ${ticket.workspace}. Fix the workspace path in the ticket's Overview tab, then retry this phase.`,
+        `Workspace folder does not exist or is not a directory: ${ticket.workspace}. Fix the workspace path in the ticket's Overview tab, then retry this phase.`,
       ));
       this._closeEntry(ticketId);
       this.broadcast({ type: 'state-changed' });
       this._pump();
       return;
     }
+    let workDir = ticket.workspace;
+    let gitDir = null;
     if (!ticket.readOnly) {
       try {
-        this._prepareBranch(ticket);
+        const prep = this._prepareBranch(ticket);
+        if (prep.workDir) workDir = prep.workDir;
+        gitDir = prep.gitDir || null;
       } catch (err) {
         if (err instanceof BranchPrepError) {
           this._parkBranchFailure(ticket, err);
@@ -410,7 +464,15 @@ export class Runner {
     }
 
     const dataDir = store.ticketDir(ticketId);
-    const sessionId = ticket.sessions[harness.type];
+    let sessionId = ticket.sessions[harness.type];
+    // Never resume a session minted in a different directory: claude can't find it from a
+    // new cwd, and either harness would carry stale absolute paths from the old checkout
+    // into the isolated worktree. The dossier carries the context across instead.
+    const sessionCwd = ticket.sessionDirs?.[harness.type] || ticket.workspace;
+    if (sessionId && sessionCwd !== workDir) {
+      sessionId = null;
+      store.appendActivity(ticketId, { kind: 'system', by: 'engine', text: `starting a fresh ${harness.type} session — the run directory moved to ${workDir}` });
+    }
     const sinceLastRun = ticket.lastRunEndedAt || ticket.createdAt;
     const recentActivity = ticket.activity
       .filter((a) => a.ts > sinceLastRun && (a.kind === 'comment' || a.kind === 'handoff'))
@@ -421,9 +483,10 @@ export class Runner {
       dossierPath: store.dossierPath(ticketId),
       recentActivity,
       resume: Boolean(sessionId),
+      workDir,
     });
 
-    const inv = adapter.buildInvocation({ prompt, harness, sessionId, dataDir, workspace: ticket.workspace });
+    const inv = adapter.buildInvocation({ prompt, harness, sessionId, dataDir, workspace: workDir, gitDir });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const runId = `${stamp}-${column.name.toLowerCase()}`;
     const runDir = store.runDir(ticketId, runId);
@@ -436,7 +499,7 @@ export class Runner {
     const wrapper = path.join(__dirname, '..', 'bin', 'dispatch-run.sh');
     if (!fs.existsSync(wrapper)) throw new Error(`wrapper missing: ${wrapper}`);
     const proc = spawn(wrapper, [runDir, '--', inv.cmd, ...inv.args], {
-      cwd: ticket.workspace,
+      cwd: workDir,
       env: process.env,
       detached: true,
       stdio: 'ignore',
@@ -446,6 +509,7 @@ export class Runner {
     const activeRun = {
       runId, pid: proc.pid, pgid: proc.pid, columnId: column.id,
       harnessType: harness.type, model: harness.model, effort: harness.effort,
+      workDir,
       startedAt, deadlineAt, transcriptFile,
       lastMsgFile: inv.lastMsgFile || null,
       newSessionId: inv.newSessionId || null,
@@ -455,6 +519,7 @@ export class Runner {
       runId, ticketId, columnId: column.id,
       harness: { type: harness.type, model: harness.model, effort: harness.effort },
       branchName: ticket.branchName || null,
+      workDir,
       cmd: inv.cmd,
       args: inv.args.map(truncateArg),
       pid: proc.pid,
@@ -471,7 +536,8 @@ export class Runner {
     delete ticket.stuckReason;   // fresh run — clear whatever stuck the last attempt
     delete ticket.retryAt;       // manual/fresh runs replace any parked rate-limit retry
     delete ticket.pendingWake;   // this run IS the wake
-    ticket.currentRun = { column: column.name, harness: harness.type, model: harness.model, branchName: ticket.branchName || null, startedAt, transcriptFile };
+    ticket.workDir = workDir;
+    ticket.currentRun = { column: column.name, harness: harness.type, model: harness.model, branchName: ticket.branchName || null, workDir, startedAt, transcriptFile };
     ticket.activeRun = activeRun;
     store.saveTicket(ticketId);
     store.appendActivity(ticketId, { kind: 'run', by: harness.type, text: `run started: ${column.name} (${harness.model || 'default model'}, effort ${harness.effort || 'default'})` });
@@ -481,17 +547,56 @@ export class Runner {
   }
 
   _prepareBranch(ticket) {
-    const result = prepareTicketBranch({ ticket, workspace: ticket.workspace });
+    let result;
+    try {
+      const worktreesRoot = typeof this.store.worktreesRoot === 'function' ? this.store.worktreesRoot() : null;
+      result = prepareTicketBranch({ ticket, workspace: ticket.workspace, worktreesRoot });
+    } catch (err) {
+      if (err instanceof BranchPrepError && err.kind === 'workspace-not-git' && isDirectory(ticket.workspace)) {
+        const firstBranchless = !ticket.branchless || ticket.branchless.workspace !== ticket.workspace;
+        ticket.branchless = {
+          kind: 'workspace-not-git',
+          workspace: ticket.workspace,
+          at: ticket.branchless?.workspace === ticket.workspace ? ticket.branchless.at : nowIso(),
+          detail: `Workspace is not a Git work tree: ${ticket.workspace}. Dispatch will run without branch or commit support.`,
+        };
+        this.store.saveTicket(ticket.id);
+        if (firstBranchless) {
+          this.store.appendActivity(ticket.id, {
+            kind: 'system',
+            by: 'engine',
+            text: `branch skipped: ${ticket.branchless.detail}`,
+          });
+        }
+        return {
+          branchName: null,
+          branchBase: null,
+          branchedAt: null,
+          action: 'skipped-not-git',
+        };
+      }
+      throw err;
+    }
     const firstBranch = !ticket.branchName;
     ticket.branchName = result.branchName;
     ticket.branchBase = ticket.branchBase || result.branchBase || null;
     ticket.branchedAt = ticket.branchedAt || result.branchedAt;
+    delete ticket.branchless;
     this.store.saveTicket(ticket.id);
-    if (firstBranch || result.action === 'created' || result.action === 'switched') {
+    if (firstBranch || result.action === 'worktree-created' || result.action === 'worktree-switched') {
       this.store.appendActivity(ticket.id, {
         kind: 'system',
         by: 'engine',
-        text: `branch ready: ${result.branchName}`,
+        text: result.workDir && result.workDir !== ticket.workspace
+          ? `branch ready: ${result.branchName} (isolated worktree at ${result.workDir})`
+          : `branch ready: ${result.branchName}`,
+      });
+    }
+    if (result.submodules && !result.submodules.ok) {
+      this.store.appendActivity(ticket.id, {
+        kind: 'system',
+        by: 'engine',
+        text: `worktree submodules failed to initialize: ${result.submodules.detail || 'unknown error'} — agents may find empty submodule folders`,
       });
     }
     return result;
@@ -696,7 +801,11 @@ export class Runner {
 
     ticket.lastRunEndedAt = exitInfo.endedAt || nowIso();
     const sessionId = state.sessionId || ar.newSessionId || cmd.newSessionId;
-    if (sessionId && harnessType) ticket.sessions[harnessType] = sessionId;
+    if (sessionId && harnessType) {
+      ticket.sessions[harnessType] = sessionId;
+      const runWorkDir = ar.workDir || cmd.workDir;
+      if (runWorkDir) ticket.sessionDirs = { ...(ticket.sessionDirs || {}), [harnessType]: runWorkDir };
+    }
     const usageSnap = contextSnapshot(state.usage);
     if (usageSnap && harnessType) {
       ticket.context ||= {};
@@ -750,7 +859,10 @@ export class Runner {
     const adapter = entry?.adapter || ADAPTERS[ar.harnessType];
     const state = adapter ? this._rebuildState(runDir, adapter) : { sessionId: null };
     const sessionId = state.sessionId || ar.newSessionId;
-    if (sessionId && ar.harnessType) ticket.sessions[ar.harnessType] = sessionId;
+    if (sessionId && ar.harnessType) {
+      ticket.sessions[ar.harnessType] = sessionId;
+      if (ar.workDir) ticket.sessionDirs = { ...(ticket.sessionDirs || {}), [ar.harnessType]: ar.workDir };
+    }
 
     const intent = ar.killIntent;
     delete ticket.activeRun;

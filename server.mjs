@@ -20,6 +20,7 @@ import {
 import { AUTH_COMMANDS, createAuthSessions } from './engine/authflow.mjs';
 import { checkUpdateStatus, createGitRunner, formatGitUpdateError, parseAheadBehind } from './engine/update-status.mjs';
 import { inspectWorkspaceResolution, inspectWorkspaceStatus, resolveWorkspace } from './engine/workspace-resolution.mjs';
+import { removeTicketWorktree } from './engine/branching.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENV_FILE = path.resolve(process.env.DISPATCH_ENV_FILE || path.join(__dirname, '.env'));
@@ -387,12 +388,16 @@ async function probeCodexUsage() {
   }
 }
 
-refreshProviderPlans();
-Promise.allSettled([probeClaudeUsage(), probeCodexUsage()]).then(() => broadcast({ type: 'usage-update', usage: USAGE })).catch(() => {});
-setInterval(() => {
+const USAGE_PROBES = { claude: probeClaudeUsage, codex: probeCodexUsage };
+
+function pollUsage(providers = Object.keys(USAGE_PROBES)) {
   refreshProviderPlans();
-  Promise.allSettled([probeClaudeUsage(), probeCodexUsage()]).then(() => broadcast({ type: 'usage-update', usage: USAGE })).catch(() => {});
-}, 5 * 60 * 1000);
+  return Promise.allSettled(providers.map((p) => USAGE_PROBES[p]()))
+    .then(() => broadcast({ type: 'usage-update', usage: USAGE }));
+}
+
+pollUsage().catch(() => {});
+setInterval(() => { pollUsage().catch(() => {}); }, 5 * 60 * 1000);
 
 // ---- auto-dispatch scheduler ----
 // Every tick (60s): fire tickets whose scheduledAt has come due. Every sweep interval
@@ -578,12 +583,45 @@ app.post('/api/update/apply', async (_req, res) => {
       applied: true,
       behind: 0,
       branch,
-      needsRestart: true,
-      message: 'local main updated — restart Dispatch to run the new code',
+      restarting: true,
+      bootId: BOOT_ID,
+      message: 'local main updated — Dispatch is restarting to run the new code',
     });
+    scheduleRestart(`update applied (${behind} commit${behind === 1 ? '' : 's'})`);
   } catch (e) {
     res.status(500).json({ error: e.message || 'update failed' });
   }
+});
+
+// ---- self-restart ----
+// After an update is applied the running process is stale. Under a supervisor (systemd sets
+// INVOCATION_ID; set DISPATCH_SUPERVISED=1 for anything else) we exit non-zero so
+// Restart=on-failure brings the new code up. Run bare, we hand off to a detached copy of
+// ourselves instead — the listen() retry below covers the port-handover window.
+const SUPERVISED = Boolean(process.env.INVOCATION_ID || process.env.DISPATCH_SUPERVISED);
+const RESTART_EXIT_CODE = 75;
+function scheduleRestart(reason) {
+  console.log(`self-restart: ${reason}`);
+  broadcast({ type: 'restarting' });
+  setTimeout(() => {
+    try { authSessions.disposeAll(); } catch { /* exit hook runs it again anyway */ }
+    try { server.close(); } catch { /* already closing */ }
+    if (SUPERVISED) process.exit(RESTART_EXIT_CODE);
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
+      cwd: __dirname,
+      env: process.env,
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    process.exit(0);
+  }, 500); // let the apply response and the ws broadcast flush first
+}
+
+// Lightweight liveness probe: the client polls this while the server restarts after an
+// update — a changed bootId means the new process is up.
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, bootId: BOOT_ID });
 });
 
 app.get('/api/state', (_req, res) => {
@@ -610,6 +648,15 @@ app.post('/api/probe', async (_req, res) => {
   health = nextHealth;
   broadcast({ type: 'state-changed' });
   res.json(health);
+});
+
+// On-demand usage re-probe (clicking a provider in the usage strip). Scoped to one
+// provider so a Claude refresh doesn't pay for spawning the Codex app-server.
+app.post('/api/usage/refresh', async (req, res) => {
+  const provider = req.body?.provider;
+  if (provider && !Object.hasOwn(USAGE_PROBES, provider)) return res.status(400).json({ error: `unknown provider: ${provider}` });
+  await pollUsage(provider ? [provider] : undefined);
+  res.json({ usage: USAGE });
 });
 
 app.get('/api/setup/status', (_req, res) => {
@@ -915,6 +962,11 @@ app.patch('/api/tickets/:id', (req, res) => {
 
 app.delete('/api/tickets/:id', (req, res) => {
   runner.stop(req.params.id);
+  const t = store.tickets.get(req.params.id);
+  // The ticket's private worktree dies with the ticket (its branch survives in the repo).
+  if (t) {
+    try { removeTicketWorktree({ ticket: t, worktreesRoot: store.worktreesRoot() }); } catch { /* best effort */ }
+  }
   store.deleteTicket(req.params.id);
   broadcast({ type: 'state-changed' });
   res.json({ ok: true });
@@ -1068,7 +1120,16 @@ app.post('/api/tickets/:id/run', (req, res) => {
     return res.json({ queued: true, startedPhase: next.name });
   }
   const ok = runner.enqueue(t.id, { by: 'human' });
-  res.json({ queued: ok, reason: ok ? null : 'already queued or running' });
+  if (ok) return res.json({ queued: true });
+  // Already queued: a human hitting RUN again means "start it NOW" — skip the concurrency queue.
+  // { force: true } in the body additionally overrides the per-workspace lock (UI confirms first).
+  const forced = runner.forceStart(t.id, { ignoreWorkspaceLock: Boolean(req.body?.force) });
+  if (forced.started) return res.json({ queued: true, forced: true });
+  res.json({
+    queued: false,
+    workspaceBusy: Boolean(forced.workspaceBusy),
+    reason: forced.reason === 'not queued' ? 'already queued or running' : forced.reason,
+  });
 });
 
 app.post('/api/tickets/:id/stop', (req, res) => {
@@ -1237,6 +1298,16 @@ app.post('/api/maintenance/prune', async (_req, res) => {
   res.json({ ticketsScanned: store.tickets.size, itemsRemoved: items, before, after, freedBytes: before != null && after != null ? Math.max(0, before - after) : null });
 });
 
+// After a self-restart the previous process may hold the port for a moment — retry
+// instead of dying, whether we were respawned detached or brought back by systemd.
+let listenRetries = 20;
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE' && listenRetries-- > 0) {
+    setTimeout(() => server.listen(PORT, '0.0.0.0'), 500);
+    return;
+  }
+  throw err;
+});
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Dispatch listening on http://0.0.0.0:${PORT}`);
 });

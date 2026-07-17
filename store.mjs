@@ -276,6 +276,8 @@ export class Store {
   }
 
   ticketDir(id) { return path.join(TICKETS_DIR, id); }
+  // Per-ticket git worktrees live here (one dir per ticket id), outside every repo.
+  worktreesRoot() { return path.join(DATA_DIR, 'worktrees'); }
   dossierPath(id) { return path.join(this.ticketDir(id), 'DOSSIER.md'); }
   transcriptsDir(id) { return path.join(this.ticketDir(id), 'transcripts'); }
   runDir(id, runId) {

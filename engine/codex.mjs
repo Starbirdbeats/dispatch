@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { CODEX_CONTEXT_WINDOW } from './limits.mjs';
 
-export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace }) {
+export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace, gitDir }) {
   const lastMsgFile = path.join(dataDir, 'last-message.txt');
   const args = ['exec'];
   const resume = Boolean(sessionId);
@@ -19,9 +19,11 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
   const readOnly = Boolean(harness.readOnly);
   const sandbox = readOnly ? 'workspace-write' : (harness.permissions || 'workspace-write');
   // .git is kept read-only inside workspace-write unless listed as a writable root,
-  // which would block the "commit your work" contract of Build-style phases.
-  const gitDir = path.join(workspace, '.git');
-  const roots = JSON.stringify(readOnly ? [dataDir] : [dataDir, gitDir]);
+  // which would block the "commit your work" contract of Build-style phases. In a
+  // worktree checkout .git is a file pointing at the repo's shared git dir, so the
+  // runner passes the resolved common dir (gitDir); fall back to workspace/.git.
+  const gitWritable = gitDir || path.join(workspace, '.git');
+  const roots = JSON.stringify(readOnly ? [dataDir] : [dataDir, gitWritable]);
   if (readOnly) args.push('-c', 'sandbox_permissions=["disk-full-read-access"]');
   if (resume) {
     // `exec resume` has no --sandbox/-C/--add-dir flags; config overrides cover it.

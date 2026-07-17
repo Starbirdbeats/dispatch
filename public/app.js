@@ -13,6 +13,7 @@ const S = {
   newPasteThumbs: [],
   confirmAction: null,
   workspaceResolve: null,
+  usageRefreshing: new Set(), // providers with a click-triggered usage re-probe in flight
   mobilePhase: 0,      // <760px board: which phase (column index) is on screen
 };
 
@@ -212,6 +213,11 @@ function connectWS() {
         if (t) renderDiagBanner(t);
       }
     }
+    if (msg.type === 'restarting' && !S.updating) {
+      // Another tab pressed UPDATE (or the server is restarting itself) — show the same
+      // progress indicator here and reload once the new process answers.
+      beginUpdateRestartWatch($('#btn-update'), S.serverBoot);
+    }
     if (msg.type === 'run-event') {
       (S.live[msg.ticketId] ||= []).push(msg.event);
       if (S.live[msg.ticketId].length > 800) S.live[msg.ticketId].shift();
@@ -249,6 +255,25 @@ async function refreshModelRegistry() {
   } catch (e) { alertErr(e); }
   finally { document.querySelectorAll('.refresh-models').forEach((b) => b.classList.remove('spin')); }
 }
+// Clicking a provider in the usage strip re-probes that provider's windows now, rather
+// than waiting out the server's 5-minute poll. Ignored while one is already in flight.
+async function refreshUsage(provider) {
+  if (S.usageRefreshing.has(provider)) return;
+  S.usageRefreshing.add(provider);
+  renderTopbar();
+  try {
+    const r = await api('/api/usage/refresh', 'POST', { provider });
+    S.data.usage = r.usage;
+    const err = r.usage?.[provider]?.error;
+    if (err) toast(`${provider.toUpperCase()} USAGE — ${err}`, true);
+  } catch (e) {
+    alertErr(e);
+  } finally {
+    S.usageRefreshing.delete(provider);
+    renderTopbar();
+  }
+}
+
 const effective = (t, c) => ({ ...c.harness, ...(t.overrides?.[c.id] || {}) });
 const boardMaxBounces = () => S.data.board.settings.maxBounces ?? 3;
 function parseMaxBouncesInput(sel, fallback = null) {
@@ -271,7 +296,7 @@ function diagnose(t, c) {
       detail: started ? `Live for ${fmtDur(Date.now() - started)}. Watch the Transcript tab.` : 'Live. Watch the Transcript tab.',
       startedAt: started };
   }
-  if (queued) return { kind: 'queued', tone: 'ok', label: 'QUEUED', stuck: false, headline: 'Waiting for a run slot', detail: 'Another run is using the concurrency slot; this starts next.' };
+  if (queued) return { kind: 'queued', tone: 'ok', label: 'QUEUED', stuck: false, headline: 'Waiting for a run slot', detail: 'Another run is using the concurrency slot; this starts next. Force start to skip the queue.' };
   if (t.pendingWake) return { kind: 'pending-wake', tone: 'ok', label: 'PICKUP SCHEDULED', stuck: false, headline: 'An agent will pick up your comment shortly', detail: 'Counting down in the comment box below.', wakeAt: t.pendingWake.at };
   if (t.retryAt) return { kind: 'rate-limit', tone: 'warn', label: 'AUTO-RETRY', stuck: false, headline: 'Rate-limited — will retry automatically', detail: sr?.detail || `Retry scheduled for ${new Date(t.retryAt).toLocaleString()}.`, retryAt: t.retryAt };
 
@@ -296,6 +321,7 @@ function diagnose(t, c) {
 const STUCK_HEADLINES = {
   'branch-dirty': 'Stuck: workspace has uncommitted changes',
   'branch-unavailable': 'Stuck: Dispatch could not prepare the branch',
+  'worktree-conflict': 'Stuck: the ticket’s worktree needs a human look',
   'workspace-missing': 'Stuck: the workspace folder doesn’t exist',
   'workspace-not-git': 'Stuck: the workspace isn’t a Git repository',
   'runner-crash': 'Stuck: the engine hit an error starting the run',
@@ -447,7 +473,8 @@ function usageProviderHTML(provider) {
   // "MAX·OAUTH" / "PLUS·OAUTH" when the CLI auth file exposes a tier; source-derived otherwise
   const plan = u.plan ? String(u.plan).toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim().split(' ')[0] : '';
   const src = plan ? `${plan}·OAUTH` : usageSourceLabel(u.source);
-  return `<div class="usage-provider" title="${esc(title)}">
+  const busy = S.usageRefreshing.has(provider);
+  return `<div class="usage-provider${busy ? ' refreshing' : ''}" role="button" tabindex="0" aria-busy="${busy}" data-usage-refresh="${provider}" title="${esc(`${title}${title ? ' · ' : ''}click to refresh`)}">
     <div class="usage-top"><span class="usage-dot tone-${providerIndicatorTone(provider)}"></span><span class="usage-name">${provider}</span>${src ? `<span class="usage-src">${esc(src)}</span>` : ''}</div>
     ${usageWindowHTML('5H', u.fiveHour, provider, '5h')}
     ${usageWindowHTML('7D', u.weekly, provider, '7d')}
@@ -1089,6 +1116,7 @@ function render() {
 function renderUpdateButton() {
   const btn = $('#btn-update');
   if (!btn) return;
+  if (S.updating) return; // mid-restart: beginUpdateRestartWatch owns the button until the new server answers
   const u = S.data?.updateStatus;
   const behind = u && !u.error ? (u.behind || 0) : 0;
   btn.classList.toggle('is-error', Boolean(u?.error));
@@ -1702,9 +1730,24 @@ function renderWorkspaceResolve() {
   }
 }
 
+// Single entry point for RUN/FORCE requests. If the only blocker is another run in the
+// same workspace, offer to override the workspace lock — dangerous, so confirm first.
+async function requestRun(ticketId, { force = false } = {}) {
+  const r = await api(`/api/tickets/${ticketId}/run`, 'POST', force ? { force: true } : {});
+  if (r.queued) {
+    toast(r.startedPhase ? `PIPELINE STARTED → ${r.startedPhase}` : (r.forced ? 'FORCED — STARTING NOW' : 'RUN QUEUED'));
+    return r;
+  }
+  if (r.workspaceBusy && !force
+    && confirm('Another run is ACTIVE in the same workspace folder (non-git workspaces get no isolated worktree). Forcing a second run there means two agents editing the same folder at once — they can overwrite each other. Force anyway?')) {
+    return requestRun(ticketId, { force: true });
+  }
+  toast(`NOT QUEUED: ${r.reason || 'unknown'}`, true);
+  return r;
+}
+
 async function retryTicketPhase(ticketId) {
-  const r = await api(`/api/tickets/${ticketId}/run`, 'POST', {});
-  toast(r.queued ? 'RUN QUEUED' : `NOT QUEUED: ${r.reason || 'unknown'}`, !r.queued);
+  await requestRun(ticketId);
   await loadState();
 }
 
@@ -2089,10 +2132,7 @@ function renderTicketModal() {
     b.onclick = () => { S.modal.tab = b.dataset.tab; renderTicketModal(); writeModalHash(S.modal, { push: false }); };
   }
   $('#btn-move').onclick = () => api(`/api/tickets/${t.id}/move`, 'POST', { columnId: $('#move-to').value }).then(() => { toast('MOVED'); closeAndReload(); }).catch(alertErr);
-  $('#btn-run').onclick = () => api(`/api/tickets/${t.id}/run`, 'POST', {}).then((r) => {
-    if (r.queued) toast(r.startedPhase ? `PIPELINE STARTED → ${r.startedPhase}` : 'RUN QUEUED');
-    else toast(`NOT QUEUED: ${r.reason || 'unknown'}`, true);
-  }).catch(alertErr);
+  $('#btn-run').onclick = () => requestRun(t.id).catch(alertErr);
   $('#btn-stop').onclick = () => api(`/api/tickets/${t.id}/stop`, 'POST', {}).then(() => toast('STOP SIGNAL SENT')).catch(alertErr);
   $('#btn-archive-ticket').onclick = () => archiveTicket(t.id, { closeTicketModal: true });
   $('#btn-del').onclick = () => deleteTicket(t.id, { closeTicketModal: true, archived: t.archived });
@@ -2119,6 +2159,9 @@ function renderDiagBanner(t) {
 
   // action buttons only where they make sense
   const acts = [];
+  if (dx.kind === 'queued') {
+    acts.push('<button class="btn btn-accent" data-dx="run">[ FORCE START NOW ]</button>');
+  }
   if (dx.stuck || dx.kind === 'hold' || dx.kind === 'idle-agent') {
     if (dx.kind === 'branch-dirty') acts.push('<button class="btn btn-accent" data-dx="resolve-workspace">[ RESOLVE WORKSPACE ]</button>');
     if (dx.kind === 'workspace-missing' || dx.kind === 'workspace-not-git') acts.push('<button class="btn btn-accent" data-dx="edit-workspace">[ EDIT WORKSPACE ]</button>');
@@ -2143,7 +2186,7 @@ function renderDiagBanner(t) {
     b.onclick = () => {
       const kind = b.dataset.dx;
       if (kind === 'run') {
-        api(`/api/tickets/${t.id}/run`, 'POST', {}).then((r) => toast(r.queued ? 'RUN QUEUED' : `NOT QUEUED: ${r.reason || '?'}`, !r.queued)).catch(alertErr);
+        requestRun(t.id).catch(alertErr);
       } else if (kind === 'resolve-workspace') {
         openWorkspaceResolve(t);
       } else if (kind === 'edit-workspace') {
@@ -2393,9 +2436,9 @@ function wireWorkspaceStatus(inputId, statusId, isReadOnly) {
       const changes = `${s.changeCount} uncommitted change${s.changeCount === 1 ? '' : 's'}`;
       if (!s.exists || !s.isDirectory) show('hint bad', 'folder does not exist — Dispatch will reject this path');
       else if (!s.gitWorkTree && ro) show('hint', 'not a git repository — fine for a read-only ticket');
-      else if (!s.gitWorkTree) show('hint warn', 'not a git repository — the first run will park until this is a git work tree (or mark the ticket read-only)');
+      else if (!s.gitWorkTree) show('hint warn', 'not a git repository — Dispatch will run without branch or commit support');
       else if (s.error) show('hint', `git repo — couldn’t read status: ${s.error}`);
-      else if (s.dirty && !ro) show('hint warn', `git repo on ${s.branch} — ${changes}; must be clean before the first branch switch (resolvable later)`);
+      else if (s.dirty && !ro) show('hint', `git repo on ${s.branch} — ${changes}; fine as-is — runs use an isolated per-ticket worktree and never touch this checkout`);
       else show('hint', `git repo on ${s.branch}${s.dirty ? ` — ${changes}` : ''}`);
     } catch (e) {
       if (mine !== seq) return;
@@ -3439,16 +3482,63 @@ $('#btn-update').onclick = async (e) => {
     toast(`UPDATE CHECK FAILED — ${btn.dataset.updateError}`, true);
     return;
   }
+  if (S.updating) return;
   btn.disabled = true;
   try {
     const r = await api('/api/update/apply', 'POST', {});
+    if (r.applied && r.restarting) { beginUpdateRestartWatch(btn, r.bootId); return; }
     toast(r.applied ? 'UPDATED — RESTART DISPATCH TO APPLY' : 'ALREADY UP TO DATE');
   } catch (err) {
     alertErr(err);
   } finally {
-    btn.disabled = false;
+    if (!S.updating) btn.disabled = false;
   }
 };
+
+// UPDATE pressed → the server restarts itself. The button becomes the progress indicator:
+// poll /api/health until a different bootId answers (the new process), then reload; the
+// sessionStorage marker survives the reload so the fresh page can confirm completion.
+// The serverBoot check in loadState() may reload us first — same marker, same toast.
+function beginUpdateRestartWatch(btn, oldBootId) {
+  S.updating = true;
+  try { sessionStorage.setItem('dispatch.updateRestart', JSON.stringify({ from: oldBootId, at: Date.now() })); } catch {}
+  btn.hidden = false;
+  btn.disabled = true;
+  btn.classList.add('is-updating');
+  btn.textContent = '[ ⟳ UPDATING… ]';
+  const deadline = Date.now() + 120_000;
+  const tick = async () => {
+    try {
+      const h = await fetch('/api/health').then((r) => (r.ok ? r.json() : null));
+      if (h?.bootId && h.bootId !== oldBootId) { location.reload(); return; }
+    } catch { /* server is down mid-restart — keep waiting */ }
+    if (Date.now() > deadline) {
+      S.updating = false;
+      try { sessionStorage.removeItem('dispatch.updateRestart'); } catch {}
+      btn.classList.remove('is-updating');
+      btn.disabled = false;
+      renderUpdateButton();
+      toast('UPDATE APPLIED BUT THE SERVER HASN’T COME BACK — check the service logs', true);
+      return;
+    }
+    setTimeout(tick, 1000);
+  };
+  setTimeout(tick, 1500);
+}
+
+// Fresh page load after an update restart: confirm completion (or report a dead server).
+(async () => {
+  let marker = null;
+  try {
+    marker = JSON.parse(sessionStorage.getItem('dispatch.updateRestart') || 'null');
+    if (marker) sessionStorage.removeItem('dispatch.updateRestart');
+  } catch {}
+  if (!marker) return;
+  try {
+    const h = await fetch('/api/health').then((r) => (r.ok ? r.json() : null));
+    if (h?.bootId && h.bootId !== marker.from) toast('DISPATCH UPDATED & RESTARTED ✓');
+  } catch { /* page load itself would have failed if the server were down */ }
+})();
 $('#btn-pause').onclick = () => {
   const cap = S.data.board.settings.maxConcurrent ?? 2;
   let next;
@@ -3492,6 +3582,10 @@ function toggleTopMenu() {
 $('#btn-menu').onclick = (e) => { e.stopPropagation(); toggleTopMenu(); };
 
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    const usageEl = e.target.closest?.('[data-usage-refresh]');
+    if (usageEl) { e.preventDefault(); refreshUsage(usageEl.dataset.usageRefresh); return; }
+  }
   if (e.key === 'Escape') {
     closeTopMenu();
     if (dismissWorkspaceResolve()) return;
@@ -3501,6 +3595,8 @@ document.addEventListener('keydown', (e) => {
 });
 document.addEventListener('click', (e) => {
   if (e.target.closest('.refresh-models')) { e.preventDefault(); refreshModelRegistry(); }
+  const usageEl = e.target.closest('[data-usage-refresh]');
+  if (usageEl) { e.preventDefault(); refreshUsage(usageEl.dataset.usageRefresh); }
   if (!e.target.closest('#topmenu') && !e.target.closest('#btn-menu')) closeTopMenu();
 });
 

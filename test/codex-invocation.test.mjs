@@ -74,3 +74,24 @@ test('normal Codex invocation keeps workspace-write behavior for build phases', 
   assert.ok(args.includes('sandbox_workspace_write.writable_roots=["/tmp/dispatch-ticket","/tmp/workspace/.git"]'));
   assert.ok(!args.includes('sandbox_permissions=["disk-full-read-access"]'));
 });
+
+test('worktree Codex invocation gets the repo’s shared git dir as the writable root', () => {
+  const { args } = buildInvocation({
+    prompt: 'prompt',
+    dataDir: '/tmp/dispatch-ticket',
+    workspace: '/data/worktrees/t-abc',
+    gitDir: '/repos/project/.git',
+    sessionId: null,
+    harness: {
+      type: 'codex',
+      model: 'gpt-5.5',
+      effort: 'medium',
+      permissions: 'workspace-write',
+    },
+  });
+
+  assert.equal(valueAfter(args, '-C'), '/data/worktrees/t-abc');
+  // In a worktree, workspace/.git is a file — commits need the shared git dir writable.
+  assert.ok(args.includes('sandbox_workspace_write.writable_roots=["/tmp/dispatch-ticket","/repos/project/.git"]'));
+  assert.ok(!args.some((a) => a.includes('/data/worktrees/t-abc/.git')));
+});

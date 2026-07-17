@@ -1,7 +1,7 @@
 // contract.mjs — the hand-off contract between Dispatch and any harness.
 // Composes the per-run prompt and parses the structured control block agents must emit.
 
-export function composePrompt({ ticket, column, harness, dossierPath, recentActivity, resume }) {
+export function composePrompt({ ticket, column, harness, dossierPath, recentActivity, resume, workDir }) {
   const lines = [];
 
   lines.push(`# Dispatch run — ticket "${ticket.title}" — phase "${column.name}"`);
@@ -12,8 +12,16 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
   lines.push('\n## Ticket');
   lines.push(`Title: ${ticket.title}`);
   if (ticket.description) lines.push(`Description:\n${ticket.description}`);
-  lines.push(`Workspace repo to inspect: ${ticket.workspace}`);
+  const runDir = workDir || ticket.workspace;
+  lines.push(`Workspace repo to inspect: ${runDir}`);
   if (ticket.branchName) lines.push(`Working branch: ${ticket.branchName}`);
+  if (ticket.branchless?.kind === 'workspace-not-git') {
+    lines.push('Working branch: NONE — workspace is not a Git repository.');
+  }
+  if (runDir !== ticket.workspace) {
+    lines.push('\n## ISOLATED WORKTREE');
+    lines.push(`Your working directory ${runDir} is a private git worktree of ${ticket.workspace}, dedicated to this ticket. Do ALL repo work inside it — never edit, switch branches in, or run commands against the main checkout at ${ticket.workspace}; the human and other tickets use that one. Commits you make here land in the shared repository on your working branch as normal. Note: untracked files from the main checkout (.env files, node_modules, build output) do not exist in a worktree — recreate or install whatever you need here. Git submodules (if any) are initialized at their recorded commits with detached HEADs; if the ticket needs submodule work, create/switch submodule branches yourself before committing there.`);
+  }
 
   lines.push('\n## Shared context — READ FIRST');
   lines.push(`The ticket dossier lives at: ${dossierPath}`);
@@ -31,6 +39,9 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
   if (ticket.readOnly) {
     lines.push('\n## READ-ONLY TICKET');
     lines.push('This ticket is READ-ONLY: analyse/read the repo for context only. Do NOT attempt to edit workspace files, run migrations, or commit — the goal is understanding, not changes. You may still edit the ticket dossier in the ticket data dir. Codex read-only runs may have their cwd set to the ticket data dir instead of the workspace; use the absolute workspace path above when reading the repo. You must still complete the hand-off. Try the normal dossier Work Log/Plan update first; if your sandbox denies the dossier write, do not retry. Instead include the Work Log entry body as "work_log" in your control block, and include "plan" only if this phase produced or updated the plan. Dispatch will write those fields into the dossier for you.');
+  } else if (ticket.branchless?.kind === 'workspace-not-git') {
+    lines.push('\n## BRANCHLESS WORKSPACE');
+    lines.push('This workspace is an existing folder but not a Git repository, so Dispatch skipped branch preparation. Do not run git branch/commit commands. Make any requested file changes directly in the workspace, verify them, update the dossier Work Log, and call out in your hand-off that no commit was created because the workspace is not a Git repo. If version control is required before continuing, use "flag_human" and ask for git init or a repo workspace.');
   }
 
   lines.push('\n## Tooling notes');

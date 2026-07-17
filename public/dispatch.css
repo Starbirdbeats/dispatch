@@ -1,5 +1,5 @@
 /* DISPATCH — tactical telemetry printed on warm documentation paper.
-   base #E3D9BD · ink #2E2A20 · hazard #BD4326 · green reserved for the RUNNING LED only.
+   base #E3D9BD · ink #2E2A20 · hazard #BD4326 · green for healthy status/headroom.
    Single palette by design: the interface is printed, not backlit. */
 
 :root {
@@ -12,8 +12,8 @@
   --fg-dim: #7d7358;           /* secondary ink */
   --fg-faint: #ab9f7d;         /* faint ink / spent segments */
   --red: #bd4326;              /* hazard brick — intake, +TICKET, human */
-  --green: #5a7d24;            /* the ONE green: RUNNING led, legible on paper */
-  /* phase/harness accents (pipeline rail). green stays reserved for the running LED. */
+  --green: #5a7d24;            /* the ONE green: healthy status/headroom, legible on paper */
+  /* phase/harness accents (pipeline rail). green stays reserved for status signals. */
   --claude: #3f7288;           /* teal-blue */
   --codex: #6f8f3a;            /* olive */
   --amber: #a8781c;            /* gold — RUN badge, active pager, T+ clock */
@@ -128,6 +128,13 @@ body {
 .usage-dot.tone-live { background: var(--green); }
 .usage-dot.tone-warn { background: var(--amber); }
 .usage-dot.tone-stuck { background: var(--red); }
+/* the strip is click-to-refresh: hover lifts the name out of dim, the dot pulses while re-probing */
+.usage-provider { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.usage-provider:hover .usage-name, .usage-provider:focus-visible .usage-name { color: var(--amber); }
+.usage-provider:focus-visible { outline: 1px solid var(--fg-dim); outline-offset: 2px; }
+/* the name carries the pulse too — mobile hides the dot, and would otherwise show no busy state */
+.usage-provider.refreshing { cursor: progress; }
+.usage-provider.refreshing .usage-dot, .usage-provider.refreshing .usage-name { animation: pulse 1.1s steps(2) infinite; }
 .usage-window-block { display: inline-flex; flex-direction: row; align-items: center; gap: 4px; min-width: 0; }
 .usage-window-block.w7d::before { content: '·'; color: var(--fg-faint); margin-right: 1px; }
 .usage-window { display: flex; align-items: center; gap: 4px; min-width: 0; }
@@ -1063,6 +1070,9 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 .update-fab.is-error { color: var(--fg-faint); border-color: var(--fg-faint); }
 .update-fab.is-error:hover { background: var(--bg-2); color: var(--fg); }
 .update-fab:disabled { color: var(--fg-faint); border-color: var(--bg-2); cursor: not-allowed; box-shadow: none; }
+.update-fab.is-updating,
+.update-fab.is-updating:disabled { color: var(--amber); border-color: var(--amber); animation: update-pulse 1.2s steps(2) infinite; }
+@keyframes update-pulse { 50% { opacity: 0.45; } }
 .update-fab[hidden] { display: none; }
 @media (max-width: 760px) { .update-fab { right: 12px; bottom: 12px; font-size: 11px; } }
 

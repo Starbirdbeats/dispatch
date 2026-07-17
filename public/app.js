@@ -1086,7 +1086,7 @@ function renderUpdateButton() {
   btn.title = u?.error ? `Update check failed: ${u.error}` : '';
   btn.disabled = false;
   if (u?.error) {
-    btn.hidden = false;
+    btn.hidden = true;
     btn.textContent = '[ UPDATE ? ]';
     return;
   }

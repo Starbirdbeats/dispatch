@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { checkUpdateStatus, createGitRunner, parseAheadBehind } from '../engine/update-status.mjs';
+import { checkUpdateStatus, createGitRunner, formatGitUpdateError, parseAheadBehind } from '../engine/update-status.mjs';
 
 function git(cwd, args) {
   return new Promise((resolve, reject) => {
@@ -56,6 +56,14 @@ test('parseAheadBehind normalizes git rev-list counts', () => {
   assert.deepEqual(parseAheadBehind('3\n', '0\n'), { behind: 3, ahead: 0 });
   assert.deepEqual(parseAheadBehind('', ''), { behind: 0, ahead: 0 });
   assert.deepEqual(parseAheadBehind('x', 'y'), { behind: 0, ahead: 0 });
+});
+
+test('formatGitUpdateError summarizes DNS failures', () => {
+  const error = new Error(`Command failed: git fetch --quiet origin main
+ssh: Could not resolve hostname github.com: Name or service not known
+fatal: Could not read from remote repository.`);
+
+  assert.equal(formatGitUpdateError(error), 'network unavailable - cannot reach the update remote right now');
 });
 
 test('checkUpdateStatus degrades silently outside a git repo', async () => {
@@ -121,6 +129,7 @@ test('checkUpdateStatus reports a status error when origin main is unavailable',
     assert.equal(status.branch, null);
     assert.equal(status.state, 'status-error');
     assert.ok(status.error);
+    assert.doesNotMatch(status.error, /Command failed/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

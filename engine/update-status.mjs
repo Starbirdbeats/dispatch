@@ -19,6 +19,26 @@ export function createGitRunner(cwd) {
   };
 }
 
+export function formatGitUpdateError(error) {
+  const raw = String(error?.message || error || '').trim();
+  const detail = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^Command failed: git\b/i.test(line))
+    .join('\n')
+    || raw;
+  if (/could not resolve (host|hostname)|name or service not known|temporary failure in name resolution/i.test(raw)) {
+    return 'network unavailable - cannot reach the update remote right now';
+  }
+  if (/network is unreachable|failed to connect|connection timed out|operation timed out/i.test(raw)) {
+    return 'network unavailable - cannot reach the update remote right now';
+  }
+  if (/could not read from remote repository|permission denied|repository not found/i.test(raw)) {
+    return 'update remote unavailable - check repository access';
+  }
+  return detail || 'update check failed';
+}
+
 export async function checkUpdateStatus({ git }) {
   const checkedAt = new Date().toISOString();
   const localRef = 'refs/heads/main';
@@ -39,7 +59,7 @@ export async function checkUpdateStatus({ git }) {
       ahead: 0,
       branch: null,
       state: 'status-error',
-      error: e.message || String(e),
+      error: formatGitUpdateError(e),
       checkedAt,
       localRef,
       remoteRef,

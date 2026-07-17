@@ -18,7 +18,7 @@ import {
   validateEnvKey,
 } from './engine/envfile.mjs';
 import { AUTH_COMMANDS, createAuthSessions } from './engine/authflow.mjs';
-import { checkUpdateStatus, createGitRunner, parseAheadBehind } from './engine/update-status.mjs';
+import { checkUpdateStatus, createGitRunner, formatGitUpdateError, parseAheadBehind } from './engine/update-status.mjs';
 import { inspectWorkspaceResolution, resolveWorkspace } from './engine/workspace-resolution.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -545,7 +545,7 @@ app.post('/api/update/apply', async (_req, res) => {
     try {
       await git(['fetch', '--quiet', 'origin', 'main'], 30_000);
     } catch (e) {
-      return res.status(502).json({ error: `fetch failed: ${e.message || e}` });
+      return res.status(502).json({ error: formatGitUpdateError(e) });
     }
 
     const behindOut = await git(['rev-list', '--count', 'refs/heads/main..refs/remotes/origin/main']);

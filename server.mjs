@@ -299,7 +299,15 @@ async function probeClaudeUsage() {
       });
       return USAGE.claude;
     }
-    setProviderUsage('claude', { fiveHour: null, weekly: null, at, source: 'claude-oauth-usage', error: e.message });
+    // transient probe failure (e.g. usage API 429): keep the last-known windows like
+    // the codex probe does — stale numbers beat a blanked meter.
+    setProviderUsage('claude', {
+      fiveHour: USAGE.claude.fiveHour,
+      weekly: USAGE.claude.weekly,
+      at,
+      source: 'claude-oauth-usage',
+      error: e.message,
+    });
     return USAGE.claude;
   }
 }

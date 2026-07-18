@@ -207,7 +207,9 @@ function connectWS() {
       renderTopbar();
     }
     if (msg.type === 'context-update') {
-      S.liveContext[msg.ticketId] = msg.context;
+      // runStartedAt ties the snapshot to a specific run, so a finished run's numbers
+      // aren't presented as live telemetry for the next one.
+      S.liveContext[msg.ticketId] = { ctx: msg.context, runStartedAt: msg.runStartedAt || null };
       if (S.modal?.type === 'ticket' && S.modal.id === msg.ticketId && $('#diag-banner')) {
         const t = S.data.tickets.find((x) => x.id === msg.ticketId);
         if (t) renderDiagBanner(t);
@@ -379,39 +381,79 @@ function fmtTokens(n) {
   return String(Math.round(v));
 }
 
+// Context occupancy only — null when the snapshot has no real context reading (codex
+// end-of-run usage is cumulative in/out with contextTokens: null; never fake a meter
+// from it). Number.isFinite without Number() coercion: Number(null) is 0, which would
+// render an untracked context as "0% full".
 function contextStats(ctx) {
   if (!ctx) return null;
-  const pct = Number.isFinite(Number(ctx.pct))
-    ? clamp(ctx.pct)
-    : (ctx.windowTokens ? clamp((Number(ctx.contextTokens) / Number(ctx.windowTokens)) * 100) : null);
+  let pct = Number.isFinite(ctx.pct) ? clamp(ctx.pct) : null;
+  if (pct == null && Number.isFinite(ctx.contextTokens) && Number.isFinite(ctx.windowTokens) && ctx.windowTokens > 0) {
+    pct = clamp((ctx.contextTokens / ctx.windowTokens) * 100);
+  }
   if (pct == null || !Number.isFinite(pct)) return null;
   return { usedPct: pct, remainingPct: clamp(100 - pct) };
 }
 
-function contextLineHTML(type, ctx, { live = false } = {}) {
+// Cumulative input/output split for a run or phase — "in 39.9m (38.7m cached) · out 89k".
+function tokenIOText(ctx) {
+  if (!ctx) return '';
+  const hasIn = Number.isFinite(ctx.inputTokens);
+  const hasOut = Number.isFinite(ctx.outputTokens);
+  if (!hasIn && !hasOut) return '';
+  const cached = Number.isFinite(ctx.cachedInputTokens) && ctx.cachedInputTokens > 0
+    ? ` (${fmtTokens(ctx.cachedInputTokens)} cached)` : '';
+  return `in ${hasIn ? fmtTokens(ctx.inputTokens) : '—'}${cached} · out ${hasOut ? fmtTokens(ctx.outputTokens) : '—'}`;
+}
+
+function contextLineHTML(label, ctx, { live = false, detail = '' } = {}) {
+  if (!ctx) return '';
   const stats = contextStats(ctx);
-  if (!stats) return '';
-  const title = [ctx.model, ctx.at ? `updated ${fmtTs(ctx.at)}` : ''].filter(Boolean).join(' · ');
+  const io = tokenIOText(ctx);
+  if (!stats && !io) return '';
+  const title = [
+    ctx.model,
+    'ctx = tokens in the context window · in/out = total tokens sent/generated',
+    ctx.at ? `updated ${fmtTs(ctx.at)}` : '',
+  ].filter(Boolean).join(' · ');
+  const ctxText = stats
+    ? `ctx ${fmtTokens(ctx.contextTokens)} / ${fmtTokens(ctx.windowTokens)} · ${live ? `${pctText(stats.usedPct)} full · ` : ''}${pctText(stats.remainingPct)} left`
+    : '';
   return `<div class="context-line" title="${esc(title)}">
-    <span class="context-name">${esc(type)}</span>
-    ${meterHTML(stats.usedPct, stats.remainingPct)}
-    <span class="context-num">${fmtTokens(ctx.contextTokens)} / ${fmtTokens(ctx.windowTokens)} · ${live ? `${pctText(stats.usedPct)} full · ` : ''}${pctText(stats.remainingPct)} left</span>
+    <span class="context-name">${esc(label)}</span>
+    ${stats ? meterHTML(stats.usedPct, stats.remainingPct) : ''}
+    <span class="context-num">${[detail, ctxText, io].filter(Boolean).map(esc).join(' · ')}</span>
   </div>`;
 }
 
+// Ticket CONTEXT overview: one line per phase the ticket has run (planning/build/…),
+// each with the harness that ran it and its input/output totals. Tickets from before
+// per-phase tracking fall back to the old per-harness lines.
 function contextOverviewHTML(t) {
-  const lines = ['claude', 'codex']
-    .map((type) => t.context?.[type] ? contextLineHTML(type, t.context[type]) : '')
-    .filter(Boolean);
-  return lines.length ? `<div class="context-list">${lines.join('')}</div>` : '<span class="muted">no runs yet</span>';
+  const phases = Object.entries(t.phaseContext || {});
+  const lines = phases.length
+    ? phases.map(([phase, ctx]) => contextLineHTML(phase, ctx, {
+        detail: [ctx.harness, ctx.runs > 1 ? `${ctx.runs} runs` : ''].filter(Boolean).join(' · '),
+      }))
+    : ['claude', 'codex'].map((type) => t.context?.[type] ? contextLineHTML(type, t.context[type]) : '');
+  const html = lines.filter(Boolean);
+  return html.length ? `<div class="context-list">${html.join('')}</div>` : '<span class="muted">no runs yet</span>';
 }
 
 function liveContextHTML(t) {
   const runningType = t.currentRun?.harness;
   if (!runningType) return '';
-  const ctx = S.liveContext[t.id] || t.context?.[runningType];
+  // Only trust the live snapshot if it belongs to THIS run — codex reports usage once
+  // at the end of a run, so mid-run we'd otherwise dress up the previous run's totals
+  // as live telemetry (the old "50m / 272k · 100% full" while a fresh run was minutes in).
+  const live = S.liveContext[t.id];
+  const isLive = live?.ctx && (!live.runStartedAt || live.runStartedAt === t.currentRun.startedAt);
+  const ctx = isLive ? live.ctx : t.context?.[runningType];
   if (!ctx) return '';
-  return `<div class="diag-context">${contextLineHTML(runningType, ctx, { live: true })}</div>`;
+  return `<div class="diag-context">${contextLineHTML(runningType, ctx, {
+    live: isLive,
+    detail: isLive ? '' : 'prev run',
+  })}</div>`;
 }
 
 // "2H14M" remaining-until-reset countdown from an ISO timestamp (compact, no seconds).

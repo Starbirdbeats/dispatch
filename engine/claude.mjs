@@ -81,9 +81,25 @@ export function parseLine(line, state) {
       const u = obj.message?.usage;
       if (u) {
         const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+        const input = num(u.input_tokens) + num(u.cache_creation_input_tokens) + num(u.cache_read_input_tokens);
+        const output = num(u.output_tokens);
+        // stream-json re-emits the same API message (same id, same usage) once per
+        // content block — count each message once or the run totals multiply.
+        const msgId = obj.message?.id || null;
+        state.totals ||= { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+        state.countedMsgIds ||= new Set();
+        if (!msgId || !state.countedMsgIds.has(msgId)) {
+          if (msgId) state.countedMsgIds.add(msgId);
+          state.totals.inputTokens += input;
+          state.totals.cachedInputTokens += num(u.cache_read_input_tokens);
+          state.totals.outputTokens += output;
+        }
         state.usage = {
-          contextTokens: num(u.input_tokens) + num(u.cache_creation_input_tokens) + num(u.cache_read_input_tokens) + num(u.output_tokens),
+          contextTokens: input + output,
           windowTokens: CLAUDE_CONTEXT_WINDOW,
+          inputTokens: state.totals.inputTokens,
+          cachedInputTokens: state.totals.cachedInputTokens,
+          outputTokens: state.totals.outputTokens,
           model,
           at: new Date().toISOString(),
         };
@@ -100,10 +116,30 @@ export function parseLine(line, state) {
       }
       return out.length ? out : null;
     }
-    case 'result':
+    case 'result': {
       state.finalText = obj.result || '';
       state.exitInfo = { subtype: obj.subtype, costUsd: obj.total_cost_usd, turns: obj.num_turns, durationMs: obj.duration_ms };
+      // The result event carries authoritative cumulative usage for the run — it also
+      // covers messages the stream dropped, so prefer it over our per-message sums.
+      const u = obj.usage;
+      if (u && typeof u === 'object') {
+        const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+        const inputTokens = num(u.input_tokens) + num(u.cache_creation_input_tokens) + num(u.cache_read_input_tokens);
+        const outputTokens = num(u.output_tokens);
+        if (inputTokens || outputTokens) {
+          state.usage = {
+            contextTokens: state.usage?.contextTokens ?? null,
+            windowTokens: CLAUDE_CONTEXT_WINDOW,
+            inputTokens,
+            cachedInputTokens: num(u.cache_read_input_tokens),
+            outputTokens,
+            model: state.model || '',
+            at: new Date().toISOString(),
+          };
+        }
+      }
       return { kind: 'result', text: `result: ${obj.subtype} (${obj.num_turns ?? '?'} turns)` };
+    }
     default:
       return null;
   }

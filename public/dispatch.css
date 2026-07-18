@@ -761,7 +761,7 @@ input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; background: v
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
-.context-name { width: 46px; flex: 0 0 46px; color: var(--fg); font-weight: 800; font-size: 9px; }
+.context-name { width: 72px; flex: 0 0 72px; color: var(--fg); font-weight: 800; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .context-num { color: var(--fg-dim); font-size: 10px; word-break: normal; overflow-wrap: anywhere; }
 
 .activity { display: flex; flex-direction: column; gap: 1px; background: var(--line); border: 1px solid var(--line); }

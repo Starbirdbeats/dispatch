@@ -88,7 +88,9 @@ export function parseLine(line, state) {
       event.usage?.rate_limits,
     );
     state.exitInfo = { usage: event.usage };
-    if (!state.usage && event.usage) applyUsageFallback(event.usage, state);
+    // This usage is cumulative for the whole run (cached re-reads counted every
+    // request, so input can dwarf the window) — in/out totals only, never context.
+    applyCodexUsage(state, { totals: event.usage, totalsAsContext: false });
     return { kind: 'result', text: 'turn completed' };
   }
   if (event.type === 'turn.failed') {
@@ -108,32 +110,26 @@ export function parseLine(line, state) {
 }
 
 function applyThreadTokenUsage(tokenUsage, state) {
-  const total = tokenUsage.total || tokenUsage.total_token_usage || tokenUsage.totalTokenUsage;
+  const totals = tokenUsage.total || tokenUsage.total_token_usage || tokenUsage.totalTokenUsage;
+  const last = tokenUsage.last || tokenUsage.last_token_usage || tokenUsage.lastTokenUsage;
   const model = tokenUsage.model || state.model || '';
   captureRateLimits(state, tokenUsage.rateLimits, tokenUsage.rate_limits);
-  applyUsageFallback(total, state, {
+  applyCodexUsage(state, {
+    totals,
+    last,
     model,
-    windowTokens: tokenUsage.modelContextWindow || tokenUsage.model_context_window || CODEX_CONTEXT_WINDOW,
+    windowTokens: tokenUsage.modelContextWindow || tokenUsage.model_context_window,
   });
 }
 
 function applyTokenCount(obj, state) {
   const info = obj.info || obj.token_count || obj;
-  const usage = info.total_token_usage || info.totalTokenUsage || info.last_token_usage || info.lastTokenUsage || info.usage;
-  const total = usage?.total_tokens ?? usage?.totalTokens;
+  const totals = info.total_token_usage || info.totalTokenUsage || info.usage;
+  const last = info.last_token_usage || info.lastTokenUsage;
   const model = info.model || obj.model || state.model || '';
   if (model) state.model = model;
   captureRateLimits(state, obj.rate_limits, obj.rateLimits, info.rate_limits, info.rateLimits);
-  if (Number.isFinite(Number(total))) {
-    state.usage = {
-      contextTokens: Number(total),
-      windowTokens: Number(info.model_context_window || info.modelContextWindow || CODEX_CONTEXT_WINDOW),
-      model,
-      at: new Date().toISOString(),
-    };
-  } else if (usage) {
-    applyUsageFallback(usage, state, { model, windowTokens: info.model_context_window || info.modelContextWindow });
-  }
+  applyCodexUsage(state, { totals, last, model, windowTokens: info.model_context_window || info.modelContextWindow });
 }
 
 function captureRateLimits(state, ...candidates) {
@@ -143,20 +139,49 @@ function captureRateLimits(state, ...candidates) {
   if (rateLimits) state.rateLimits = rateLimits;
 }
 
-function applyUsageFallback(usage, state, { model = state.model || '', windowTokens = CODEX_CONTEXT_WINDOW } = {}) {
-  if (!usage) return;
-  const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
-  const total = usage.total_tokens ?? usage.totalTokens;
-  const contextTokens = Number.isFinite(Number(total))
-    ? Number(total)
-    : num(usage.input_tokens) + num(usage.cached_input_tokens) + num(usage.output_tokens);
-  if (!contextTokens) return;
+// One normalized write of state.usage from whatever token telemetry codex emitted.
+// `last` (latest turn) measures what actually occupies the context window; `totals`
+// accumulate every request in the run. totalsAsContext keeps the legacy reading of
+// per-turn token_count totals as a context measure when no `last` breakdown exists —
+// end-of-run cumulative usage must pass false or a long build reads as 100% full.
+function applyCodexUsage(state, { totals, last, model = state.model || '', windowTokens, totalsAsContext = true } = {}) {
+  const contextTokens = tokensInWindow(last) ?? (totalsAsContext ? tokensInWindow(totals) : null);
+  const io = ioTotals(totals);
+  if (contextTokens == null && !io) return;
   state.usage = {
-    contextTokens,
-    windowTokens: Number(windowTokens || CODEX_CONTEXT_WINDOW),
+    contextTokens: contextTokens ?? state.usage?.contextTokens ?? null,
+    windowTokens: Number(windowTokens || state.usage?.windowTokens || CODEX_CONTEXT_WINDOW),
+    inputTokens: io?.inputTokens ?? state.usage?.inputTokens,
+    cachedInputTokens: io?.cachedInputTokens ?? state.usage?.cachedInputTokens,
+    outputTokens: io?.outputTokens ?? state.usage?.outputTokens,
     model,
     at: new Date().toISOString(),
   };
+}
+
+// Cumulative input/output split. codex's input_tokens already includes the cached
+// share (cached_input_tokens is a subset), so no summing across the two.
+function ioTotals(u) {
+  if (!u || typeof u !== 'object') return null;
+  const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+  const inputTokens = num(u.input_tokens ?? u.inputTokens);
+  const cachedInputTokens = num(u.cached_input_tokens ?? u.cachedInputTokens);
+  const outputTokens = num(u.output_tokens ?? u.outputTokens);
+  if (!inputTokens && !outputTokens) return null;
+  return { inputTokens, cachedInputTokens, outputTokens };
+}
+
+// Tokens occupying the context window after a turn: total minus reasoning output,
+// which is billed but dropped from the window between turns.
+function tokensInWindow(u) {
+  if (!u || typeof u !== 'object') return null;
+  const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+  const total = Number(u.total_tokens ?? u.totalTokens);
+  const base = Number.isFinite(total)
+    ? total
+    : num(u.input_tokens ?? u.inputTokens) + num(u.output_tokens ?? u.outputTokens);
+  if (!base) return null;
+  return Math.max(0, base - num(u.reasoning_output_tokens ?? u.reasoningOutputTokens));
 }
 
 function truncate(s, n = 200) {

@@ -660,7 +660,7 @@ export class Runner {
       buf: Buffer.alloc(0),
       pollTimer: null,
       killTimer: null,
-      lastContextPct: null,
+      lastContextSig: null,
       lastRateLimitSig: null,
     };
     this.running.set(ticket.id, entry);
@@ -747,12 +747,15 @@ export class Runner {
 
   _flushLiveTelemetry(ticketId, entry) {
     const snap = contextSnapshot(entry.state.usage);
-    if (snap && snap.pct !== entry.lastContextPct) {
-      entry.lastContextPct = snap.pct;
+    const sig = snap ? `${snap.pct}|${snap.contextTokens}|${snap.inputTokens ?? ''}|${snap.outputTokens ?? ''}` : null;
+    if (snap && sig !== entry.lastContextSig) {
+      entry.lastContextSig = sig;
+      const ar = this.store.tickets.get(ticketId)?.activeRun;
       this.broadcast({
         type: 'context-update',
         ticketId,
-        harnessType: this.store.tickets.get(ticketId)?.activeRun?.harnessType,
+        harnessType: ar?.harnessType,
+        runStartedAt: ar?.startedAt || null,
         context: snap,
       });
     }
@@ -810,6 +813,21 @@ export class Runner {
     if (usageSnap && harnessType) {
       ticket.context ||= {};
       ticket.context[harnessType] = usageSnap;
+      // Per-phase ledger: sum input/output across every run this column has done
+      // (retries, holds, bounces back into it), keep the latest context reading.
+      const phaseName = this.store.column(ar.columnId || ticket.columnId)?.name;
+      if (phaseName) {
+        ticket.phaseContext ||= {};
+        const prev = ticket.phaseContext[phaseName] || {};
+        ticket.phaseContext[phaseName] = {
+          ...usageSnap,
+          harness: harnessType,
+          inputTokens: (prev.inputTokens || 0) + (usageSnap.inputTokens || 0),
+          cachedInputTokens: (prev.cachedInputTokens || 0) + (usageSnap.cachedInputTokens || 0),
+          outputTokens: (prev.outputTokens || 0) + (usageSnap.outputTokens || 0),
+          runs: (prev.runs || 0) + 1,
+        };
+      }
     }
     if (harnessType === 'codex' && state.rateLimits && applyCodexRateLimits(state.rateLimits, { at: nowIso(), source: 'codex-finalize' })) {
       this.broadcast({ type: 'usage-update', usage: USAGE });

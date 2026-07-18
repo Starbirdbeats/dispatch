@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseLine } from '../engine/codex.mjs';
+import { parseLine as parseClaudeLine } from '../engine/claude.mjs';
 import { contextSnapshot } from '../engine/limits.mjs';
 import {
   buildProviderUsage,
@@ -150,6 +151,105 @@ test('parseLine captures rate limits from event_msg token counts', () => {
   assert.equal(parseLine(JSON.stringify(event), state), null);
   assert.deepEqual(state.rateLimits, rateLimits);
   assert.equal(state.usage.contextTokens, 99);
+});
+
+test('parseLine treats turn.completed usage as cumulative in/out, never as context', () => {
+  const state = {};
+  const event = {
+    type: 'turn.completed',
+    usage: { input_tokens: 39_863_169, cached_input_tokens: 38_684_416, output_tokens: 89_027, reasoning_output_tokens: 22_139 },
+  };
+  const ev = parseLine(JSON.stringify(event), state);
+  assert.equal(ev.kind, 'result');
+  assert.equal(state.usage.contextTokens, null); // cumulative ≠ context — no fake "100% full"
+  assert.equal(state.usage.inputTokens, 39_863_169);
+  assert.equal(state.usage.cachedInputTokens, 38_684_416);
+  assert.equal(state.usage.outputTokens, 89_027);
+});
+
+test('parseLine prefers last-turn usage for context and keeps totals for in/out', () => {
+  const state = {};
+  const event = {
+    type: 'event_msg',
+    payload: {
+      type: 'token_count',
+      info: {
+        total_token_usage: { input_tokens: 5_000_000, cached_input_tokens: 4_800_000, output_tokens: 40_000 },
+        last_token_usage: { total_tokens: 130_000, reasoning_output_tokens: 10_000 },
+        model_context_window: 272_000,
+      },
+    },
+  };
+  assert.equal(parseLine(JSON.stringify(event), state), null);
+  assert.equal(state.usage.contextTokens, 120_000); // last turn minus reasoning output
+  assert.equal(state.usage.windowTokens, 272_000);
+  assert.equal(state.usage.inputTokens, 5_000_000);
+  assert.equal(state.usage.outputTokens, 40_000);
+});
+
+test('turn.completed keeps a context reading captured earlier in the stream', () => {
+  const state = {};
+  parseLine(JSON.stringify({
+    type: 'event_msg',
+    payload: { type: 'token_count', info: { last_token_usage: { total_tokens: 90_000 }, model_context_window: 272_000 } },
+  }), state);
+  parseLine(JSON.stringify({
+    type: 'turn.completed',
+    usage: { input_tokens: 2_000_000, cached_input_tokens: 1_900_000, output_tokens: 30_000 },
+  }), state);
+  assert.equal(state.usage.contextTokens, 90_000);
+  assert.equal(state.usage.windowTokens, 272_000);
+  assert.equal(state.usage.inputTokens, 2_000_000);
+});
+
+test('claude parseLine counts repeated per-block usage once and splits in/out', () => {
+  const state = {};
+  const usage = { input_tokens: 10, cache_creation_input_tokens: 500, cache_read_input_tokens: 1_000, output_tokens: 20 };
+  const line = JSON.stringify({ type: 'assistant', message: { id: 'msg_1', model: 'fable', usage, content: [] } });
+  parseClaudeLine(line, state); // same message re-emitted per content block
+  parseClaudeLine(line, state);
+  assert.equal(state.usage.inputTokens, 1_510);
+  assert.equal(state.usage.cachedInputTokens, 1_000);
+  assert.equal(state.usage.outputTokens, 20);
+  assert.equal(state.usage.contextTokens, 1_530);
+
+  parseClaudeLine(JSON.stringify({
+    type: 'assistant',
+    message: { id: 'msg_2', model: 'fable', usage: { input_tokens: 5, cache_read_input_tokens: 1_500, output_tokens: 40 }, content: [] },
+  }), state);
+  assert.equal(state.usage.inputTokens, 3_015);
+  assert.equal(state.usage.outputTokens, 60);
+});
+
+test('claude result usage overrides accumulated totals but keeps the context reading', () => {
+  const state = {};
+  parseClaudeLine(JSON.stringify({
+    type: 'assistant',
+    message: { id: 'msg_1', model: 'fable', usage: { input_tokens: 100, output_tokens: 10 }, content: [] },
+  }), state);
+  parseClaudeLine(JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    usage: { input_tokens: 28, cache_creation_input_tokens: 78_899, cache_read_input_tokens: 762_116, output_tokens: 16_636 },
+  }), state);
+  assert.equal(state.usage.inputTokens, 841_043);
+  assert.equal(state.usage.cachedInputTokens, 762_116);
+  assert.equal(state.usage.outputTokens, 16_636);
+  assert.equal(state.usage.contextTokens, 110); // last live reading survives
+});
+
+test('contextSnapshot passes through in/out totals and allows totals-only snapshots', () => {
+  const snap = contextSnapshot({
+    contextTokens: null, windowTokens: 272_000, model: 'gpt-5.5', at: '2026-07-18T06:00:00.000Z',
+    inputTokens: 39_863_169.4, cachedInputTokens: 38_684_416, outputTokens: 89_027,
+  });
+  assert.equal(snap.contextTokens, null);
+  assert.equal(snap.pct, null);
+  assert.equal(snap.windowTokens, 272_000);
+  assert.equal(snap.inputTokens, 39_863_169);
+  assert.equal(snap.outputTokens, 89_027);
+  assert.equal(contextSnapshot({ model: 'x', at: 'now' }), null);
 });
 
 test('contextSnapshot reports rounded tokens and clamps occupancy percentage', () => {

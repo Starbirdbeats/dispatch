@@ -1059,7 +1059,8 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 
 /* ---------- self-update button ---------- */
 .update-fab {
-  position: fixed; right: 16px; bottom: 16px; z-index: 3000;
+  /* below .overlay (100) so open modals cover it — it must never steal clicks from modal buttons */
+  position: fixed; right: 16px; bottom: 16px; z-index: 90;
   background: var(--bg-1); color: var(--red);
   border: 1px solid var(--red); padding: 8px 12px;
   font: inherit; font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em;

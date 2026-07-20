@@ -36,12 +36,24 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
     for (const a of recentActivity) lines.push(`- [${a.by}] ${a.text}`);
   }
 
+  // A phase can be sandboxed read-only by its column even when the ticket itself is
+  // not — the dossier stays writable (that's the hand-off contract), the workspace not.
+  const sandboxReadOnly = !ticket.readOnly && (
+    (harness.type === 'codex' && harness.permissions === 'read-only') ||
+    (harness.type === 'claude' && harness.permissions === 'manual')
+  );
+
   if (ticket.readOnly) {
     lines.push('\n## READ-ONLY TICKET');
     lines.push('This ticket is READ-ONLY: analyse/read the repo for context only. Do NOT attempt to edit workspace files, run migrations, or commit — the goal is understanding, not changes. You may still edit the ticket dossier in the ticket data dir. Codex read-only runs may have their cwd set to the ticket data dir instead of the workspace; use the absolute workspace path above when reading the repo. You must still complete the hand-off. Try the normal dossier Work Log/Plan update first; if your sandbox denies the dossier write, do not retry. Instead include the Work Log entry body as "work_log" in your control block, and include "plan" only if this phase produced or updated the plan. Dispatch will write those fields into the dossier for you.');
   } else if (ticket.branchless?.kind === 'workspace-not-git') {
     lines.push('\n## BRANCHLESS WORKSPACE');
     lines.push('This workspace is an existing folder but not a Git repository, so Dispatch skipped branch preparation. Do not run git branch/commit commands. Make any requested file changes directly in the workspace, verify them, update the dossier Work Log, and call out in your hand-off that no commit was created because the workspace is not a Git repo. If version control is required before continuing, use "flag_human" and ask for git init or a repo workspace.');
+  }
+
+  if (sandboxReadOnly) {
+    lines.push('\n## READ-ONLY SANDBOX');
+    lines.push('This phase runs in a read-only sandbox: you can read the whole disk, but the ONLY writable location is the ticket data dir (where the dossier lives). Do not attempt to edit workspace files or commit — later phases do that. The dossier update in the hand-off contract below still applies and WILL succeed; do it directly. Codex runs may have their cwd set to the ticket data dir instead of the workspace; use the absolute workspace path above when reading the repo. If a dossier write is unexpectedly denied anyway, do not retry — put the entry body in "work_log" (and "plan" if this phase produced or updated the plan) in your control block and Dispatch will write it for you.');
   }
 
   lines.push('\n## Tooling notes');
@@ -58,7 +70,7 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
   lines.push('{"action": "advance" | "hold" | "bounce" | "flag_human",');
   lines.push(' "target_column": "<column name — required for bounce, optional for advance>",');
   lines.push(' "comment": "<one-paragraph summary posted to the ticket>",');
-  if (ticket.readOnly) {
+  if (ticket.readOnly || sandboxReadOnly) {
     lines.push(' "human_test": "<step-by-step human test instructions, or NONE: <reason> — REQUIRED when advancing to Done>",');
     lines.push(' "work_log": "<optional fallback: Work Log entry body if direct dossier append was denied>",');
     lines.push(' "plan": "<optional fallback: full Plan section body if direct plan write was denied>"}');

@@ -54,6 +54,53 @@ test('resumed read-only Codex invocation keeps the same restricted write root', 
   assert.ok(!args.some((a) => a.includes('/tmp/workspace/.git')));
 });
 
+test('read-only column sandbox still lets Codex write the ticket data dir', () => {
+  const inv = buildInvocation({
+    prompt: 'prompt',
+    dataDir: '/tmp/dispatch-ticket',
+    workspace: '/tmp/workspace',
+    sessionId: null,
+    harness: {
+      type: 'codex',
+      model: 'gpt-5.5',
+      effort: 'medium',
+      permissions: 'read-only',
+    },
+  });
+  const { args } = inv;
+
+  // A literal --sandbox read-only would ignore writable_roots and deny the dossier
+  // update — it must map onto the anchored workspace-write shape instead.
+  assert.equal(valueAfter(args, '--sandbox'), 'workspace-write');
+  assert.equal(valueAfter(args, '-C'), '/tmp/dispatch-ticket');
+  assert.equal(args.includes('--add-dir'), false, 'workspace must not be added as a writable root');
+  assert.ok(args.includes('sandbox_permissions=["disk-full-read-access"]'));
+  assert.ok(args.includes('sandbox_workspace_write.writable_roots=["/tmp/dispatch-ticket"]'));
+  assert.ok(!args.some((a) => a.includes('/tmp/workspace/.git')));
+  assert.equal(inv.cwd, '/tmp/dispatch-ticket');
+});
+
+test('resumed read-only column sandbox pins cwd to the data dir', () => {
+  const inv = buildInvocation({
+    prompt: 'prompt',
+    dataDir: '/tmp/dispatch-ticket',
+    workspace: '/tmp/workspace',
+    sessionId: 'session-id',
+    harness: {
+      type: 'codex',
+      model: 'gpt-5.5',
+      effort: 'medium',
+      permissions: 'read-only',
+    },
+  });
+
+  assert.ok(inv.args.includes('sandbox_mode="workspace-write"'));
+  assert.ok(inv.args.includes('sandbox_workspace_write.writable_roots=["/tmp/dispatch-ticket"]'));
+  // `exec resume` has no -C flag — without a cwd override the process cwd (the
+  // workspace) would become writable under workspace-write.
+  assert.equal(inv.cwd, '/tmp/dispatch-ticket');
+});
+
 test('normal Codex invocation keeps workspace-write behavior for build phases', () => {
   const { args } = buildInvocation({
     prompt: 'prompt',

@@ -16,7 +16,11 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
   // workspace-write blocks network by default — opt in per column/ticket (npm, ssh to MSI, etc.)
   if (harness.network) args.push('-c', 'sandbox_workspace_write.network_access=true');
 
-  const readOnly = Boolean(harness.readOnly);
+  // Codex only honours writable_roots under workspace-write — a literal read-only
+  // sandbox would deny the mandatory dossier update. So a read-only column sandbox
+  // gets the same shape as a read-only ticket: workspace-write anchored in the
+  // ticket data dir, full-disk reads, writes land only in the dossier dir.
+  const readOnly = Boolean(harness.readOnly) || harness.permissions === 'read-only';
   const sandbox = readOnly ? 'workspace-write' : (harness.permissions || 'workspace-write');
   // .git is kept read-only inside workspace-write unless listed as a writable root,
   // which would block the "commit your work" contract of Build-style phases. In a
@@ -35,7 +39,10 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
     args.push('-c', `sandbox_workspace_write.writable_roots=${roots}`);
   }
   args.push(prompt);
-  return { cmd: 'codex', args, newSessionId: null, lastMsgFile };
+  // `exec resume` has no -C flag and workspace-write makes the process cwd writable,
+  // so read-only runs must also be spawned from the data dir or a resumed run would
+  // silently gain write access to the workspace.
+  return { cmd: 'codex', args, newSessionId: null, lastMsgFile, cwd: readOnly ? dataDir : null };
 }
 
 // Normalize a --json JSONL line into a Dispatch run event. Handles both the

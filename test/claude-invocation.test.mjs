@@ -34,6 +34,28 @@ test('read-only Claude invocation allows dossier writes in the ticket data dir o
   assert.doesNotMatch(allowed, /\/tmp\/other/);
 });
 
+test('manual-permission Claude invocation carves out dossier writes', () => {
+  const { args } = buildInvocation({
+    prompt: 'prompt',
+    dataDir: '/tmp/dispatch-ticket',
+    sessionId: null,
+    harness: {
+      type: 'claude',
+      model: 'claude-fable-5',
+      effort: 'high',
+      permissions: 'manual',
+      allowedTools: 'Bash(git log *)',
+    },
+  });
+
+  const allowed = allowedToolsArg(args);
+  assert.ok(allowed);
+  // Headless manual mode denies anything off the allowlist — the dossier must stay writable.
+  assert.match(allowed, /Write\(\/\/tmp\/dispatch-ticket\/\*\*\)/);
+  assert.match(allowed, /Edit\(\/\/tmp\/dispatch-ticket\/\*\*\)/);
+  assert.match(allowed, /Bash\(git log \*\)/, 'configured rules must be kept');
+});
+
 test('non-read-only Claude invocation leaves allowedTools behavior unchanged', () => {
   const configured = buildInvocation({
     prompt: 'prompt',

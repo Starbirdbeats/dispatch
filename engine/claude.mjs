@@ -34,8 +34,8 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir }) {
 }
 
 function buildAllowedTools(harness, dataDir) {
-  if (harness.readOnly && dataDir) {
-    const dataPattern = absoluteClaudePathPattern(dataDir);
+  const dataPattern = dataDir ? absoluteClaudePathPattern(dataDir) : null;
+  if (harness.readOnly && dataPattern) {
     return [
       'Read',
       'Glob',
@@ -47,6 +47,12 @@ function buildAllowedTools(harness, dataDir) {
   }
   const configured = harness.allowedTools?.trim();
   const rules = configured ? [configured] : [];
+  // Headless "manual" runs have no human to approve prompts, so every tool off the
+  // allowlist is denied — carve out the ticket data dir or the mandatory dossier
+  // update can never happen.
+  if (harness.permissions === 'manual' && dataPattern) {
+    rules.push(`Write(${dataPattern}/**)`, `Edit(${dataPattern}/**)`);
+  }
   return rules.join(' ').trim();
 }
 

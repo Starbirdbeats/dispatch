@@ -499,7 +499,7 @@ export class Runner {
     const wrapper = path.join(__dirname, '..', 'bin', 'dispatch-run.sh');
     if (!fs.existsSync(wrapper)) throw new Error(`wrapper missing: ${wrapper}`);
     const proc = spawn(wrapper, [runDir, '--', inv.cmd, ...inv.args], {
-      cwd: workDir,
+      cwd: inv.cwd || workDir,
       env: process.env,
       detached: true,
       stdio: 'ignore',

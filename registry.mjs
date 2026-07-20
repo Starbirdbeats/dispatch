@@ -33,9 +33,10 @@ const SEED = {
     { id: 'claude-haiku-4-5-20251001', label: 'haiku (Haiku 4.5)' },
   ],
   codex: [
+    { id: 'gpt-5.6-sol', label: 'sol (GPT-5.6 Sol)' },
+    { id: 'gpt-5.6-terra', label: 'terra (GPT-5.6 Terra)' },
+    { id: 'gpt-5.6-luna', label: 'luna (GPT-5.6 Luna)' },
     { id: 'gpt-5.5', label: 'gpt-5.5' },
-    { id: 'gpt-5.4', label: 'gpt-5.4' },
-    { id: 'gpt-5.4-mini', label: 'gpt-5.4-mini' },
     { id: 'gpt-5.3-codex-spark', label: 'gpt-5.3-codex-spark' },
   ],
 };
@@ -50,7 +51,7 @@ export const REGISTRY = {
   },
   codex: {
     models: structuredClone(SEED.codex),
-    efforts: ['low', 'medium', 'high', 'xhigh'],
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], // 'ultra' is GPT-5.6 Sol/Terra only
     permissions: ['read-only', 'workspace-write', 'danger-full-access'],
     meta: { source: 'seed', fetchedAt: null },
   },

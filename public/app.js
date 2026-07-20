@@ -11,8 +11,10 @@ const S = {
   commentThumbs: [],
   commentThumbTicketId: null,
   newPasteThumbs: [],
+  newCreateAnimating: false,
   confirmAction: null,
   workspaceResolve: null,
+  updateResolve: null, // dirty-checkout resolve dialog for the self-update flow
   usageRefreshing: new Set(), // providers with a click-triggered usage re-probe in flight
   mobilePhase: 0,      // <760px board: which phase (column index) is on screen
 };
@@ -175,10 +177,86 @@ async function api(path, method = 'GET', body) {
   }
   if (!res.ok) {
     // Prefer the server's actionable { error } message; fall back to status context.
-    const detail = (await res.json().catch(() => ({}))).error;
-    throw new Error(detail || `${method} ${path} failed — ${res.status} ${res.statusText}`);
+    // The full body rides along on err.body so callers can react to structured
+    // failures (e.g. update/apply's { code: 'dirty-tree', changes } → resolve dialog).
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || `${method} ${path} failed — ${res.status} ${res.statusText}`);
+    err.status = res.status;
+    err.body = body;
+    throw err;
   }
   return res.json();
+}
+
+// Actions currently in flight, keyed by a stable action id (e.g. `run:t-abc`, not the
+// DOM node). The board, ticket modal, diag banner, archive list and setup stepper all
+// rebuild on every websocket state broadcast — a rebuild mid-request would otherwise
+// swap the disabled button for a fresh, enabled clone, reopening the double-fire hole
+// that node-local state alone can't close. Keying by action makes the guard survive
+// re-renders: the freshly rendered button re-locks itself if its action is still running.
+const inFlightActions = new Set();
+
+function markGuardBusy(btn, busyLabel) {
+  if (busyLabel && btn.dataset.idleLabel == null) btn.dataset.idleLabel = btn.textContent;
+  btn.disabled = true;
+  if (busyLabel) btn.textContent = busyLabel;
+}
+
+// Lock and relabel every button wired to this action — the one clicked plus any sibling
+// that triggers the same action (e.g. the ticket-footer [ RUN ] and the diag-banner run
+// button both key on `run:<id>`), each using its own busy label captured at wiring time.
+function lockGuardKey(key) {
+  for (const el of document.querySelectorAll(`[data-action-key="${CSS.escape(key)}"]`)) {
+    markGuardBusy(el, el.dataset.busyLabel || null);
+  }
+}
+
+// Re-enable and restore every button (original + any re-rendered clone) carrying this key.
+function clearGuardBusy(key) {
+  for (const el of document.querySelectorAll(`[data-action-key="${CSS.escape(key)}"]`)) {
+    el.disabled = false;
+    if (el.dataset.idleLabel != null) { el.textContent = el.dataset.idleLabel; delete el.dataset.idleLabel; }
+  }
+}
+
+// Single-flight guard for action buttons — the codified version of the setup panel's
+// ad-hoc pattern (disable + "[ VERB-ING… ]" label while the request runs). Repeat
+// clicks are ignored until the click's async work settles, so a slow server can't
+// collect duplicates (a stuck [ CREATE ] clicked twice used to make two tickets).
+//
+// Pass a stable `key` for any button whose region re-renders mid-request (see
+// inFlightActions). With a key, in-flight state lives in the shared registry: the click
+// path locks every button sharing the key, the wiring path re-locks a re-rendered clone,
+// and the settle path restores them all — buttons found by `data-action-key`. Without a
+// key, node-local `data-busy` is enough — used for modals (NEW TICKET, column, settings,
+// secrets) that hold their DOM steady while a request is in flight.
+function guardClick(btn, busyLabel, fn, key = null) {
+  if (!btn) return;
+  if (key) {
+    btn.dataset.actionKey = key;
+    if (busyLabel) btn.dataset.busyLabel = busyLabel; else delete btn.dataset.busyLabel;
+    if (inFlightActions.has(key)) markGuardBusy(btn, busyLabel); // clone of a running action → lock on arrival
+  }
+  btn.onclick = async (e) => {
+    if (key) {
+      if (inFlightActions.has(key)) return;
+      inFlightActions.add(key);
+      lockGuardKey(key);
+      try { return await fn(e); }
+      finally { inFlightActions.delete(key); clearGuardBusy(key); }
+    }
+    if (btn.dataset.busy) return;
+    btn.dataset.busy = '1';
+    const label = btn.textContent;
+    btn.disabled = true;
+    if (busyLabel) btn.textContent = busyLabel;
+    try { return await fn(e); }
+    finally {
+      delete btn.dataset.busy;
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  };
 }
 
 let loadStateSeq = 0;
@@ -217,7 +295,9 @@ function connectWS() {
     }
     if (msg.type === 'restarting' && !S.updating) {
       // Another tab pressed UPDATE (or the server is restarting itself) — show the same
-      // progress indicator here and reload once the new process answers.
+      // progress indicator here and reload once the new process answers. A dirty-checkout
+      // resolve dialog left open here is stale: the update is happening regardless.
+      dismissUpdateResolve();
       beginUpdateRestartWatch($('#btn-update'), S.serverBoot);
     }
     if (msg.type === 'run-event') {
@@ -243,6 +323,10 @@ const BY_LABEL = { claude: 'CLAUDE CODE', codex: 'CODEX', human: 'YOU', engine: 
 // ↻ button placed beside model dropdowns — fetches the latest model releases into the registry
 const refreshBtn = () => '<button type="button" class="refresh-models" title="Fetch latest model releases from the provider"><span>↻</span></button>';
 async function refreshModelRegistry() {
+  // Delegated (one handler for every ↻), so guardClick's per-node lock doesn't apply —
+  // gate on the shared registry directly so a double-click can't fire two refresh POSTs.
+  if (inFlightActions.has('models-refresh')) return;
+  inFlightActions.add('models-refresh');
   toast('FETCHING LATEST MODELS…');
   document.querySelectorAll('.refresh-models').forEach((b) => b.classList.add('spin'));
   try {
@@ -255,7 +339,10 @@ async function refreshModelRegistry() {
     toast(`MODELS — ${parts.join(' · ')}`, !r.report?.claude?.ok && !r.report?.codex?.ok);
     renderModal(); // re-render the open modal so the new options appear
   } catch (e) { alertErr(e); }
-  finally { document.querySelectorAll('.refresh-models').forEach((b) => b.classList.remove('spin')); }
+  finally {
+    inFlightActions.delete('models-refresh');
+    document.querySelectorAll('.refresh-models').forEach((b) => b.classList.remove('spin'));
+  }
 }
 // Clicking a provider in the usage strip re-probes that provider's windows now, rather
 // than waiting out the server's 5-minute poll. Ignored while one is already in flight.
@@ -833,17 +920,16 @@ function wireStepperHandlers() {
     const probeBtn = document.querySelector(`[data-probe="${type}"]`);
     const copyBtn = document.querySelector(`[data-copy="${type}"]`);
     const firstCmd = providerCommands(type)[1] || '';
-    probeBtn?.addEventListener('click', async () => {
-      probeBtn.textContent = '[ CHECKING… ]';
+    // Both providers' RE-CHECK (and the settings [ RE-CHECK CLIS ]) hit /api/probe, which
+    // probes everything at once — so they share one key and lock together.
+    guardClick(probeBtn, '[ CHECKING… ]', async () => {
       try {
         await api('/api/probe', 'POST', {});
         await loadState();
         updateStepperUI();
         toast('CLI STATUS REFRESHED');
       } catch (e) { alertErr(e); }
-      const btn = document.querySelector(`[data-probe="${type}"]`);
-      if (btn) btn.textContent = '↻ RE-CHECK';
-    });
+    }, 'probe');
     copyBtn?.addEventListener('click', async () => {
       try {
         await navigator.clipboard?.writeText(firstCmd || '');
@@ -858,10 +944,10 @@ function wireStepperHandlers() {
   // The blank tab is opened synchronously (inside the click) so popup blockers allow it,
   // then pointed at the auth URL once the server hands it back.
   for (const btn of document.querySelectorAll('[data-auth]')) {
-    btn.addEventListener('click', async () => {
-      const type = btn.dataset.auth;
-      btn.textContent = '[ STARTING… ]';
-      btn.disabled = true;
+    const type = btn.dataset.auth;
+    guardClick(btn, '[ STARTING… ]', async () => {
+      // window.open must run synchronously inside the gesture or popup blockers swallow it —
+      // guardClick invokes fn synchronously up to its first await, so this is still in-gesture.
       const popup = window.open('', '_blank');
       try {
         const r = await api('/api/setup/auth', 'POST', { type });
@@ -877,7 +963,7 @@ function wireStepperHandlers() {
         updateStepperUI();
         alertErr(e);
       }
-    });
+    }, `auth:${type}`);
   }
   // OPEN LOGIN PAGE ↗ : a real <a target="_blank"> so the browser opens the tab natively.
   // window.open() gets silently swallowed in mobile / in-app / popup-blocked browsers (the
@@ -894,66 +980,48 @@ function wireStepperHandlers() {
   }
   // SUBMIT CODE → : forward the one-time code to the CLI's stdin (claude flow).
   for (const btn of document.querySelectorAll('[data-auth-code]')) {
-    btn.addEventListener('click', async () => {
-      const type = btn.dataset.authCode;
+    const type = btn.dataset.authCode;
+    guardClick(btn, '[ VERIFYING… ]', async () => {
       const input = document.querySelector(`[data-auth-code-input="${type}"]`);
       const code = (input?.value || '').trim();
       if (!code) { toast('paste the code from the browser first', true); return; }
-      btn.textContent = '[ VERIFYING… ]';
-      btn.disabled = true;
       try {
         await api('/api/setup/auth/code', 'POST', { type, code });
         toast('code submitted — verifying with the provider…');
         // success flips the row via the server's post-login probe broadcast
-      } catch (e) {
-        alertErr(e);
-        const b = document.querySelector(`[data-auth-code="${type}"]`);
-        if (b) { b.textContent = 'SUBMIT CODE →'; b.disabled = false; }
-      }
-    });
+      } catch (e) { alertErr(e); } // guardClick restores the button label/disabled on settle
+    }, `auth-code:${type}`);
   }
   for (const btn of document.querySelectorAll('[data-auth-cancel]')) {
-    btn.addEventListener('click', async () => {
+    const type = btn.dataset.authCancel;
+    guardClick(btn, '[ CANCELLING… ]', async () => {
       try {
-        await api('/api/setup/auth/cancel', 'POST', { type: btn.dataset.authCancel });
+        await api('/api/setup/auth/cancel', 'POST', { type });
         await loadState();
         updateStepperUI();
         toast('login cancelled');
       } catch (e) { alertErr(e); }
-    });
+    }, `auth-cancel:${type}`);
   }
 
-  $('#s-preset-apply').onclick = async () => {
+  guardClick($('#s-preset-apply'), '[ APPLYING… ]', async () => {
     const preset = $('#s-preset').value;
-    const btn = $('#s-preset-apply');
     try {
-      btn.textContent = '[ APPLYING… ]';
-      btn.disabled = true;
       await api('/api/setup/preset', 'POST', { preset });
       await loadState();
       renderSettingsModal();
       toast(`PRESET APPLIED: ${setupPresetLabel(preset.toLowerCase())}`);
     } catch (e) { alertErr(e); }
-    finally {
-      const b = $('#s-preset-apply');
-      if (b) {
-        b.textContent = '[ APPLY PRESET ]';
-        b.disabled = false;
-      }
-    }
-  };
-  $('#s-setup-complete').onclick = async () => {
+  }, 'preset-apply');
+  guardClick($('#s-setup-complete'), '[ SAVING… ]', async () => {
     try {
-      $('#s-setup-complete').textContent = '[ SAVING… ]';
       await api('/api/setup/complete', 'POST', {});
       await loadState();
       renderSettingsModal();
       toast('SETUP MARKED COMPLETE');
     } catch (e) { alertErr(e); }
-    finally { const b = $('#s-setup-complete'); if (b) b.textContent = '[ MARK SETUP COMPLETE ]'; }
-  };
-  const probeAll = $('#s-probe');
-  if (probeAll) probeAll.onclick = () => api('/api/probe', 'POST', {}).catch(alertErr);
+  }, 'setup-complete');
+  if ($('#s-probe')) guardClick($('#s-probe'), '[ CHECKING… ]', () => api('/api/probe', 'POST', {}).catch(alertErr), 'probe');
 }
 
 function usageStripHTML() {
@@ -1159,6 +1227,7 @@ function renderUpdateButton() {
   const btn = $('#btn-update');
   if (!btn) return;
   if (S.updating) return; // mid-restart: beginUpdateRestartWatch owns the button until the new server answers
+  if (inFlightActions.has('update-apply')) { btn.disabled = true; return; } // apply POST in flight — don't re-enable under it
   const u = S.data?.updateStatus;
   const behind = u && !u.error ? (u.behind || 0) : 0;
   btn.classList.toggle('is-error', Boolean(u?.error));
@@ -1174,6 +1243,12 @@ function renderUpdateButton() {
   if (behind > 0) btn.textContent = `[ ↑ UPDATE ${behind} ]`;
 }
 
+// Last markup written into the usage strip. Rewriting it unconditionally is fine on desktop,
+// but on narrow screens the strip is a swipeable carousel — replacing innerHTML resets
+// scrollLeft and yanks the reader back to the claude card. Only touch it when it changed,
+// and carry the swipe position across the rewrite.
+let lastUsageHTML = '';
+
 function renderTopbar() {
   const h = S.data.health;
   // Paper look: liveness lives in the usage meters. Only surface health when a harness is DOWN.
@@ -1181,7 +1256,14 @@ function renderTopbar() {
   if (!h.claude?.ok) down.push('CLAUDE');
   if (!h.codex?.ok) down.push('CODEX');
   $('#health').innerHTML = down.map((n) => `<span class="bad">${n} OFFLINE</span>`).join(' &nbsp;///&nbsp; ');
-  $('#usage').innerHTML = usageStripHTML();
+  const usageEl = $('#usage');
+  const usageHTML = usageStripHTML();
+  if (usageHTML !== lastUsageHTML) {
+    const swipedTo = usageEl.scrollLeft;
+    usageEl.innerHTML = usageHTML;
+    lastUsageHTML = usageHTML;
+    if (swipedTo) usageEl.scrollLeft = swipedTo;
+  }
   const r = S.data.runs;
   const cap = S.data.board.settings.maxConcurrent ?? 2;
   const paused = cap <= 0;
@@ -1269,16 +1351,16 @@ function ticketActionButtonsHTML(t, className = 'ticket-actions') {
 
 function wireTicketActionButtons(root = document) {
   for (const b of root.querySelectorAll('[data-ticket-archive]')) {
-    b.onclick = (e) => {
+    guardClick(b, null, (e) => {
       stopTicketAction(e);
-      archiveTicket(b.dataset.ticketArchive, { closeTicketModal: S.modal?.type === 'ticket' });
-    };
+      return archiveTicket(b.dataset.ticketArchive, { closeTicketModal: S.modal?.type === 'ticket' });
+    }, `archive:${b.dataset.ticketArchive}`);
   }
   for (const b of root.querySelectorAll('[data-ticket-delete]')) {
-    b.onclick = (e) => {
+    guardClick(b, null, (e) => {
       stopTicketAction(e);
-      deleteTicket(b.dataset.ticketDelete, { closeTicketModal: S.modal?.type === 'ticket' });
-    };
+      return deleteTicket(b.dataset.ticketDelete, { closeTicketModal: S.modal?.type === 'ticket' });
+    }, `delete:${b.dataset.ticketDelete}`);
   }
 }
 
@@ -1574,6 +1656,7 @@ function mcardEl(t, c) {
 function closeModal() {
   // history.back() is only safe because initHistoryFromLocation() guarantees a
   // "board" entry sits beneath every modal we ever push — see below.
+  resetNewTicketCreateAnimation();
   if (history.state?.modal) { history.back(); return; }
   dismissWorkspaceResolve();
   clearCommentThumbs();
@@ -1832,6 +1915,126 @@ async function openWorkspaceResolve(t) {
   }
 }
 
+/* ---------- update resolve (self-update blocked by a dirty Dispatch checkout) ----------
+   Mirrors the ticket workspace resolver: same panel, same change list, but the choices
+   act on the Dispatch checkout itself. Opened from the [ UPDATE ] click when the server
+   answers 409 { code: 'dirty-tree' }. */
+function ensureUpdateResolveRoot() {
+  let root = $('#update-resolve-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'update-resolve-root';
+    document.body.appendChild(root);
+  }
+  return root;
+}
+
+function dismissUpdateResolve() {
+  if (!S.updateResolve) return false;
+  S.updateResolve = null;
+  $('#update-resolve-root')?.remove();
+  return true;
+}
+
+const UPDATE_RESOLVE_OPTIONS = [
+  {
+    strategy: 'stash',
+    label: 'STASH & UPDATE',
+    accent: true,
+    detail: 'Set the changes aside (git stash), fast-forward to origin/main, then restore them. If restoring conflicts, they stay saved on the stash list — nothing is lost.',
+  },
+  {
+    strategy: 'discard',
+    label: 'DISCARD & UPDATE',
+    accent: false,
+    detail: 'Permanently throw away the modified files listed above (untracked files are kept), then update. Cannot be undone.',
+  },
+];
+
+function renderUpdateResolve() {
+  const st = S.updateResolve;
+  if (!st) return;
+  const root = ensureUpdateResolveRoot();
+  const data = st.data;
+  const changes = data.changes || [];
+  const omitted = data.changeCount > changes.length ? data.changeCount - changes.length : 0;
+  const optionHTML = UPDATE_RESOLVE_OPTIONS.map((opt) => `
+    <div class="workspace-resolve-option">
+      <button type="button" class="btn ${opt.accent ? 'btn-accent' : ''}" data-update-strategy="${opt.strategy}" ${st.applying ? 'disabled' : ''}>[ ${st.applying === opt.strategy ? 'WORKING…' : opt.label} ]</button>
+      <div>${esc(opt.detail)}</div>
+    </div>`).join('');
+  root.innerHTML = `
+    <div class="confirm-overlay" id="update-resolve-overlay">
+      <div class="workspace-resolve-panel" role="dialog" aria-modal="true" aria-labelledby="update-resolve-title">
+        <div class="confirm-head">
+          <div>
+            <div class="confirm-kicker">SELF-UPDATE BLOCKED</div>
+            <h3 id="update-resolve-title">Uncommitted changes in the Dispatch checkout</h3>
+          </div>
+        </div>
+        <div class="workspace-resolve-body">
+          ${st.error ? `<div class="workspace-resolve-error">${esc(st.error)}</div>` : ''}
+          <div class="workspace-resolve-meta">
+            ${data.root ? `<span>checkout</span><b>${esc(data.root)}</b>` : ''}
+            <span>branch</span><b>${esc(data.branch || 'main')}</b>
+          </div>
+          <div class="workspace-resolve-changes">
+            ${changes.map(workspaceResolveChangeHTML).join('')}
+            ${omitted ? `<div class="workspace-resolve-more">+ ${omitted} more change(s)</div>` : ''}
+          </div>
+          <div class="workspace-resolve-options">${optionHTML}</div>
+        </div>
+        <div class="confirm-foot">
+          <button type="button" class="btn" id="update-resolve-cancel" ${st.applying ? 'disabled' : ''}>[ CANCEL ]</button>
+        </div>
+      </div>
+    </div>`;
+  $('#update-resolve-overlay').onclick = (e) => { if (e.target.id === 'update-resolve-overlay' && !st.applying) dismissUpdateResolve(); };
+  $('#update-resolve-cancel').onclick = () => dismissUpdateResolve();
+  for (const b of root.querySelectorAll('[data-update-strategy]')) {
+    b.onclick = () => applyUpdateStrategy(b.dataset.updateStrategy);
+  }
+}
+
+function openUpdateResolve(data) {
+  dismissUpdateResolve();
+  S.updateResolve = { data, applying: null, error: null };
+  renderUpdateResolve();
+}
+
+async function applyUpdateStrategy(strategy) {
+  const st = S.updateResolve;
+  if (!st || st.applying) return;
+  if (strategy === 'discard') {
+    const n = st.data.changeCount || (st.data.changes || []).length;
+    if (!confirm(`Permanently discard ${n} uncommitted change${n === 1 ? '' : 's'} in the Dispatch checkout? This cannot be undone.`)) return;
+  }
+  S.updateResolve = { ...st, applying: strategy, error: null };
+  renderUpdateResolve();
+  inFlightActions.add('update-apply');
+  const btn = $('#btn-update');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/update/apply', 'POST', { strategy });
+    dismissUpdateResolve();
+    if (r.applied && r.restarting) { beginUpdateRestartWatch(btn, r.bootId, r.localChanges); return; }
+    toast(r.message || 'NO NEW COMMITS TO APPLY');
+    await loadState().catch(() => {});
+  } catch (e) {
+    if (S.updateResolve) {
+      // Fresh 409 (e.g. new changes appeared mid-flight) → refresh the file list in place.
+      if (e.body?.code === 'dirty-tree') S.updateResolve = { data: e.body, applying: null, error: e.message };
+      else S.updateResolve = { ...S.updateResolve, applying: null, error: e.message };
+      renderUpdateResolve();
+    } else {
+      alertErr(e);
+    }
+  } finally {
+    inFlightActions.delete('update-apply');
+    if (!S.updating) renderUpdateButton();
+  }
+}
+
 function shell(title, bodyHTML, footHTML = '') {
   $('#modal-root').innerHTML = `
     <div class="overlay" id="overlay">
@@ -1842,7 +2045,7 @@ function shell(title, bodyHTML, footHTML = '') {
       </div>
     </div>`;
   $('#modal-close').onclick = requestCloseModal;
-  $('#overlay').onclick = (e) => { if (e.target.id === 'overlay') closeModal(); };
+  $('#overlay').onclick = (e) => { if (e.target.id === 'overlay') requestCloseModal(); };
 }
 
 function renderModal() {
@@ -1920,6 +2123,7 @@ function pushModal(modal) {
 function openNewTicketModal(columnId = null) {
   S.newAttachments = [];
   S.newOverrides = {};
+  S.newReqId = null; // fresh form → fresh dedupe key (renderNewModal mints it)
   clearNewPasteThumbs();
   pushModal(columnId ? { type: 'new', columnId } : { type: 'new' });
 }
@@ -2173,11 +2377,11 @@ function renderTicketModal() {
   for (const b of document.querySelectorAll('[data-tab]')) {
     b.onclick = () => { S.modal.tab = b.dataset.tab; renderTicketModal(); writeModalHash(S.modal, { push: false }); };
   }
-  $('#btn-move').onclick = () => api(`/api/tickets/${t.id}/move`, 'POST', { columnId: $('#move-to').value }).then(() => { toast('MOVED'); closeAndReload(); }).catch(alertErr);
-  $('#btn-run').onclick = () => requestRun(t.id).catch(alertErr);
-  $('#btn-stop').onclick = () => api(`/api/tickets/${t.id}/stop`, 'POST', {}).then(() => toast('STOP SIGNAL SENT')).catch(alertErr);
-  $('#btn-archive-ticket').onclick = () => archiveTicket(t.id, { closeTicketModal: true });
-  $('#btn-del').onclick = () => deleteTicket(t.id, { closeTicketModal: true, archived: t.archived });
+  guardClick($('#btn-move'), '[ MOVING… ]', () => api(`/api/tickets/${t.id}/move`, 'POST', { columnId: $('#move-to').value }).then(() => { toast('MOVED'); closeAndReload(); }).catch(alertErr), `move:${t.id}`);
+  guardClick($('#btn-run'), '[ QUEUING… ]', () => requestRun(t.id).catch(alertErr), `run:${t.id}`);
+  guardClick($('#btn-stop'), '[ STOPPING… ]', () => api(`/api/tickets/${t.id}/stop`, 'POST', {}).then(() => toast('STOP SIGNAL SENT')).catch(alertErr), `stop:${t.id}`);
+  guardClick($('#btn-archive-ticket'), null, () => archiveTicket(t.id, { closeTicketModal: true }), `archive:${t.id}`);
+  guardClick($('#btn-del'), null, () => deleteTicket(t.id, { closeTicketModal: true, archived: t.archived }), `delete:${t.id}`);
 
   renderDiagBanner(t);
 
@@ -2222,13 +2426,18 @@ function renderDiagBanner(t) {
     </div>
     ${dx.detail ? `<div class="diag-detail">${esc(dx.detail)}</div>` : ''}
     ${dx.kind === 'running' ? liveContextHTML(t) : ''}
-    ${acts.length ? `<div class="diag-acts">${acts.join('')}${dx.stuck ? `<span class="diag-hint">or answer in the comment box below — that also wakes an agent</span>` : ''}</div>` : ''}`;
+    ${acts.length ? `<div class="diag-acts">${acts.join('')}${dx.stuck ? `<span class="diag-hint">or answer in the comment box below — that also wakes an agent</span>` : ''}</div>` : ''}
+    `;
 
   for (const b of el.querySelectorAll('[data-dx]')) {
-    b.onclick = () => {
-      const kind = b.dataset.dx;
+    const kind = b.dataset.dx;
+    // Share keys with the ticket-footer buttons: a run started here also locks [ RUN ], a
+    // move here also locks [ MOVE ]. resolve/edit are UI-only (open a dialog, focus a field)
+    // so they carry no key — nothing to double-fire.
+    const key = kind === 'run' ? `run:${t.id}` : kind === 'advance' ? `move:${t.id}` : null;
+    guardClick(b, null, () => {
       if (kind === 'run') {
-        requestRun(t.id).catch(alertErr);
+        return requestRun(t.id).catch(alertErr);
       } else if (kind === 'resolve-workspace') {
         openWorkspaceResolve(t);
       } else if (kind === 'edit-workspace') {
@@ -2236,9 +2445,9 @@ function renderDiagBanner(t) {
         renderModal();
         $('#f-ws')?.focus();
       } else if (kind === 'advance') {
-        api(`/api/tickets/${t.id}/move`, 'POST', { columnId: b.dataset.col }).then(() => { toast('MOVED'); }).catch(alertErr);
+        return api(`/api/tickets/${t.id}/move`, 'POST', { columnId: b.dataset.col }).then(() => { toast('MOVED'); }).catch(alertErr);
       }
-    };
+    }, key);
   }
 }
 
@@ -2417,8 +2626,12 @@ async function refreshWorkspacePicker(box, preferPath) {
   const select = $('.wp-dirs', box);
   const path = preferPath || input.value.trim() || S.data.board.settings.defaultWorkspace || '/';
   select.innerHTML = '<option value="">loading folders…</option>';
+  // Rapid UP/HOME/refresh clicks overlap; drop any listing superseded by a newer request
+  // so a slow response can't paint a stale folder set over the one the user is now in.
+  const seq = (box._seq = (box._seq || 0) + 1);
   try {
     const r = await api(`/api/fs/dirs?path=${encodeURIComponent(path)}`);
+    if (seq !== box._seq) return;
     box.dataset.path = r.path;
     box.dataset.parent = r.parent;
     box.dataset.home = r.home;
@@ -2429,6 +2642,7 @@ async function refreshWorkspacePicker(box, preferPath) {
       ...r.dirs.map((d) => `<option value="${esc(d.path)}">${esc(d.name)}/</option>`),
     ].join('');
   } catch (e) {
+    if (seq !== box._seq) return;
     select.innerHTML = `<option value="">${esc(e.message || 'cannot read folder')}</option>`;
   }
 }
@@ -2531,7 +2745,7 @@ function renderOverview(body, t) {
   wireWorkspacePicker('f-ws', { onPath: fWsStatus });
   $('#f-readonly').onchange = () => fWsStatus?.();
 
-  $('#btn-save-ticket').onclick = async () => {
+  guardClick($('#btn-save-ticket'), '[ SAVING… ]', async () => {
     await api(`/api/tickets/${t.id}`, 'PATCH', {
       workspace: $('#f-ws').value.trim(),
       description: $('#f-desc').value,
@@ -2540,7 +2754,7 @@ function renderOverview(body, t) {
       overrides: draft,
       maxBounces: parseMaxBouncesInput('#f-maxbounce', null),
     }).then(() => toast('TICKET SAVED')).catch(alertErr);
-  };
+  });
 
   // Attachments upload/remove independently of SAVE CHANGES so draft edits above are never lost.
   wireDropzone('ov-att-drop', 'ov-att-input', 'ov-att-browse', (files) => uploadTicketFiles(t, files));
@@ -2569,10 +2783,10 @@ function renderTicketAttachments(t) {
       <button type="button" class="att-x" data-rm="${a.id}" title="Remove">[ x ]</button>
     </div>`).join('') : '<div class="att-empty">no files attached</div>';
   for (const b of box.querySelectorAll('[data-rm]')) {
-    b.onclick = () => {
+    guardClick(b, null, () => {
       if (!confirm('Remove this attachment?')) return;
-      deleteTicketAttachment(t, b.dataset.rm).catch(alertErr);
-    };
+      return deleteTicketAttachment(t, b.dataset.rm).catch(alertErr);
+    });
   }
 }
 
@@ -2660,7 +2874,7 @@ function renderActivity(body, t) {
       syncWakeHarness();
     };
   }
-  $('#btn-comment').onclick = async () => {
+  guardClick($('#btn-comment'), '[ POSTING… ]', async () => {
     const text = $('#f-comment').value.trim();
     if (!text) return;
     const wakeHarness = canWake ? {
@@ -2677,7 +2891,7 @@ function renderActivity(body, t) {
           : (r.running ? 'COMMENT POSTED — CURRENT RUN WILL SEE IT' : 'COMMENT POSTED')
       ))
       .catch(alertErr);
-  };
+  }, `comment:${t.id}`);
 
   renderWakePanel(t);
 
@@ -2695,6 +2909,19 @@ function renderActivity(body, t) {
   S.actScroll = { id: t.id, count: t.activity.length, pinned };
 }
 
+// "Pick up now" on a parked ticket just skips the grace countdown. On a ticket that is
+// mid-run, the run itself is what the wake is waiting on — so picking up now means ending
+// that run. That loses the in-flight turn, so confirm before forcing it.
+async function wakeNow(ticketId) {
+  const r = await api(`/api/tickets/${ticketId}/wake-now`, 'POST', {});
+  if (r.ok) { toast('PICKING UP NOW'); return r; }
+  if (!r.running) { toast(`NOT PICKED UP: ${r.reason || 'unknown'}`, true); return r; }
+  if (!confirm('A run is IN PROGRESS on this ticket. Picking up now stops it — the agent loses whatever it is doing this turn (committed work and its session are kept). It then starts a fresh run that reads your comment. Stop the run and pick up now?')) return r;
+  const forced = await api(`/api/tickets/${ticketId}/wake-now`, 'POST', { force: true });
+  toast(forced.ok ? 'RUN STOPPED — PICKING UP YOUR COMMENT' : `NOT PICKED UP: ${forced.reason || 'unknown'}`, !forced.ok);
+  return forced;
+}
+
 // The countdown + pick-now/cancel controls shown when a comment wake is pending.
 function renderWakePanel(t) {
   const el = $('#wake-panel');
@@ -2707,11 +2934,11 @@ function renderWakePanel(t) {
     <div class="wake-count">
       <span class="wake-t" data-wakeclock="${live.pendingWake.at}" ${running ? 'data-wake-running="1"' : ''}>T-0:60</span>
       <span class="wake-who">→ ${esc(h ? `${h.type || 'default'} · ${h.model || 'default'} · ${h.effort || 'default'}` : 'column default')} picks up your comment</span>
-      <button class="btn" id="wake-now">[ PICK UP NOW ]</button>
+      <button class="btn" id="wake-now">${running ? '[ STOP RUN &amp; PICK UP ]' : '[ PICK UP NOW ]'}</button>
       <button class="btn btn-danger" id="wake-cancel">[ CANCEL ]</button>
     </div>`;
-  $('#wake-now').onclick = () => api(`/api/tickets/${t.id}/wake-now`, 'POST', {}).then(() => toast('PICKING UP NOW')).catch(alertErr);
-  $('#wake-cancel').onclick = () => api(`/api/tickets/${t.id}/cancel-wake`, 'POST', {}).then(() => toast('WAKE CANCELLED')).catch(alertErr);
+  guardClick($('#wake-now'), '[ PICKING UP… ]', () => wakeNow(t.id).catch(alertErr), `wake:${t.id}`);
+  guardClick($('#wake-cancel'), '[ CANCELLING… ]', () => api(`/api/tickets/${t.id}/cancel-wake`, 'POST', {}).then(() => toast('WAKE CANCELLED')).catch(alertErr), `wake:${t.id}`);
 }
 
 function renderTranscript(body, t) {
@@ -2824,7 +3051,7 @@ function renderColumnModal(draftOverride) {
   };
   $('#c-model').onchange = () => { if (handleCustomModel($('#c-model'))) renderColumnModal(collectDraft()); }; // model change re-filters efforts
 
-  $('#c-save').onclick = () => api(`/api/columns/${c.id}`, 'PATCH', {
+  guardClick($('#c-save'), '[ SAVING… ]', () => api(`/api/columns/${c.id}`, 'PATCH', {
     name: $('#c-name').value.trim(),
     role: $('#c-role').value,
     autoRun: Boolean($('#c-auto').value),
@@ -2839,11 +3066,212 @@ function renderColumnModal(draftOverride) {
       allowedTools: $('#c-tools').value.trim(),
       chrome: Boolean($('#c-chrome').value),
     },
-  }).then(() => { toast('PHASE SAVED'); closeAndReload(); }).catch(alertErr);
-  $('#c-del').onclick = () => { if (confirm('Delete this phase?')) api(`/api/columns/${c.id}`, 'DELETE').then(closeAndReload).catch(alertErr); };
+  }).then(() => { toast('PHASE SAVED'); closeAndReload(); }).catch(alertErr));
+  guardClick($('#c-del'), null, () => { if (confirm('Delete this phase?')) return api(`/api/columns/${c.id}`, 'DELETE').then(closeAndReload).catch(alertErr); });
 }
 
 /* ---- new ticket modal ---- */
+const waitMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const motionReduced = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+const motionMs = (ms) => motionReduced() ? Math.min(90, Math.max(16, Math.round(ms * 0.08))) : ms;
+
+function ellipsizeMiddle(value, max = 42) {
+  const s = String(value || '');
+  if (s.length <= max) return s;
+  const left = Math.ceil((max - 1) * 0.58);
+  const right = Math.max(4, max - left - 1);
+  return `${s.slice(0, left)}…${s.slice(-right)}`;
+}
+
+function pathTailLabel(value) {
+  const parts = String(value || '').split('/').filter(Boolean);
+  return parts.slice(-2).join('/') || value || 'workspace';
+}
+
+function newTicketScheduleLabel(value) {
+  if (!value) return 'next backlog sweep';
+  try { return new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }); }
+  catch { return value; }
+}
+
+function collectNewTicketPayload() {
+  const readOnly = $('#n-readonly').checked;
+  const skip = readOnly ? [...document.querySelectorAll('.n-skip:checked')].map((el) => el.value) : [];
+  return {
+    requestId: S.newReqId,
+    title: $('#n-title').value,
+    description: $('#n-desc').value,
+    workspace: $('#n-ws').value.trim(),
+    columnId: $('#n-col').value,
+    scheduledAt: $('#n-sched').value || null,
+    maxBounces: parseMaxBouncesInput('#n-maxbounce', null),
+    overrides: typeof structuredClone === 'function'
+      ? structuredClone(S.newOverrides || {})
+      : JSON.parse(JSON.stringify(S.newOverrides || {})),
+    readOnly,
+    skip,
+    attachments: (S.newAttachments || []).map(({ name, type, size, dataB64 }) => ({ name, type, size, dataB64 })),
+  };
+}
+
+function newTicketAnimationSnapshot(payload) {
+  const col = cols().find((c) => c.id === payload.columnId);
+  return {
+    title: payload.title.trim() || 'Untitled ticket',
+    workspace: payload.workspace || S.data.board.settings.defaultWorkspace || '',
+    workspaceShort: pathTailLabel(payload.workspace || S.data.board.settings.defaultWorkspace || ''),
+    column: col?.name || 'Backlog',
+    scheduled: newTicketScheduleLabel(payload.scheduledAt),
+    bounce: payload.maxBounces == null ? `default (${boardMaxBounces()})` : String(payload.maxBounces),
+    readOnly: Boolean(payload.readOnly),
+    attachmentCount: payload.attachments.length,
+  };
+}
+
+function resetNewTicketCreateAnimation() {
+  const root = $('#modal-root');
+  root?.querySelectorAll('.create-terminal, .new-create-receipt').forEach((el) => el.remove());
+  root?.querySelector('.new-ticket-create-overlay')?.classList.remove('new-ticket-create-overlay');
+  const panel = root?.querySelector('.new-ticket-panel');
+  panel?.classList.remove('is-create-animating', 'is-create-collapsing');
+  panel?.querySelectorAll('.ticket-create-value').forEach((el) => {
+    el.classList.remove('ticket-create-value');
+    el.style.removeProperty('--ticket-create-delay');
+  });
+  const close = $('#modal-close');
+  if (close) close.disabled = false;
+  S.newCreateAnimating = false;
+}
+
+function markNewTicketCreateValues(panel) {
+  const body = $('.panel-body', panel);
+  if (!body) return;
+  [...body.children].forEach((el, i) => {
+    el.classList.add('ticket-create-value');
+    el.style.setProperty('--ticket-create-delay', `${Math.min(i, 11) * 35}ms`);
+  });
+}
+
+function appendNewCreateLine(box, text, tone = 'muted') {
+  const line = document.createElement('div');
+  line.className = `create-terminal-line tone-${tone}`;
+  line.textContent = text;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+  return line;
+}
+
+async function typeNewCreateCommand(el, text) {
+  if (motionReduced()) {
+    el.textContent = text;
+    return;
+  }
+  for (let i = 1; i <= text.length; i++) {
+    el.textContent = text.slice(0, i);
+    await waitMs(15);
+  }
+}
+
+function newTicketReceiptHTML(snapshot, ticket) {
+  const createdLabel = (() => {
+    try { return new Date(ticket?.createdAt || Date.now()).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'medium' }); }
+    catch { return ticket?.createdAt || ''; }
+  })();
+  const column = cols().find((c) => c.id === ticket?.columnId)?.name || snapshot.column;
+  const lines = [
+    { cls: 'receipt-head', html: `<span>${esc(ticketNo(ticket) || 'TICKET')}</span><b>${esc(column.toUpperCase())}</b>` },
+    { cls: 'receipt-rule', text: '--------------------------------' },
+    { cls: 'receipt-title', text: (ticket?.title || snapshot.title).toUpperCase() },
+    { cls: 'receipt-plain', text: `workspace  ${pathTailLabel(ticket?.workspace || snapshot.workspace)}` },
+    { cls: 'receipt-plain', text: `path       ${ellipsizeMiddle(ticket?.workspace || snapshot.workspace, 34)}` },
+    { cls: 'receipt-plain', text: `bounce     ${ticket?.maxBounces ?? snapshot.bounce}` },
+    { cls: 'receipt-plain', text: `schedule   ${newTicketScheduleLabel(ticket?.scheduledAt)}` },
+    { cls: 'receipt-plain', text: `mode       ${ticket?.readOnly ? 'read-only' : 'write-enabled'}` },
+    { cls: 'receipt-plain', text: `files      ${snapshot.attachmentCount}` },
+    { cls: 'receipt-rule', text: '--------------------------------' },
+    { cls: 'receipt-plain', text: `${createdLabel}    created` },
+    { cls: 'receipt-plain', text: ticket?.started ? `dispatch   started -> ${ticket.started}` : 'dispatch   queued for sweep' },
+  ];
+  return `
+    <div class="new-create-receipt" aria-live="polite">
+      <div class="receipt-printer" aria-hidden="true"></div>
+      <div class="receipt-roll">
+        <div class="receipt-paper">
+          ${lines.map((line, i) => `<div class="receipt-line ${line.cls}" style="--line-delay:${i * 72}ms">${line.html || esc(line.text)}</div>`).join('')}
+          <div class="receipt-stamp">CREATED</div>
+        </div>
+        <div class="receipt-teeth" aria-hidden="true"></div>
+      </div>
+    </div>`;
+}
+
+async function playNewTicketCreateAnimation(snapshot, requestPromise) {
+  const panel = $('.panel');
+  const overlay = $('#overlay');
+  if (!panel || !overlay) return requestPromise;
+
+  S.newCreateAnimating = true;
+  overlay.classList.add('new-ticket-create-overlay');
+  panel.classList.add('new-ticket-panel', 'is-create-animating');
+  markNewTicketCreateValues(panel);
+  const close = $('#modal-close');
+  if (close) close.disabled = true;
+
+  const terminal = document.createElement('div');
+  terminal.className = 'create-terminal';
+  terminal.innerHTML = `
+    <div class="create-terminal-command"><span class="create-terminal-typed"></span><span class="create-terminal-cursor"></span></div>
+    <div class="create-terminal-lines"></div>`;
+  panel.appendChild(terminal);
+  requestAnimationFrame(() => terminal.classList.add('is-open'));
+
+  const typed = $('.create-terminal-typed', terminal);
+  const lines = $('.create-terminal-lines', terminal);
+  await waitMs(motionMs(240));
+  await typeNewCreateCommand(typed, `$ dispatch ticket create --column ${snapshot.column.toLowerCase().replace(/\s+/g, '-')}`);
+  await waitMs(motionMs(160));
+  appendNewCreateLine(lines, `-> title      "${ellipsizeMiddle(snapshot.title, 36)}"`);
+  await waitMs(motionMs(140));
+  appendNewCreateLine(lines, `-> workspace  ${ellipsizeMiddle(snapshot.workspace, 42)}`);
+  await waitMs(motionMs(140));
+  appendNewCreateLine(lines, `-> start-in   ${snapshot.column.toLowerCase()}`);
+  await waitMs(motionMs(140));
+  appendNewCreateLine(lines, `-> schedule   ${snapshot.scheduled}`);
+  await waitMs(motionMs(220));
+  const writing = appendNewCreateLine(lines, 'writing ticket...', 'work');
+  writing.classList.add('is-writing');
+
+  let ticket;
+  try {
+    [ticket] = await Promise.all([requestPromise, waitMs(motionMs(780))]);
+  } catch (e) {
+    writing.classList.remove('is-writing', 'tone-work');
+    writing.classList.add('tone-error');
+    writing.textContent = `x ${e.message}`;
+    await waitMs(motionMs(650));
+    resetNewTicketCreateAnimation();
+    throw e;
+  }
+
+  writing.classList.remove('is-writing', 'tone-work');
+  writing.classList.add('tone-ok');
+  writing.textContent = `✓ ${ticketNo(ticket) || 'ticket'} created`;
+  await waitMs(motionMs(460));
+  panel.classList.add('is-create-collapsing');
+  await waitMs(motionMs(580));
+
+  overlay.insertAdjacentHTML('beforeend', newTicketReceiptHTML(snapshot, ticket));
+  const receipt = $('.new-create-receipt', overlay);
+  requestAnimationFrame(() => receipt?.classList.add('is-printing'));
+  await waitMs(motionMs(1260));
+  receipt?.classList.add('is-torn');
+  await waitMs(motionMs(360));
+  receipt?.classList.add('is-stamped');
+  await waitMs(motionMs(1040));
+  S.newCreateAnimating = false;
+  return ticket;
+}
+
 function renderNewOverrides() {
   const box = $('#n-ov');
   if (!box) return;
@@ -2854,6 +3282,10 @@ function renderNewOverrides() {
 
 function renderNewModal() {
   S.newOverrides ||= {};
+  // One id per NEW TICKET form instance: if CREATE is fired twice anyway (dropped
+  // response retried, click landing on a stale node), the server replays the first
+  // request's ticket instead of creating a twin.
+  S.newReqId ||= crypto.randomUUID?.() || `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   shell('NEW TICKET', `
     <div class="panel-body">
       <label class="f">TITLE</label><input id="n-title" autofocus>
@@ -2881,6 +3313,7 @@ function renderNewModal() {
       <div class="hint">unscheduled backlog tickets start immediately if a run slot is free, otherwise on the next sweep (every ${S.data.board.settings.autoDispatchEveryMin || 5} min). a scheduled ticket waits for its timestamp.</div>
     </div>`,
     `<button class="btn btn-accent" id="n-create">[ CREATE ]</button>`);
+  $('.panel')?.classList.add('new-ticket-panel');
   const preferredColumnId = S.modal?.columnId;
   const columnSelect = $('#n-col');
   if (preferredColumnId && [...columnSelect.options].some((opt) => opt.value === preferredColumnId)) {
@@ -2912,21 +3345,19 @@ function renderNewModal() {
   wireWorkspacePicker('n-ws', { onPath: nWsStatus });
   $('#n-readonly').onchange = (e) => { $('#n-skip-wrap').hidden = !e.target.checked; nWsStatus?.(); };
   renderStagedAttachments();
-  $('#n-create').onclick = () => {
-    const readOnly = $('#n-readonly').checked;
-    const skip = readOnly ? [...document.querySelectorAll('.n-skip:checked')].map((el) => el.value) : [];
-    api('/api/tickets', 'POST', {
-      title: $('#n-title').value,
-      description: $('#n-desc').value,
-      workspace: $('#n-ws').value.trim(),
-      columnId: $('#n-col').value,
-      scheduledAt: $('#n-sched').value || null,
-      maxBounces: parseMaxBouncesInput('#n-maxbounce', null),
-      overrides: S.newOverrides || {},
-      readOnly, skip,
-      attachments: (S.newAttachments || []).map(({ name, type, size, dataB64 }) => ({ name, type, size, dataB64 })),
-    }).then((r) => { S.newAttachments = []; S.newOverrides = {}; clearNewPasteThumbs(); toast(r.started ? `CREATED — STARTED → ${r.started.toUpperCase()}` : 'TICKET CREATED'); closeAndReload(); }).catch(alertErr);
-  };
+  guardClick($('#n-create'), '[ CREATING… ]', async () => {
+    const payload = collectNewTicketPayload();
+    if (!payload.title.trim()) { toast('ERROR — title required', true); return; }
+    const snapshot = newTicketAnimationSnapshot(payload);
+    try {
+      const r = await playNewTicketCreateAnimation(snapshot, api('/api/tickets', 'POST', payload));
+      S.newAttachments = []; S.newOverrides = {}; S.newReqId = null; clearNewPasteThumbs();
+      toast(r.started ? `CREATED — STARTED → ${r.started.toUpperCase()}` : 'TICKET CREATED');
+      closeAndReload();
+    } catch (e) {
+      alertErr(e);
+    }
+  });
 }
 
 // Staged (not-yet-uploaded) files for the New Ticket modal — held in memory until CREATE.
@@ -2989,20 +3420,20 @@ function renderArchiveModal() {
     el.onclick = () => pushModal({ type: 'ticket', id: el.dataset.open, tab: 'overview' });
   }
   for (const el of document.querySelectorAll('[data-restore]')) {
-    el.onclick = (e) => {
+    guardClick(el, '[ RESTORING… ]', (e) => {
       stopTicketAction(e);
       const dest = el.closest('.arch-item')?.querySelector('[data-restore-dest]')?.value || restoreDefault;
-      restoreTicket(el.dataset.restore, dest);
-    };
+      return restoreTicket(el.dataset.restore, dest);
+    }, `restore:${el.dataset.restore}`);
   }
   for (const el of document.querySelectorAll('[data-restore-dest]')) {
     el.onclick = stopTicketAction;
   }
   for (const el of document.querySelectorAll('[data-archive-delete]')) {
-    el.onclick = (e) => {
+    guardClick(el, null, (e) => {
       stopTicketAction(e);
-      deleteTicket(el.dataset.archiveDelete, { archived: true });
-    };
+      return deleteTicket(el.dataset.archiveDelete, { archived: true });
+    }, `delete:${el.dataset.archiveDelete}`);
   }
 }
 
@@ -3074,19 +3505,19 @@ function wireSecretsPanel() {
   keyInput.addEventListener('input', validateKey);
   validateKey();
 
-  addBtn.onclick = async () => {
+  guardClick(addBtn, '[ SAVING… ]', async () => {
     const key = keyInput.value.trim();
     const value = newValue.value;
     try {
       renderSecretsPanel(await api('/api/secrets', 'POST', { key, value }));
       toast('SECRET SAVED');
     } catch (e) { alertErr(e); }
-  };
+  });
   for (const btn of document.querySelectorAll('[data-secret-reveal]')) {
     btn.onclick = () => toggle(btn.closest('.secret-actions').previousElementSibling.previousElementSibling.querySelector('.secret-value'), btn);
   }
   for (const btn of document.querySelectorAll('[data-secret-save]')) {
-    btn.onclick = async () => {
+    guardClick(btn, null, async () => {
       const actions = btn.closest('.secret-actions');
       const key = actions.dataset.key;
       const value = actions.previousElementSibling.previousElementSibling.querySelector('.secret-value').value;
@@ -3094,17 +3525,17 @@ function wireSecretsPanel() {
         renderSecretsPanel(await api('/api/secrets', 'POST', { key, value }));
         toast('SECRET SAVED');
       } catch (e) { alertErr(e); }
-    };
+    });
   }
   for (const btn of document.querySelectorAll('[data-secret-delete]')) {
-    btn.onclick = async () => {
+    guardClick(btn, null, async () => {
       const key = btn.closest('.secret-actions').dataset.key;
       if (!confirm(`Delete ${key} from .env? Runtime-provided values may remain visible.`)) return;
       try {
         renderSecretsPanel(await api(`/api/secrets/${encodeURIComponent(key)}`, 'DELETE'));
         toast('SECRET DELETED');
       } catch (e) { alertErr(e); }
-    };
+    });
   }
   // Mark a row's [ SAVE ] as unsaved once its value diverges from what's on disk.
   // The panel re-renders after every save, so defaultValue re-syncs and the flag clears.
@@ -3126,6 +3557,10 @@ function unsavedSecretCount() {
 
 // Guarded close: warn before discarding unsaved secret edits (each row saves on its own).
 function requestCloseModal() {
+  if (S.newCreateAnimating) {
+    toast('TICKET CREATION IN PROGRESS');
+    return;
+  }
   const n = unsavedSecretCount();
   if (n && !confirm(`${n} secret ${n > 1 ? 'values have' : 'value has'} unsaved edits. Close without saving? Use each row's [ SAVE ] to keep changes.`)) return;
   closeModal();
@@ -3295,21 +3730,13 @@ function renderSettingsModal() {
   loadSystemPromptSettings();
   api('/api/maintenance/usage').then((u) => { const el = $('#s-usage'); if (el) el.textContent = fmtBytes(u.bytes); }).catch(() => {});
   $('#s-open-archive').onclick = () => pushModal({ type: 'archive' });
-  $('#s-prune').onclick = () => {
-    $('#s-prune').textContent = '[ RECLAIMING… ]';
-    api('/api/maintenance/prune', 'POST', {}).then((r) => {
-      toast(`RECLAIMED ${fmtBytes(r.freedBytes)} · ${r.itemsRemoved} item(s) removed`);
-      const el = $('#s-usage'); if (el) el.textContent = fmtBytes(r.after);
-      $('#s-prune').textContent = '[ RECLAIM DISK SPACE ]';
-    }).catch((e) => { alertErr(e); $('#s-prune').textContent = '[ RECLAIM DISK SPACE ]'; });
-  };
-  $('#s-tg-test').onclick = () => {
-    $('#s-tg-test').textContent = '[ SENDING... ]';
-    api('/api/notify/test', 'POST', { chatId: $('#s-tg-chat').value.trim() })
+  guardClick($('#s-prune'), '[ RECLAIMING… ]', () => api('/api/maintenance/prune', 'POST', {}).then((r) => {
+    toast(`RECLAIMED ${fmtBytes(r.freedBytes)} · ${r.itemsRemoved} item(s) removed`);
+    const el = $('#s-usage'); if (el) el.textContent = fmtBytes(r.after);
+  }).catch(alertErr));
+  guardClick($('#s-tg-test'), '[ SENDING... ]', () => api('/api/notify/test', 'POST', { chatId: $('#s-tg-chat').value.trim() })
     .then(() => toast('TEST SENT — check your phone'))
-    .catch(alertErr)
-    .finally(() => { $('#s-tg-test').textContent = '[ SEND TEST ]'; });
-  };
+    .catch(alertErr));
 
   // Setup controls (enable toggles, auth flow, preset, completion) all live inside the
   // stepper, which re-renders on auth changes — wiring is shared with updateStepperUI().
@@ -3343,10 +3770,9 @@ function renderSettingsModal() {
       perms.disabled = human;
     }
   };
-  $('#s-tg-detect').onclick = () => {
+  guardClick($('#s-tg-detect'), '[ DETECTING... ]', () => {
     const out = $('#s-tg-detect-out');
-    $('#s-tg-detect').textContent = '[ DETECTING... ]';
-    api('/api/notify/detect-chat', 'POST', {})
+    return api('/api/notify/detect-chat', 'POST', {})
       .then((r) => {
         // prefer the private DM — that's where "ping me" alerts should land
         const pick = r.chats.find((c) => c.type === 'private') || r.chats[0];
@@ -3363,9 +3789,8 @@ function renderSettingsModal() {
           toast('MESSAGE THE BOT FIRST');
         }
       })
-      .catch(alertErr)
-      .finally(() => { $('#s-tg-detect').textContent = '[ DETECT CHAT ID ]'; });
-  };
+      .catch(alertErr);
+  });
 
   for (const sel of document.querySelectorAll('[data-pd$=":model"]')) sel.onchange = () => {
     if (!handleCustomModel(sel)) return;
@@ -3398,23 +3823,18 @@ function renderSettingsModal() {
     transcriptRenderCurrent();
   };
   $('#s-appear-reset').onclick = () => { savePrefs({ ...DEFAULT_PREFS }); renderSettingsModal(); };
-  $('#s-system-save').onclick = async () => {
-    const btn = $('#s-system-save');
-    btn.textContent = '[ SAVING… ]';
+  guardClick($('#s-system-save'), '[ SAVING… ]', async () => {
     try {
       const data = await api('/api/system-prompt', 'PUT', { content: $('#s-system-prompt').value });
       $('#s-system-meta').innerHTML = `FILE: <code>${esc(data.path)}</code>`;
       toast('SYSTEM.md SAVED');
     } catch (e) { alertErr(e); }
-    finally { btn.textContent = '[ SAVE SYSTEM.md ]'; }
-  };
+  });
 
-  $('#s-save').onclick = async () => {
-    const btn = $('#s-save');
+  guardClick($('#s-save'), '[ SAVING… ]', async () => {
     const claudeEnabled = $('#s-claude-enabled');
     const codexEnabled = $('#s-codex-enabled');
     const phaseDefaults = {};
-    btn.textContent = '[ SAVING… ]';
     for (const el of document.querySelectorAll('[data-pd]')) {
       const [colId, key] = el.dataset.pd.split(':');
       (phaseDefaults[colId] ||= {})[key] = el.value.trim();
@@ -3473,10 +3893,8 @@ function renderSettingsModal() {
       closeAndReload();
     } catch (e) {
       alertErr(e);
-    } finally {
-      btn.textContent = '[ SAVE SETTINGS ]';
     }
-  };
+  });
 }
 
 /* ---------- 1s clocks: sweep countdown, wake countdown, retry countdown, live-run elapsed ---------- */
@@ -3524,16 +3942,28 @@ $('#btn-update').onclick = async (e) => {
     toast(`UPDATE CHECK FAILED — ${btn.dataset.updateError}`, true);
     return;
   }
-  if (S.updating) return;
+  // The apply POST (git pull + npm install) runs for seconds, during which renderUpdateButton
+  // fires on every state broadcast — without this key it would re-enable the button underneath
+  // an in-flight update and a second click would double-fire it.
+  if (S.updating || inFlightActions.has('update-apply')) return;
+  inFlightActions.add('update-apply');
   btn.disabled = true;
+  let refreshButtonFromState = false;
   try {
     const r = await api('/api/update/apply', 'POST', {});
     if (r.applied && r.restarting) { beginUpdateRestartWatch(btn, r.bootId); return; }
-    toast(r.applied ? 'UPDATED — RESTART DISPATCH TO APPLY' : 'ALREADY UP TO DATE');
+    refreshButtonFromState = !r.applied;
+    toast(r.applied ? 'UPDATED — RESTART DISPATCH TO APPLY' : (r.message || 'NO NEW COMMITS TO APPLY'));
   } catch (err) {
-    alertErr(err);
+    // Dirty checkout → offer stash/discard choices instead of a dead-end error toast.
+    if (err.body?.code === 'dirty-tree') openUpdateResolve(err.body);
+    else alertErr(err);
   } finally {
-    if (!S.updating) btn.disabled = false;
+    inFlightActions.delete('update-apply');
+    if (!S.updating) {
+      if (refreshButtonFromState) await loadState().catch(() => {});
+      renderUpdateButton();
+    }
   }
 };
 
@@ -3541,9 +3971,9 @@ $('#btn-update').onclick = async (e) => {
 // poll /api/health until a different bootId answers (the new process), then reload; the
 // sessionStorage marker survives the reload so the fresh page can confirm completion.
 // The serverBoot check in loadState() may reload us first — same marker, same toast.
-function beginUpdateRestartWatch(btn, oldBootId) {
+function beginUpdateRestartWatch(btn, oldBootId, localChanges = null) {
   S.updating = true;
-  try { sessionStorage.setItem('dispatch.updateRestart', JSON.stringify({ from: oldBootId, at: Date.now() })); } catch {}
+  try { sessionStorage.setItem('dispatch.updateRestart', JSON.stringify({ from: oldBootId, at: Date.now(), localChanges })); } catch {}
   btn.hidden = false;
   btn.disabled = true;
   btn.classList.add('is-updating');
@@ -3578,18 +4008,26 @@ function beginUpdateRestartWatch(btn, oldBootId) {
   if (!marker) return;
   try {
     const h = await fetch('/api/health').then((r) => (r.ok ? r.json() : null));
-    if (h?.bootId && h.bootId !== marker.from) toast('DISPATCH UPDATED & RESTARTED ✓');
+    if (h?.bootId && h.bootId !== marker.from) {
+      if (marker.localChanges === 'stashed') {
+        toast('DISPATCH UPDATED ✓ — restoring your local changes hit conflicts; they are saved in git stash (run: git stash pop)', true);
+      } else if (marker.localChanges === 'restored') {
+        toast('DISPATCH UPDATED & RESTARTED ✓ — LOCAL CHANGES RESTORED');
+      } else {
+        toast('DISPATCH UPDATED & RESTARTED ✓');
+      }
+    }
   } catch { /* page load itself would have failed if the server were down */ }
 })();
-$('#btn-pause').onclick = () => {
+guardClick($('#btn-pause'), null, () => {
   const cap = S.data.board.settings.maxConcurrent ?? 2;
   let next;
   if (cap > 0) { localStorage.setItem('dispatch.prevCap', String(cap)); next = 0; }   // pause
   else { next = Number(localStorage.getItem('dispatch.prevCap')) || 2; }               // resume
-  api('/api/settings', 'PATCH', { maxConcurrent: next })
+  return api('/api/settings', 'PATCH', { maxConcurrent: next })
     .then(() => toast(next === 0 ? 'ENGINE PAUSED — nothing new will run' : `ENGINE RESUMED — cap ${next}`))
     .catch(alertErr);
-};
+});
 /* ---- mobile overflow menu (≡): folds Pause / Archive / Settings off the top bar ---- */
 function buildTopMenu() {
   const cap = S.data?.board?.settings?.maxConcurrent ?? 2;
@@ -3630,6 +4068,8 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     closeTopMenu();
+    if (S.updateResolve?.applying) return; // update apply in flight — don't yank the dialog
+    if (dismissUpdateResolve()) return;
     if (dismissWorkspaceResolve()) return;
     if (dismissTicketActionConfirm(false)) return;
     requestCloseModal();

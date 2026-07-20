@@ -63,3 +63,35 @@ test('createTicket stores maxBounces as integer or null inheritance', async () =
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test('store prunes disposable build caches from isolated worktrees only', async () => {
+  const { store, dataDir } = await tempStore();
+  try {
+    const ticket = store.createTicket({
+      title: 'Cache cleanup',
+      description: '',
+      workspace: dataDir,
+      attachments: [],
+    });
+    const root = path.join(store.worktreesRoot(), ticket.id);
+    const sourceDir = path.join(root, 'src');
+    const nested = path.join(root, 'frontend');
+    fs.mkdirSync(path.join(sourceDir, 'target'), { recursive: true });
+    fs.mkdirSync(path.join(nested, 'node_modules'), { recursive: true });
+    fs.mkdirSync(path.join(nested, '.next'), { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, 'app.js'), 'console.log("keep");\n');
+    fs.writeFileSync(path.join(sourceDir, 'target', 'artifact'), 'remove');
+    fs.writeFileSync(path.join(nested, 'node_modules', 'dep'), 'remove');
+    fs.writeFileSync(path.join(nested, '.next', 'bundle'), 'remove');
+
+    const { removed } = store.pruneTicketWorktree(ticket.id);
+
+    assert.deepEqual(removed.sort(), ['frontend/.next', 'frontend/node_modules', 'src/target']);
+    assert.equal(fs.existsSync(path.join(sourceDir, 'app.js')), true);
+    assert.equal(fs.existsSync(path.join(sourceDir, 'target')), false);
+    assert.equal(fs.existsSync(path.join(nested, 'node_modules')), false);
+    assert.equal(fs.existsSync(path.join(nested, '.next')), false);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

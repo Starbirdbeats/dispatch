@@ -18,7 +18,7 @@ import {
   validateEnvKey,
 } from './engine/envfile.mjs';
 import { AUTH_COMMANDS, createAuthSessions } from './engine/authflow.mjs';
-import { checkUpdateStatus, createGitRunner, formatGitUpdateError, parseAheadBehind } from './engine/update-status.mjs';
+import { applyUpdateWithStrategy, assessMainDivergence, checkUpdateStatus, createGitRunner, formatGitUpdateError, parseAheadBehind, parseStatusChanges } from './engine/update-status.mjs';
 import { inspectWorkspaceResolution, inspectWorkspaceStatus, resolveWorkspace } from './engine/workspace-resolution.mjs';
 import { removeTicketWorktree } from './engine/branching.mjs';
 
@@ -530,7 +530,7 @@ setInterval(() => {
 }, 5_000);
 
 // ---- disk retention ----
-// Prune agent scratch + trim run journals across all tickets that aren't actively being worked.
+// Prune agent scratch, worktree build caches, and run journals across idle tickets.
 function pruneSweep() {
   const snap = runner.snapshot();
   const busy = new Set([...snap.running, ...snap.queued]);
@@ -539,6 +539,7 @@ function pruneSweep() {
   for (const t of store.tickets.values()) {
     if (busy.has(t.id) || (t.activeRun?.pid && pidAlive(t.activeRun.pid))) continue; // never touch live work
     items += store.pruneTicketData(t.id, { keepRuns }).removed.length;
+    items += store.pruneTicketWorktree(t.id).removed.length;
   }
   return items;
 }
@@ -553,8 +554,13 @@ setInterval(() => { try { pruneSweep(); } catch (e) { console.error('prune-sweep
 runner.recover();
 
 // ---- state ----
-app.post('/api/update/apply', async (_req, res) => {
+app.post('/api/update/apply', async (req, res) => {
   try {
+    const strategy = req.body?.strategy ?? null;
+    if (strategy != null && strategy !== 'stash' && strategy !== 'discard') {
+      return res.status(400).json({ error: `unknown update strategy: ${strategy}` });
+    }
+
     try {
       await git(['fetch', '--quiet', 'origin', 'main'], 30_000);
     } catch (e) {
@@ -566,20 +572,38 @@ app.post('/api/update/apply', async (_req, res) => {
     if (behind <= 0) {
       updateStatus = await checkUpdateStatus({ git });
       broadcast({ type: 'state-changed' });
-      return res.json({ ok: true, applied: false, message: 'already up to date' });
+      return res.json({ ok: true, applied: false, message: 'NO NEW COMMITS TO APPLY' });
     }
 
-    try {
-      await git(['merge-base', '--is-ancestor', 'refs/heads/main', 'refs/remotes/origin/main']);
-    } catch {
-      return res.status(409).json({ error: 'local main has diverged from origin/main — resolve manually' });
+    // 'ff' = strictly behind; 'reset' = diverged but every local-only commit already
+    // lives on origin as a rebased twin (routine after shipping); 'blocked' = local
+    // main holds changes that exist nowhere upstream — only that case is manual.
+    const divergence = await assessMainDivergence({ git });
+    if (divergence.mode === 'blocked') {
+      const n = divergence.uniqueCount;
+      return res.status(409).json({
+        error: `local main has ${n} commit${n === 1 ? '' : 's'} with changes not on origin/main — push or rebase them first`,
+      });
     }
 
     const branch = await git(['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => null);
+    let localChanges = null;
     if (branch === 'main') {
-      const status = await git(['status', '--porcelain']);
-      if (status) return res.status(409).json({ error: 'working tree has uncommitted changes — commit or stash first' });
-      await git(['merge', '--ff-only', 'origin/main'], 30_000);
+      const changes = parseStatusChanges(await git(['status', '--porcelain']));
+      if (changes.length && !strategy) {
+        // Structured 409: the client renders a resolve dialog (stash / discard) from this.
+        return res.status(409).json({
+          error: 'working tree has uncommitted changes — commit or stash first',
+          code: 'dirty-tree',
+          root: __dirname,
+          branch,
+          changeCount: changes.length,
+          changes: changes.slice(0, 80),
+        });
+      }
+      ({ localChanges } = await applyUpdateWithStrategy({ git, strategy: changes.length ? strategy : null, mode: divergence.mode }));
+    } else if (divergence.mode === 'reset') {
+      await git(['branch', '-f', 'main', 'refs/remotes/origin/main'], 30_000);
     } else {
       await git(['fetch', '--quiet', 'origin', 'main:main'], 30_000);
     }
@@ -593,6 +617,7 @@ app.post('/api/update/apply', async (_req, res) => {
       branch,
       restarting: true,
       bootId: BOOT_ID,
+      localChanges,
       message: 'local main updated — Dispatch is restarting to run the new code',
     });
     scheduleRestart(`update applied (${behind} commit${behind === 1 ? '' : 's'})`);
@@ -920,14 +945,28 @@ function checkWorkspace(workspace) {
 }
 
 // ---- tickets ----
+// Ticket creation is deduped by the client's per-form requestId: if the CREATE request
+// gets fired twice (stuck button clicked again, dropped response retried), the replay
+// returns the ticket the first request made instead of creating a twin.
+const recentTicketCreates = new Map(); // requestId → { ticketId, at }
+const TICKET_CREATE_DEDUPE_MS = 10 * 60 * 1000;
+
 app.post('/api/tickets', (req, res) => {
-  const { title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip, maxBounces } = req.body;
+  const { title, description, workspace, columnId, overrides, scheduledAt, attachments, readOnly, skip, maxBounces, requestId } = req.body;
+  const reqKey = typeof requestId === 'string' && requestId.length <= 100 ? requestId : '';
+  if (reqKey) {
+    for (const [k, v] of recentTicketCreates) if (Date.now() - v.at > TICKET_CREATE_DEDUPE_MS) recentTicketCreates.delete(k);
+    const prior = recentTicketCreates.get(reqKey);
+    const existing = prior && store.tickets.get(prior.ticketId);
+    if (existing) return res.json({ ...existing, started: null, deduped: true });
+  }
   if (!title?.trim()) return res.status(400).json({ error: 'title required' });
   const ws = checkWorkspace(workspace);
   if (ws.error) return res.status(400).json({ error: ws.error });
   const att = checkAttachments(attachments);
   if (!att.ok) return res.status(att.status).json({ error: att.error });
   const t = store.createTicket({ title: title.trim(), description, workspace: ws.workspace, columnId, overrides, scheduledAt, attachments: att.files, readOnly, skip, maxBounces });
+  if (reqKey) recentTicketCreates.set(reqKey, { ticketId: t.id, at: Date.now() });
   broadcast({ type: 'state-changed' });
 
   const col = store.column(t.columnId);
@@ -1094,11 +1133,36 @@ function normalizeHarnessOverride(h) {
   return Object.keys(out).length ? out : null;
 }
 
+// Skip the wake's grace countdown. Zeroing `at` is enough for a parked ticket, but a
+// ticket mid-run is held by the run itself (processPendingWakes waits for it to free up),
+// so "now" there means stopping that run — destructive, hence { force: true } only, which
+// the UI confirms first. The stopped run finalizes to idle and the wake fires on the next
+// pass, comment in hand.
 app.post('/api/tickets/:id/wake-now', (req, res) => {
   const t = store.tickets.get(req.params.id);
   if (!t) return res.status(404).json({ error: 'not found' });
-  if (t.pendingWake) { t.pendingWake.at = 0; store.saveTicket(t.id); broadcast({ type: 'state-changed' }); }
-  res.json({ ok: Boolean(t.pendingWake) });
+  if (!t.pendingWake) return res.json({ ok: false, reason: 'no pending wake' });
+
+  const snap = runner.snapshot();
+  const busy = Boolean(t.activeRun) || snap.running.includes(t.id) || snap.queued.includes(t.id);
+  if (busy && !req.body?.force) {
+    return res.json({ ok: false, running: Boolean(t.activeRun), reason: 'a run is in progress — pass force to stop it and pick up now' });
+  }
+
+  t.pendingWake.at = 0;
+  store.saveTicket(t.id);
+  if (busy) {
+    store.appendActivity(t.id, {
+      kind: 'system',
+      by: 'human',
+      text: t.activeRun
+        ? 'stopping the current run to pick up the new comment now'
+        : 'clearing the queued run to pick up the new comment now',
+    });
+    runner.stop(t.id); // finalizes to idle; processPendingWakes fires the wake right after
+  }
+  broadcast({ type: 'state-changed' });
+  res.json({ ok: true, stopped: busy });
 });
 
 app.post('/api/tickets/:id/cancel-wake', (req, res) => {

@@ -46,7 +46,7 @@ const DEFAULT_BOARD = {
     },
     {
       id: 'col-build', name: 'Build', order: 2, role: 'agent',
-      harness: { type: 'codex', model: 'gpt-5.5', effort: 'xhigh', permissions: 'workspace-write' },
+      harness: { type: 'codex', model: 'gpt-5.6-sol', effort: 'xhigh', permissions: 'workspace-write' },
       phasePrompt: 'You are the BUILD phase. Read the plan in the dossier and implement it fully in the workspace. Commit your work with clear messages. If the plan is wrong or blocked, bounce back to Planning with specifics instead of guessing.',
       autoRun: true,
       exitCriteria: 'The plan is implemented, the code runs, and the work log explains what changed and why.',
@@ -227,6 +227,7 @@ function insertSectionBefore(doc, beforeHeading, newBlock) {
 export class Store {
   // Files/dirs Dispatch itself owns inside a ticket dir. Anything else is agent scratch.
   static KNOWN_TICKET_ENTRIES = new Set(['ticket.json', 'DOSSIER.md', 'last-message.txt', 'transcripts', 'runs', 'attachments']);
+  static WORKTREE_PRUNE_NAMES = new Set(['node_modules', 'target', '.next', '.turbo', 'dist', 'build', 'coverage']);
 
   constructor() {
     fs.mkdirSync(TICKETS_DIR, { recursive: true });
@@ -396,6 +397,43 @@ export class Store {
         try { fs.rmSync(path.join(runsDir, r), { recursive: true, force: true }); removed.push(`runs/${r}`); } catch {}
       }
     } catch { /* no runs dir yet */ }
+    return { removed };
+  }
+
+  // Reclaim disposable build/dependency caches inside a ticket's isolated worktree.
+  // Source files and git metadata stay intact; callers must still skip live tickets.
+  pruneTicketWorktree(id) {
+    const root = path.join(this.worktreesRoot(), id);
+    const removed = [];
+    let rootReal;
+    try {
+      rootReal = fs.realpathSync(root);
+    } catch {
+      return { removed };
+    }
+
+    const walk = (dir) => {
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (!e.isDirectory()) continue;
+        if (e.name === '.git') continue;
+        const full = path.join(dir, e.name);
+        if (Store.WORKTREE_PRUNE_NAMES.has(e.name)) {
+          let real;
+          try { real = fs.realpathSync(full); } catch { continue; }
+          if (real === rootReal || !real.startsWith(`${rootReal}${path.sep}`)) continue;
+          try {
+            fs.rmSync(full, { recursive: true, force: true });
+            removed.push(path.relative(root, full));
+          } catch {}
+          continue;
+        }
+        walk(full);
+      }
+    };
+
+    walk(root);
     return { removed };
   }
 

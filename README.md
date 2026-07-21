@@ -221,6 +221,13 @@ ticket modal (and updates the URL), and station `CFG` opens the phase config.
 - `engine/codex.mjs` — Codex execution adapter
 - `public/` — browser app (no build step)
 
+## Design documents
+
+- [`docs/models-registry.md`](docs/models-registry.md) — model discovery, fallback, and freshness
+- [`docs/zero-orphan-runs.md`](docs/zero-orphan-runs.md) — restart-safe run lifecycle proposal
+- [`docs/central-integration-worktree.md`](docs/central-integration-worktree.md) — serialized branch
+  integration and publishing proposal
+
 ## Notes for forks and self-hosting
 
 - Keep secrets out of git and local data.

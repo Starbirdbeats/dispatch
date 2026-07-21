@@ -9,6 +9,7 @@ import {
   extractCodexRateLimitsSnapshot,
   normalizePercent,
   normalizeUsageWindow,
+  usageAuthGapFallback,
 } from '../engine/usage.mjs';
 
 test('normalizePercent treats low percentage values as percentages, not fractions', () => {
@@ -46,6 +47,44 @@ test('buildProviderUsage stores non-error notes separately from errors', () => {
   });
   assert.equal(errorState.error, 'usage API 401');
   assert.equal(errorState.note, undefined);
+});
+
+test('usageAuthGapFallback keeps last known windows and reset times while re-auth is needed', () => {
+  const fallback = usageAuthGapFallback({
+    fiveHour: { usedPct: 62.5, resetsAt: '2026-07-21T13:00:00.000Z' },
+    weekly: { usedPct: 12, resetsAt: '2026-07-26T00:00:00.000Z' },
+    source: 'claude-oauth-usage',
+  }, {
+    at: '2026-07-21T10:00:00.000Z',
+    source: 'claude-cli-auth',
+    staleNote: 'stale until reauth',
+    missingNote: 'missing until reauth',
+  });
+
+  assert.deepEqual(buildProviderUsage({}, fallback), {
+    fiveHour: { usedPct: 62.5, resetsAt: '2026-07-21T13:00:00.000Z' },
+    weekly: { usedPct: 12, resetsAt: '2026-07-26T00:00:00.000Z' },
+    at: '2026-07-21T10:00:00.000Z',
+    source: 'claude-oauth-usage',
+    note: 'stale until reauth',
+  });
+});
+
+test('usageAuthGapFallback reports unavailable when there are no last known windows', () => {
+  const fallback = usageAuthGapFallback({}, {
+    at: '2026-07-21T10:00:00.000Z',
+    source: 'claude-cli-auth',
+    staleNote: 'stale until reauth',
+    missingNote: 'missing until reauth',
+  });
+
+  assert.deepEqual(buildProviderUsage({}, fallback), {
+    fiveHour: null,
+    weekly: null,
+    at: '2026-07-21T10:00:00.000Z',
+    source: 'claude-cli-auth',
+    note: 'missing until reauth',
+  });
 });
 
 test('codexRateLimitWindows classifies windows by duration, not primary/secondary names', () => {

@@ -88,6 +88,30 @@ export function buildProviderUsage(previous = {}, { fiveHour = null, weekly = nu
   };
 }
 
+export function hasUsageWindow(win) {
+  return Boolean(normalizeUsageWindow(win));
+}
+
+export function hasProviderUsageWindows(providerUsage = {}) {
+  return hasUsageWindow(providerUsage.fiveHour) || hasUsageWindow(providerUsage.weekly);
+}
+
+export function usageAuthGapFallback(previous = {}, {
+  at = new Date().toISOString(),
+  source = 'unknown',
+  staleNote = 'Showing last known usage limits until re-authenticated.',
+  missingNote = 'Usage unavailable until re-authenticated.',
+} = {}) {
+  const hasLast = hasProviderUsageWindows(previous);
+  return {
+    fiveHour: previous.fiveHour,
+    weekly: previous.weekly,
+    at,
+    source: hasLast ? (previous.source || source) : source,
+    note: hasLast ? staleNote : missingNote,
+  };
+}
+
 export function setProviderUsage(provider, opts = {}) {
   if (!USAGE[provider]) return false;
   const next = buildProviderUsage(USAGE[provider], opts);

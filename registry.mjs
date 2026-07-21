@@ -78,7 +78,7 @@ export class ClaudeOAuthTokenError extends Error {
 
 export function isClaudeOAuthTokenUnavailable(err) {
   return err instanceof ClaudeOAuthTokenError
-    && [CLAUDE_OAUTH_TOKEN_MISSING, CLAUDE_OAUTH_TOKEN_UNREADABLE].includes(err.code);
+    && [CLAUDE_OAUTH_TOKEN_MISSING, CLAUDE_OAUTH_TOKEN_UNREADABLE, CLAUDE_OAUTH_TOKEN_EXPIRED].includes(err.code);
 }
 
 export function readClaudeOAuthToken() {

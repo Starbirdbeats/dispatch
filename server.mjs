@@ -38,7 +38,7 @@ const [{ Store, DATA_DIR, providerEnabled, enabledProviders }, { Runner }, notif
   import('./registry.mjs'),
 ]);
 const { telegramConfig, sendTelegram, detectChats } = notify;
-const { USAGE, extractCodexRateLimitsSnapshot, loadUsageCache, setProviderUsage, setProviderPlan } = usage;
+const { USAGE, extractCodexRateLimitsSnapshot, loadUsageCache, setProviderUsage, setProviderPlan, usageAuthGapFallback } = usage;
 const { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe, readClaudeOAuthToken, isClaudeOAuthTokenUnavailable } = registry;
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
 
@@ -266,6 +266,16 @@ function refreshProviderPlans() {
   setProviderPlan('codex', readCodexPlan());
 }
 
+function preserveClaudeUsageForAuthGap(at) {
+  const last = USAGE.claude || {};
+  setProviderUsage('claude', usageAuthGapFallback(last, {
+    at,
+    source: 'claude-cli-auth',
+    staleNote: 'Usage refresh needs a readable Claude OAuth token. Showing last known limits until Claude is re-authenticated.',
+    missingNote: 'Usage unavailable until Claude is re-authenticated with a readable OAuth token.',
+  }));
+}
+
 async function probeClaudeUsage() {
   const at = new Date().toISOString();
   try {
@@ -290,13 +300,7 @@ async function probeClaudeUsage() {
     return USAGE.claude;
   } catch (e) {
     if (isClaudeOAuthTokenUnavailable(e)) {
-      setProviderUsage('claude', {
-        fiveHour: null,
-        weekly: null,
-        at,
-        source: 'claude-cli-auth',
-        note: 'Usage unavailable: Claude auth is handled by the CLI, but Dispatch cannot read an OAuth token for account usage.',
-      });
+      preserveClaudeUsageForAuthGap(at);
       return USAGE.claude;
     }
     // transient probe failure (e.g. usage API 429): keep the last-known windows like

@@ -8,6 +8,7 @@ import {
   CLAUDE_OAUTH_TOKEN_EXPIRED,
   CLAUDE_OAUTH_TOKEN_MISSING,
   ClaudeOAuthTokenError,
+  isClaudeOAuthTokenUnavailable,
   probe,
   readClaudeOAuthToken,
 } from '../registry.mjs';
@@ -93,6 +94,7 @@ test('readClaudeOAuthToken reports an expired credentials token separately', asy
       const err = captureThrown(() => readClaudeOAuthToken());
       assert.ok(err instanceof ClaudeOAuthTokenError);
       assert.equal(err.code, CLAUDE_OAUTH_TOKEN_EXPIRED);
+      assert.equal(isClaudeOAuthTokenUnavailable(err), true);
       assert.doesNotMatch(err.message, /expired-token/);
     });
   } finally {

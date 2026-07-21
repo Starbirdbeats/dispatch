@@ -12,7 +12,7 @@
 //                        localhost:1455, so the flow self-completes when the
 //                        browser is on the same host as Dispatch.
 //
-// Session lifecycle: one live session per provider (re-clicking AUTHENTICATE
+// Session lifecycle: one live session per provider (restarting browser sign-in
 // returns the SAME session — the URL embeds a PKCE challenge tied to the process,
 // so spawning a fresh one would invalidate the tab the user already has open).
 // On exit the server's onSettled hook re-probes so the UI flips to AUTHENTICATED.
@@ -23,6 +23,21 @@ export const AUTH_COMMANDS = {
   claude: { cmd: 'claude', args: ['auth', 'login'], label: 'claude auth login', needsCode: true },
   codex: { cmd: 'codex', args: ['login'], label: 'codex login', needsCode: false },
 };
+
+const AUTH_PROVIDER_LABELS = { claude: 'Claude Code', codex: 'Codex' };
+
+export function authLaunchError(type, error) {
+  const def = AUTH_COMMANDS[type];
+  const provider = AUTH_PROVIDER_LABELS[type] || type || 'Provider';
+  const detail = String(error?.message || error || 'command failed');
+  if (/\bENOENT\b|not found/i.test(detail)) {
+    return `${provider} CLI is not installed or is not on PATH — install it in the same environment as Dispatch, restart Dispatch, then RE-CHECK`;
+  }
+  if (/\b(?:EPERM|EACCES)\b|access is denied|permission denied/i.test(detail)) {
+    return `The operating system blocked Dispatch from starting ${provider} — install a standalone CLI in the same environment as Dispatch, restart Dispatch, then RE-CHECK`;
+  }
+  return `Dispatch could not start ${def?.label || provider} — check the CLI installation and PATH, restart Dispatch, then RE-CHECK`;
+}
 
 const LOG_CAP = 8 * 1024; // keep enough output for URL + error tails, never unbounded
 const URL_WAIT_MS = 10_000; // both CLIs print their URL within ~1s; 10s is generous
@@ -38,7 +53,7 @@ function tail(log, n = 240) {
   return clean.length > n ? `…${clean.slice(-n)}` : clean;
 }
 
-export function createAuthSessions({ onSettled, urlWaitMs = URL_WAIT_MS, timeoutMs = SESSION_TIMEOUT_MS } = {}) {
+export function createAuthSessions({ onSettled, urlWaitMs = URL_WAIT_MS, timeoutMs = SESSION_TIMEOUT_MS, spawnProcess = spawn } = {}) {
   const sessions = new Map(); // type -> { proc, url, log, startedAt, timer, cancelled }
   const errors = new Map(); // type -> user-facing message from the LAST failed attempt
 
@@ -69,11 +84,13 @@ export function createAuthSessions({ onSettled, urlWaitMs = URL_WAIT_MS, timeout
     }
 
     errors.delete(type);
-    const session = { proc: null, url: null, log: '', startedAt: new Date().toISOString(), timer: null, cancelled: false };
+    const session = { proc: null, url: null, log: '', startedAt: new Date().toISOString(), timer: null, cancelled: false, spawnError: null };
     try {
-      session.proc = spawn(def.cmd, def.args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      session.proc = spawnProcess(def.cmd, def.args, { stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
-      throw new Error(`could not run ${def.label}: ${e.message}`);
+      const msg = authLaunchError(type, e);
+      errors.set(type, msg);
+      throw new Error(msg);
     }
     sessions.set(type, session);
 
@@ -88,9 +105,8 @@ export function createAuthSessions({ onSettled, urlWaitMs = URL_WAIT_MS, timeout
       // spawn-level failure (ENOENT etc.) — no 'exit' will follow with a code
       if (sessions.get(type) === session) sessions.delete(type);
       clearTimeout(session.timer);
-      const msg = /ENOENT/.test(String(e.message))
-        ? `${def.cmd} CLI not found on PATH — install it on this host, then retry`
-        : `could not run ${def.label}: ${e.message}`;
+      const msg = authLaunchError(type, e);
+      session.spawnError = msg;
       errors.set(type, msg);
       onSettled?.(type, { code: null, error: msg, cancelled: false });
     });
@@ -105,6 +121,7 @@ export function createAuthSessions({ onSettled, urlWaitMs = URL_WAIT_MS, timeout
     // Wait for the CLI to print its auth URL (or die trying).
     const deadline = Date.now() + urlWaitMs;
     while (!session.url && Date.now() < deadline) {
+      if (session.spawnError) throw new Error(session.spawnError);
       if (session.proc.exitCode !== null) {
         throw new Error(errors.get(type) || `${def.label} exited before printing a login URL — ${tail(session.log) || 'no output'}`);
       }
@@ -124,7 +141,7 @@ export function createAuthSessions({ onSettled, urlWaitMs = URL_WAIT_MS, timeout
   function submitCode(type, code) {
     const session = sessions.get(type);
     if (!session || session.proc.exitCode !== null) {
-      throw new Error('no login in progress — click AUTHENTICATE first, then paste the code');
+      throw new Error('no login in progress — select START BROWSER SIGN-IN first, then paste the code');
     }
     const clean = String(code || '').trim();
     if (!clean) throw new Error('paste the code from the browser before submitting');

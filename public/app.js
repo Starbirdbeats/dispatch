@@ -713,9 +713,12 @@ function providerStepState() {
   const enabledTypes = PROVIDER_ORDER.filter((t) => info.providers?.[t]?.enabled !== false);
   // Step 1 — at least one provider is enabled for automation.
   const enable = enabledTypes.length > 0;
-  // Step 2 — every ENABLED + INSTALLED provider is authenticated (disabled ones skipped).
-  const relevant = enabledTypes.filter((t) => info.providers?.[t]?.installed);
-  const auth = enable && relevant.length > 0 && relevant.every((t) => info.providers?.[t]?.authenticated);
+  // Step 2 — every enabled provider must be runnable and authenticated. An enabled CLI
+  // that is missing or blocked is setup work, not a provider we can silently skip.
+  const auth = enable && enabledTypes.length > 0 && enabledTypes.every((t) => {
+    const provider = info.providers?.[t];
+    return Boolean(provider?.installed && provider?.authenticated);
+  });
   // Step 3 — roles assigned + setup marked complete.
   const assign = Boolean(info.completedAt);
   const doneCount = [enable, auth, assign].filter(Boolean).length;
@@ -731,17 +734,45 @@ function stepEnableToggle(type) {
   </label>`;
 }
 
-// One provider row inside Step 2. Three states: authenticated (pill only), sign-in in
+// One provider row inside Step 2. Four states: unavailable, authenticated, sign-in in
 // progress (open-URL / paste-code controls, driven by setup.authPending from the
 // server's in-memory login sessions), or idle (guided browser sign-in + terminal fallback).
 function stepAuthRow(type) {
   const info = setupInfo();
   const st = info.providers?.[type] || {};
-  const label = providerStatusLabel(type).toUpperCase();
+  const displayLabel = providerStatusLabel(type);
+  const label = displayLabel.toUpperCase();
   const authed = Boolean(st.authenticated);
   const pending = !authed ? info.authPending?.[type] : null;
   const lastError = !authed && !pending ? info.authErrors?.[type] : null;
   const cmd = providerCommands(type)[1] || ''; // the subscription login command
+
+  if (!st.installed) {
+    const rawError = String(st.error || lastError || '').trim();
+    const blocked = /\b(?:EPERM|EACCES)\b|access is denied|permission denied/i.test(rawError);
+    const problem = blocked
+      ? `Dispatch found ${esc(displayLabel)}, but the operating system blocked it from running.`
+      : `${esc(displayLabel)} is not available in the same environment as Dispatch.`;
+    const recovery = blocked
+      ? `Install a standalone CLI in the same environment as Dispatch. On Windows, run both in WSL or make a runnable CLI available on PATH. Restart Dispatch, then select RE-CHECK.`
+      : `Install the CLI and make <code>${esc(type)}</code> available on PATH. Restart Dispatch, then select RE-CHECK.`;
+    return `<div class="step-auth blocked" data-provider-auth="${type}">
+      <div class="step-auth-head">
+        <span class="step-dot tone-bad"></span>
+        <span class="step-auth-name">${label}</span>
+        <span class="setup-pill bad">! CLI UNAVAILABLE</span>
+        <button class="btn" data-probe="${type}">↻ RE-CHECK</button>
+      </div>
+      <div class="step-auth-unavailable">
+        <strong>${problem}</strong>
+        <span>${recovery}</span>
+      </div>
+      ${rawError ? `<details class="step-auth-technical">
+        <summary>TECHNICAL DETAILS</summary>
+        <code>${esc(rawError)}</code>
+      </details>` : ''}
+    </div>`;
+  }
 
   if (authed) {
     return `<div class="step-auth" data-provider-auth="${type}">
@@ -878,7 +909,7 @@ function stepperFingerprint() {
   return JSON.stringify([
     PROVIDER_ORDER.map((t) => {
       const p = info.providers?.[t] || {};
-      return [p.enabled, p.installed, p.authenticated, p.authDetail];
+      return [p.enabled, p.installed, p.authenticated, p.authDetail, p.error];
     }),
     Object.keys(info.authPending || {}),
     info.authErrors || {},

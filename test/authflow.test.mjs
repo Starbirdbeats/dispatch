@@ -4,7 +4,7 @@ import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { firstUrl, createAuthSessions } from '../engine/authflow.mjs';
+import { authLaunchError, firstUrl, createAuthSessions } from '../engine/authflow.mjs';
 
 function writeScript(binDir, name, body) {
   fs.mkdirSync(binDir, { recursive: true });
@@ -58,6 +58,19 @@ test('firstUrl extracts the first https URL and ignores noise', () => {
   assert.equal(firstUrl(''), null);
   // stops at whitespace/quotes/brackets, not mid-query
   assert.equal(firstUrl('("https://x.dev/a=1")'), 'https://x.dev/a=1');
+});
+
+test('launch errors turn process codes into actionable setup guidance', async () => {
+  assert.match(authLaunchError('codex', new Error('spawn EPERM')), /operating system blocked Dispatch/i);
+  assert.match(authLaunchError('codex', new Error('spawn EPERM')), /same environment as Dispatch/i);
+  assert.doesNotMatch(authLaunchError('codex', new Error('spawn EPERM')), /EPERM/);
+  assert.match(authLaunchError('claude', new Error('spawn ENOENT')), /not installed or is not on PATH/i);
+
+  const denied = Object.assign(new Error('spawn EPERM'), { code: 'EPERM' });
+  const sessions = createAuthSessions({ spawnProcess: () => { throw denied; } });
+  await assert.rejects(() => sessions.start('codex'), /operating system blocked Dispatch/i);
+  assert.match(sessions.snapshot().errors.codex, /restart Dispatch, then RE-CHECK/i);
+  sessions.disposeAll();
 });
 
 test('claude session: captures URL, forwards code to stdin, settles ok on exit 0', async () => {
@@ -121,7 +134,7 @@ test('codex session: captures URL from STDERR, needsCode=false, cancel kills it'
   } finally { rmSync(bin, { recursive: true, force: true }); }
 });
 
-test('re-clicking AUTHENTICATE returns the same in-flight session (idempotent)', async () => {
+test('restarting browser sign-in returns the same in-flight session (idempotent)', async () => {
   const bin = mkdtempSync(path.join(os.tmpdir(), 'authflow-idem-'));
   try {
     writeScript(bin, 'codex', FAKE_CODEX);

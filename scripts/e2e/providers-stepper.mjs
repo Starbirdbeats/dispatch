@@ -90,6 +90,34 @@ async function dumpFailureState(page, harness, pageErrors) {
     const completeDisabled = await page.$eval('#s-setup-complete', (el) => el.disabled);
     assert.equal(completeDisabled, true, 'MARK SETUP COMPLETE gated while unauthenticated');
 
+    // An enabled but unrunnable CLI is blocked setup work, not an auth-success shortcut.
+    await page.evaluate(() => {
+      S.data.setup.providers.claude.authenticated = true;
+      S.data.setup.providers.codex.installed = false;
+      S.data.setup.providers.codex.authenticated = false;
+      S.data.setup.providers.codex.error = 'spawn EPERM';
+      updateStepperUI();
+    });
+    const unavailable = await page.$eval('[data-provider-auth="codex"]', (el) => ({
+      text: el.textContent || '',
+      hasSignIn: Boolean(el.querySelector('[data-auth="codex"]')),
+      detailsOpen: el.querySelector('.step-auth-technical')?.open,
+    }));
+    assert.ok(unavailable.text.includes('CLI UNAVAILABLE'), unavailable.text);
+    assert.ok(unavailable.text.includes('operating system blocked it from running'), unavailable.text);
+    assert.equal(unavailable.hasSignIn, false, 'unrunnable CLI must not offer browser sign-in');
+    assert.equal(unavailable.detailsOpen, false, 'raw process error should stay collapsed');
+    assert.equal(await page.$eval('#s-setup-complete', (el) => el.disabled), true, 'unavailable enabled provider must block setup completion');
+    const blockedStepClasses = await page.$$eval('.stepper .step-node', (nodes) => nodes.map((node) => node.className));
+    assert.ok(blockedStepClasses[1].includes('active'), 'authentication step should remain active');
+    assert.ok(!blockedStepClasses[1].includes('done'), 'authentication step must not skip an unavailable CLI');
+    const presetsLocked = await page.$eval('.step-title[data-step="3"]', (node) => node.parentElement?.classList.contains('step-locked'));
+    assert.equal(presetsLocked, true, 'presets step should remain locked');
+
+    // Restore the server-backed fake provider state before exercising real auth sessions.
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await openProvidersTab(page);
+
     // ---- claude: full login via one-time code ----------------------------------------
     await page.$eval('.step-auth [data-auth="claude"]', (el) => el.click());
     // pending row appears: open-URL + code input + cancel

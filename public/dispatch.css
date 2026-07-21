@@ -1559,12 +1559,20 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 
 .step-auth { border: 1px solid var(--line); background: var(--bg-1); padding: 9px 11px; margin-bottom: 6px; }
 .step-auth.todo { border-color: var(--amber); }
+.step-auth.blocked { border-color: var(--red); }
 .step-auth-head { display: flex; align-items: center; gap: 10px; }
 .step-auth-name { font-size: 11px; font-weight: 700; flex: 1; }
 .step-auth-head .btn { font-size: 9.5px; padding: 6px 9px; }
 .step-dot { width: 8px; height: 8px; flex: 0 0 8px; display: inline-block; background: var(--fg-faint); }
 .step-dot.tone-ok { background: var(--green); }
 .step-dot.tone-warn { background: var(--amber); }
+.step-dot.tone-bad { background: var(--red); }
+.step-auth-unavailable { display: flex; flex-direction: column; gap: 4px; margin-top: 9px; padding: 9px; background: var(--bg-2); border: 1px solid var(--line); color: var(--fg-dim); font-size: 10px; line-height: 1.45; }
+.step-auth-unavailable strong { color: var(--fg); font-size: 11px; }
+.step-auth-unavailable code { color: var(--fg); font-size: 10px; }
+.step-auth-technical { margin-top: 8px; color: var(--fg-faint); }
+.step-auth-technical summary { width: max-content; font-size: 9px; letter-spacing: 0.06em; cursor: pointer; }
+.step-auth-technical code { display: block; margin-top: 7px; padding: 6px 9px; border: 1px solid var(--line); background: var(--bg-2); color: var(--fg-dim); font-size: 10px; overflow-wrap: anywhere; }
 .step-auth-start,
 .step-auth-progress { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 9px; padding: 9px; background: var(--bg-2); border: 1px solid var(--line); }
 .step-auth-start-copy,

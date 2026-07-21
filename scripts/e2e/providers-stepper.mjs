@@ -1,6 +1,6 @@
 // e2e: Providers → 4C guided stepper + subscription auth flow.
 // Boots with BOTH providers unauthenticated, then drives the real login pipeline against
-// fake CLIs: click AUTHENTICATE → server spawns `claude auth login` / `codex login` →
+// fake CLIs: start browser sign-in → server spawns `claude auth login` / `codex login` →
 // captures the OAuth URL → client exposes it as the pending login link → claude's
 // one-time code is pasted back → the pill flips to AUTHENTICATED without a page reload.
 // window.open is stubbed for the initial blank popup so no real network navigation happens.
@@ -77,8 +77,16 @@ async function dumpFailureState(page, harness, pageErrors) {
     assert.equal(nodeClasses.length, 3);
     assert.ok(nodeClasses[0].includes('done'), 'step 1 enable done (both enabled)');
     assert.ok(nodeClasses[1].includes('active'), 'step 2 authenticate active');
-    assert.ok(await page.$('.step-auth.todo [data-auth="claude"]'), 'claude AUTHENTICATE button missing');
-    assert.ok(await page.$('.step-auth.todo [data-auth="codex"]'), 'codex AUTHENTICATE button missing');
+    assert.ok(await page.$('.step-auth.todo [data-auth="claude"]'), 'claude browser sign-in button missing');
+    assert.ok(await page.$('.step-auth.todo [data-auth="codex"]'), 'codex browser sign-in button missing');
+    const idleAuth = await page.$eval('[data-provider-auth="claude"]', (el) => ({
+      text: el.textContent || '',
+      button: el.querySelector('[data-auth="claude"]')?.textContent || '',
+      manualCommand: el.querySelector('.step-auth-manual code')?.textContent || '',
+    }));
+    assert.ok(idleAuth.text.includes('Dispatch runs claude auth login'), idleAuth.text);
+    assert.ok(idleAuth.button.includes('START BROWSER SIGN-IN'), idleAuth.button);
+    assert.equal(idleAuth.manualCommand.trim(), 'claude auth login');
     const completeDisabled = await page.$eval('#s-setup-complete', (el) => el.disabled);
     assert.equal(completeDisabled, true, 'MARK SETUP COMPLETE gated while unauthenticated');
 
@@ -86,8 +94,10 @@ async function dumpFailureState(page, harness, pageErrors) {
     await page.$eval('.step-auth [data-auth="claude"]', (el) => el.click());
     // pending row appears: open-URL + code input + cancel
     await page.waitForSelector('[data-auth-code-input="claude"]');
-    assert.ok(await page.$('[data-auth-open="claude"]'), 'OPEN LOGIN PAGE missing for claude');
+    assert.ok(await page.$('[data-auth-open="claude"]'), 'OPEN SIGN-IN PAGE missing for claude');
     assert.ok(await page.$('[data-auth-cancel="claude"]'), 'CANCEL missing for claude');
+    const claudePendingHelp = await page.$eval('[data-provider-auth="claude"] .step-auth-progress-copy', (el) => el.textContent || '');
+    assert.ok(claudePendingHelp.includes('one-time code'), claudePendingHelp);
     const claudeHref = await authHref(page, 'claude');
     assert.ok(/^https:\/\/claude\.com\/cai\/oauth/.test(claudeHref), `expected claude auth link, saw: ${JSON.stringify(claudeHref)}`);
 
@@ -102,13 +112,15 @@ async function dumpFailureState(page, harness, pageErrors) {
     // ---- codex: start login, then CANCEL back to idle --------------------------------
     await page.$eval('.step-auth [data-auth="codex"]', (el) => el.click());
     await page.waitForSelector('[data-auth-cancel="codex"]');
-    assert.ok(await page.$('[data-auth-open="codex"]'), 'OPEN LOGIN PAGE missing for codex');
+    assert.ok(await page.$('[data-auth-open="codex"]'), 'OPEN SIGN-IN PAGE missing for codex');
     assert.equal(await page.$('[data-auth-code-input="codex"]'), null, 'codex must NOT show a code input (localhost-callback flow)');
+    const codexPendingHelp = await page.$eval('[data-provider-auth="codex"] .step-auth-progress-copy', (el) => el.textContent || '');
+    assert.ok(codexPendingHelp.includes('updates automatically'), codexPendingHelp);
     const codexHref = await authHref(page, 'codex');
     assert.ok(/^https:\/\/auth\.openai\.com/.test(codexHref), `expected codex auth link, saw: ${JSON.stringify(codexHref)}`);
 
     await page.$eval('[data-auth-cancel="codex"]', (el) => el.click());
-    await page.waitForSelector('.step-auth [data-auth="codex"]'); // back to idle AUTHENTICATE
+    await page.waitForSelector('.step-auth [data-auth="codex"]'); // back to idle browser sign-in
 
     await fs.mkdir(SHOTS, { recursive: true }).catch(() => {});
     await page.screenshot({ path: path.join(SHOTS, 'providers-stepper-authflow.png') });

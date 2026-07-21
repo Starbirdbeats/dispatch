@@ -1565,10 +1565,25 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 .step-dot { width: 8px; height: 8px; flex: 0 0 8px; display: inline-block; background: var(--fg-faint); }
 .step-dot.tone-ok { background: var(--green); }
 .step-dot.tone-warn { background: var(--amber); }
+.step-auth-start,
+.step-auth-progress { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 9px; padding: 9px; background: var(--bg-2); border: 1px solid var(--line); }
+.step-auth-start-copy,
+.step-auth-progress-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 10px; color: var(--fg-dim); line-height: 1.45; }
+.step-auth-start-copy strong,
+.step-auth-progress-copy strong { color: var(--fg); font-size: 11px; }
+.step-auth-start-copy code { color: var(--fg); font-size: 10px; }
+.step-auth-start > .btn,
+.step-auth-progress > .btn { flex: 0 0 auto; white-space: nowrap; }
+.step-auth-manual { margin-top: 8px; }
+.step-auth-manual summary { width: max-content; color: var(--fg-faint); font-size: 9px; letter-spacing: 0.06em; cursor: pointer; }
+.step-auth-manual[open] summary { color: var(--fg-dim); }
 .step-auth-cmd { display: flex; align-items: center; gap: 9px; margin-top: 9px; }
 .step-auth-cmd code { flex: 1; background: var(--bg-2); border: 1px solid var(--line); padding: 6px 9px; font-size: 11px; color: var(--fg); }
 .step-auth-cmd .btn { white-space: nowrap; }
-.step-auth-cmd input.step-code { flex: 1; margin: 0; font-size: 12px; padding: 7px 9px; }
+.step-auth-code-row { display: flex; align-items: flex-end; gap: 9px; margin-top: 9px; }
+.step-auth-code-label { display: flex; flex: 1; flex-direction: column; gap: 4px; color: var(--fg-faint); font-size: 9px; letter-spacing: 0.06em; }
+.step-auth-code-label input.step-code { width: 100%; margin: 0; font-size: 12px; padding: 7px 9px; }
+.step-auth-code-row > .btn { flex: 0 0 auto; white-space: nowrap; }
 .step-auth .hint.bad { margin-top: 7px; text-transform: none; letter-spacing: 0.02em; }
 
 .step-preset { margin-bottom: 6px; }
@@ -1607,8 +1622,14 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
   .step-body.is-done .step-title::before { background: var(--green); content: "✓"; }
   .step-body.is-active .step-title::before { background: var(--amber); }
 
-  .step-auth-cmd { flex-direction: column; align-items: stretch; }
-  .step-auth-cmd .btn { height: 44px; }          /* ≥44px touch targets */
+  .step-auth-start,
+  .step-auth-progress { flex-direction: column; align-items: stretch; }
+  .step-auth-start > .btn,
+  .step-auth-progress > .btn { min-height: 44px; }
+  .step-auth-cmd,
+  .step-auth-code-row { flex-direction: column; align-items: stretch; }
+  .step-auth-cmd .btn,
+  .step-auth-code-row > .btn { height: 44px; }   /* ≥44px touch targets */
   .step-enables { gap: 12px; }
   .stepper-foot { flex-direction: column; align-items: stretch; }
   .stepper-foot .btn { height: 46px; }

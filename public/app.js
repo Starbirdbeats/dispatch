@@ -731,9 +731,9 @@ function stepEnableToggle(type) {
   </label>`;
 }
 
-// One provider row inside Step 2. Three states: authenticated (pill only), login in
+// One provider row inside Step 2. Three states: authenticated (pill only), sign-in in
 // progress (open-URL / paste-code controls, driven by setup.authPending from the
-// server's in-memory login sessions), or idle (command + AUTHENTICATE →).
+// server's in-memory login sessions), or idle (guided browser sign-in + terminal fallback).
 function stepAuthRow(type) {
   const info = setupInfo();
   const st = info.providers?.[type] || {};
@@ -744,7 +744,7 @@ function stepAuthRow(type) {
   const cmd = providerCommands(type)[1] || ''; // the subscription login command
 
   if (authed) {
-    return `<div class="step-auth">
+    return `<div class="step-auth" data-provider-auth="${type}">
       <div class="step-auth-head">
         <span class="step-dot tone-ok"></span>
         <span class="step-auth-name">${label}</span>
@@ -755,41 +755,57 @@ function stepAuthRow(type) {
   }
 
   if (pending) {
-    return `<div class="step-auth todo">
+    const pendingHelp = pending.needsCode
+      ? `<strong>Complete sign-in in the browser.</strong>
+        <span>Then copy the one-time code from the Claude sign-in page and return here.</span>`
+      : `<strong>Complete sign-in in the browser.</strong>
+        <span>Keep Dispatch open — this status updates automatically when you finish.</span>`;
+    return `<div class="step-auth todo" data-provider-auth="${type}">
       <div class="step-auth-head">
         <span class="step-dot tone-warn"></span>
         <span class="step-auth-name">${label}</span>
-        <span class="setup-pill warn">⋯ LOGIN IN PROGRESS</span>
+        <span class="setup-pill warn">⋯ SIGN-IN IN PROGRESS</span>
         <button class="btn" data-auth-cancel="${type}">✕ CANCEL</button>
       </div>
-      <div class="step-auth-cmd">
-        <code>${esc(pending.command || cmd)}</code>
+      <div class="step-auth-progress">
+        <div class="step-auth-progress-copy">${pendingHelp}</div>
         ${pending.url
-          ? `<a class="btn btn-accent" href="${esc(pending.url)}" target="_blank" rel="noopener noreferrer" data-auth-open="${type}">OPEN LOGIN PAGE ↗</a>`
-          : `<button class="btn btn-accent" disabled>OPEN LOGIN PAGE ↗</button>`}
+          ? `<a class="btn btn-accent" href="${esc(pending.url)}" target="_blank" rel="noopener noreferrer" data-auth-open="${type}">OPEN SIGN-IN PAGE ↗</a>`
+          : `<button class="btn btn-accent" disabled>PREPARING SIGN-IN PAGE…</button>`}
       </div>
-      ${pending.needsCode ? `<div class="step-auth-cmd">
-        <input class="step-code" data-auth-code-input="${type}" placeholder="paste the code from the browser" autocomplete="off" spellcheck="false">
+      ${pending.needsCode ? `<div class="step-auth-code-row">
+        <label class="step-auth-code-label">
+          <span>ONE-TIME CODE</span>
+          <input class="step-code" data-auth-code-input="${type}" placeholder="Paste the code from the sign-in page" autocomplete="off" spellcheck="false">
+        </label>
         <button class="btn btn-accent" data-auth-code="${type}">SUBMIT CODE →</button>
-      </div>
-      <div class="hint">sign in with your subscription in the login tab — it shows a one-time code; paste it above.</div>`
-      : `<div class="hint">finish the sign-in in the opened tab (browser on the Dispatch machine) — this row updates by itself.</div>`}
+      </div>` : ''}
     </div>`;
   }
 
-  return `<div class="step-auth todo">
+  return `<div class="step-auth todo" data-provider-auth="${type}">
     <div class="step-auth-head">
       <span class="step-dot tone-warn"></span>
       <span class="step-auth-name">${label}</span>
-      <span class="setup-pill warn">! NOT AUTHENTICATED</span>
+      <span class="setup-pill warn">! SIGN-IN REQUIRED</span>
       <button class="btn" data-probe="${type}">↻ RE-CHECK</button>
     </div>
-    <div class="step-auth-cmd">
-      <code>${esc(cmd)}</code>
-      <button class="btn" data-copy="${type}">COPY</button>
-      <button class="btn btn-accent" data-auth="${type}">AUTHENTICATE →</button>
+    <div class="step-auth-start">
+      <div class="step-auth-start-copy">
+        <strong>Sign in through your browser.</strong>
+        <span>Dispatch runs <code>${esc(cmd)}</code> on this machine and checks the CLI when you finish.</span>
+      </div>
+      <button class="btn btn-accent" data-auth="${type}">START BROWSER SIGN-IN →</button>
     </div>
-    ${lastError ? `<div class="hint bad">${esc(lastError)} — try again, or run \`${esc(cmd)}\` in a terminal, then RE-CHECK</div>` : ''}
+    <details class="step-auth-manual">
+      <summary>USE A TERMINAL INSTEAD</summary>
+      <div class="step-auth-cmd">
+        <code>${esc(cmd)}</code>
+        <button class="btn" data-copy="${type}">COPY COMMAND</button>
+      </div>
+      <div class="hint">Run this on the Dispatch machine, complete sign-in, then select RE-CHECK.</div>
+    </details>
+    ${lastError ? `<div class="hint bad">${esc(lastError)} — start browser sign-in again, or use the terminal option above.</div>` : ''}
   </div>`;
 }
 
@@ -940,7 +956,7 @@ function wireStepperHandlers() {
     });
   }
 
-  // AUTHENTICATE → : start the subscription login on the host, open its URL here.
+  // START BROWSER SIGN-IN → : start the subscription login on the host, open its URL here.
   // The blank tab is opened synchronously (inside the click) so popup blockers allow it,
   // then pointed at the auth URL once the server hands it back.
   for (const btn of document.querySelectorAll('[data-auth]')) {
@@ -955,7 +971,7 @@ function wireStepperHandlers() {
         else if (popup) popup.close();
         await loadState();
         updateStepperUI();
-        if (!popup && r.url) toast('popup blocked — use OPEN LOGIN PAGE ↗ to open the sign-in tab', true);
+        if (!popup && r.url) toast('popup blocked — use OPEN SIGN-IN PAGE ↗ to open the provider tab', true);
         else toast(r.needsCode ? 'login tab opened — sign in, then paste the code below' : `login tab opened — finish the sign-in in the browser on ${r.host}`);
       } catch (e) {
         if (popup) popup.close();

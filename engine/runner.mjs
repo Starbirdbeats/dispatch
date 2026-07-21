@@ -12,6 +12,7 @@ import { applyCodexRateLimits, USAGE } from './usage.mjs';
 import { contextSnapshot } from './limits.mjs';
 import { BranchPrepError, isGitWorkTree, prepareTicketBranch } from './branching.mjs';
 import { REGISTRY } from '../registry.mjs';
+import { DATA_DIR } from '../store.mjs';
 
 const ADAPTERS = { claude, codex };
 const VALID_PERMISSIONS = {
@@ -59,6 +60,26 @@ function readOffset(file) {
 function truncateArg(a) {
   a = String(a);
   return a.length > 500 ? a.slice(0, 500) + '…' : a;
+}
+
+// Every ticket runs in its own worktree, so a per-worktree Cargo target dir means each
+// ticket recompiles the whole dependency graph from scratch (~40GB and tens of minutes on
+// a big Rust workspace) — several at once will exhaust both cores and disk. One shared
+// cache makes the first run cold and every later run warm, and keeps a single copy on
+// disk. Cargo locks the dir, so concurrent Rust runs queue instead of racing — far cheaper
+// than N cold builds. An explicit CARGO_TARGET_DIR in the environment still wins.
+export function sharedCargoTarget() {
+  return process.env.CARGO_TARGET_DIR || path.join(DATA_DIR, 'cargo-target');
+}
+
+function runEnv() {
+  const dir = sharedCargoTarget();
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    return { ...process.env, CARGO_TARGET_DIR: dir };
+  } catch {
+    return process.env;
+  }
 }
 
 function tailFile(file, n = 800) {
@@ -500,7 +521,7 @@ export class Runner {
     if (!fs.existsSync(wrapper)) throw new Error(`wrapper missing: ${wrapper}`);
     const proc = spawn(wrapper, [runDir, '--', inv.cmd, ...inv.args], {
       cwd: inv.cwd || workDir,
-      env: process.env,
+      env: runEnv(),
       detached: true,
       stdio: 'ignore',
     });

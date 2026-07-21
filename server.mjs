@@ -21,6 +21,7 @@ import { AUTH_COMMANDS, createAuthSessions } from './engine/authflow.mjs';
 import { applyUpdateWithStrategy, assessMainDivergence, checkUpdateStatus, createGitRunner, formatGitUpdateError, parseAheadBehind, parseStatusChanges } from './engine/update-status.mjs';
 import { inspectWorkspaceResolution, inspectWorkspaceStatus, resolveWorkspace } from './engine/workspace-resolution.mjs';
 import { removeTicketWorktree } from './engine/branching.mjs';
+import { systemCapacity } from './engine/capacity.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENV_FILE = path.resolve(process.env.DISPATCH_ENV_FILE || path.join(__dirname, '.env'));
@@ -1319,6 +1320,14 @@ app.patch('/api/settings', (req, res) => {
   runner.pump(); // raising the cap (or un-pausing) should drain any queued work immediately
   broadcast({ type: 'state-changed' });
   res.json(store.board.settings);
+});
+
+// What this machine can actually run at once — drives the recommendation under
+// MAX CONCURRENT RUNS. Cheap enough to call on every Settings open; not on every keystroke.
+app.get('/api/system/capacity', (_req, res) => {
+  // Dispatch always points agent runs at one shared Cargo cache (see runner.runEnv),
+  // so only the first build pays the full disk cost.
+  res.json(systemCapacity(store.DATA_DIR || DATA_DIR, { sharedCache: true }));
 });
 
 // refresh the model dropdowns from the providers' official model docs

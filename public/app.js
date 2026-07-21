@@ -3605,6 +3605,51 @@ function transcriptColorControlsHTML(prefs) {
   </div>`;
 }
 
+function capacityGB(n) {
+  if (n == null) return '—';
+  if (!Number.isFinite(Number(n))) return '—';
+  const v = Math.round(Number(n) * 10) / 10;
+  return Number.isInteger(v) ? `${v} GB` : `${v.toFixed(1)} GB`;
+}
+
+function renderCapacityHint(capacity, selectedRuns) {
+  const el = $('#s-capacity');
+  if (!el) return;
+  const n = Math.max(0, Math.min(8, Math.floor(Number(selectedRuns) || 0)));
+  if (!capacity) {
+    el.className = 'hint warn';
+    el.textContent = 'checking machine capacity…';
+    return;
+  }
+  const recommended = Math.max(1, Math.min(8, Number(capacity.recommended) || 1));
+  const limitedBy = String(capacity.limitedBy || 'capacity').toUpperCase();
+  const facts = [
+    `RECOMMENDED: ${recommended}`,
+    `${capacity.cores ?? '—'} CORES`,
+    `${capacityGB(capacity.ramGB)} RAM`,
+    `${capacityGB(capacity.freeGB)} FREE`,
+  ].join(' · ');
+  const overBy = n - recommended;
+  const diskStarved = capacity.limitedBy === 'disk' && capacity.starved;
+  el.className = `hint${diskStarved || overBy >= 2 || (overBy > 0 && capacity.limitedBy === 'disk') ? ' bad' : overBy === 1 ? ' warn' : ''}`;
+  if (diskStarved) {
+    el.textContent = `${facts} — DISK IS THE LIMIT; ${capacityGB(capacity.freeGB)} FREE MAY STALL COLD BUILDS MID-LINK.`;
+  } else if (overBy >= 2) {
+    el.textContent = `${facts} — ${n} CONCURRENT RUNS WILL LIKELY THRASH; ${limitedBy} IS THE LIMIT.`;
+  } else if (overBy === 1) {
+    el.textContent = `${facts} — ONE OVER RECOMMENDED; RUNS MAY SLOW EACH OTHER DOWN.`;
+  } else {
+    el.textContent = `${facts} — SHARED CARGO CACHE ACTIVE.`;
+  }
+}
+
+function renderDiskFree(capacity) {
+  const el = $('#s-disk-free');
+  if (!el || !capacity) return;
+  el.textContent = capacityGB(capacity.freeGB);
+  el.classList.toggle('bad', capacity.freeGB != null && Number(capacity.freeGB) < 10);
+}
+
 function renderSettingsModal() {
   const s = S.data.board.settings;
   const agentCols = cols().filter((c) => c.role === 'agent');
@@ -3620,6 +3665,7 @@ function renderSettingsModal() {
       ${pane('engine', `
       <div class="section-head">ENGINE</div>
       <label class="f">MAX CONCURRENT RUNS <output>${(s.maxConcurrent ?? 2) <= 0 ? 'paused' : ''}</output></label><input id="s-cap" type="number" min="0" max="8" value="${s.maxConcurrent ?? 2}">
+      <div class="hint warn" id="s-capacity" style="margin-top:4px">checking machine capacity…</div>
       <div class="hint" style="margin-top:4px">0 = pause the engine (nothing new runs; queued work waits until you raise it).</div>
       <label class="f">RUN TIMEOUT (MINUTES)</label><input id="s-to" type="number" min="1" value="${s.runTimeoutMin}">
       <label class="f">REVIEW / BOUNCE LIMIT (times a ticket can be sent back before it pauses for you)</label>
@@ -3637,7 +3683,7 @@ function renderSettingsModal() {
       <label class="f">RUN JOURNALS KEPT PER TICKET (older ones pruned)</label>
       <input id="s-keepruns" type="number" min="1" max="50" value="${s.keepRunsPerTicket ?? 5}">
       <div class="disk-row">
-        <span>DATA DIR: <b id="s-usage">…</b></span>
+        <span>DATA DIR: <b id="s-usage">…</b> · VOLUME FREE: <b id="s-disk-free">…</b></span>
         <button class="btn" id="s-prune">[ RECLAIM DISK SPACE ]</button>
       </div>
       <div class="hint">removes agent scratch (stray worktrees, node_modules, clones) from ticket dirs and trims old run journals. skips tickets that are actively running.</div>
@@ -3728,11 +3774,32 @@ function renderSettingsModal() {
   wireWorkspacePicker('s-ws');
   loadSecretsSettings();
   loadSystemPromptSettings();
+  let capacity = null;
+  const capInput = $('#s-cap');
+  const updateCapacity = () => renderCapacityHint(capacity, capInput?.value);
+  capInput?.addEventListener('input', updateCapacity);
+  updateCapacity();
+  api('/api/system/capacity').then((c) => {
+    capacity = c;
+    renderDiskFree(capacity);
+    updateCapacity();
+  }).catch(() => {
+    const el = $('#s-capacity');
+    if (el) {
+      el.className = 'hint warn';
+      el.textContent = 'capacity unavailable — use your own machine limits.';
+    }
+  });
   api('/api/maintenance/usage').then((u) => { const el = $('#s-usage'); if (el) el.textContent = fmtBytes(u.bytes); }).catch(() => {});
   $('#s-open-archive').onclick = () => pushModal({ type: 'archive' });
   guardClick($('#s-prune'), '[ RECLAIMING… ]', () => api('/api/maintenance/prune', 'POST', {}).then((r) => {
     toast(`RECLAIMED ${fmtBytes(r.freedBytes)} · ${r.itemsRemoved} item(s) removed`);
     const el = $('#s-usage'); if (el) el.textContent = fmtBytes(r.after);
+    api('/api/system/capacity').then((c) => {
+      capacity = c;
+      renderDiskFree(capacity);
+      updateCapacity();
+    }).catch(() => {});
   }).catch(alertErr));
   guardClick($('#s-tg-test'), '[ SENDING... ]', () => api('/api/notify/test', 'POST', { chatId: $('#s-tg-chat').value.trim() })
     .then(() => toast('TEST SENT — check your phone'))

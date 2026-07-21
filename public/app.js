@@ -833,15 +833,15 @@ function setupStepperHTML(s) {
       <div class="hint"><button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
     </div>
 
-    <!-- STEP 3 — ASSIGN -->
+    <!-- STEP 3 — PRESETS -->
     <div class="step-rail">${node(3, step3.done, step3.active)}</div>
     <div class="${bodyClass(step3, !st.auth)}">
-      <div class="step-title" data-step="3">03 · Assign roles</div>
-      <div class="step-sub">Preset drives Planning / Build / Review harnesses</div>
+      <div class="step-title" data-step="3">03 · Presets</div>
+      <div class="step-sub">Quickly set Planning / Build / Review harness defaults</div>
       <select id="s-preset" class="step-preset">
-        <option value="both" ${presetVal === 'both' || presetVal === 'manual' ? 'selected' : ''}>Both (planning: Claude, build: Codex)</option>
-        <option value="claude" ${presetVal === 'claude' || presetVal === 'claude only' ? 'selected' : ''}>Claude only</option>
-        <option value="codex" ${presetVal === 'codex' || presetVal === 'codex only' ? 'selected' : ''}>Codex only</option>
+        <option value="both" ${presetVal === 'both' || presetVal === 'manual' ? 'selected' : ''}>Both</option>
+        <option value="claude" ${presetVal === 'claude' || presetVal === 'claude only' ? 'selected' : ''}>Claude</option>
+        <option value="codex" ${presetVal === 'codex' || presetVal === 'codex only' ? 'selected' : ''}>Codex</option>
       </select>
       <button class="btn" id="s-preset-apply">[ APPLY PRESET ]</button>
       <div class="hint">Presets are shortcuts — PHASE DEFAULTS below lets each phase run ANY provider, model &amp; effort.</div>

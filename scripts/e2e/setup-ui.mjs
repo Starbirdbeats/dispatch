@@ -115,6 +115,11 @@ function screenshotsDir() {
     const state = await page.evaluate(async () => (await fetch('/api/setup/status').then((r) => r.json())));
     assert.deepEqual(state.enabledTypes.sort(), ['claude', 'codex'].sort());
 
+    const presetsStep = await page.$eval('[data-step="3"]', (el) => el.textContent || '');
+    assert.ok(presetsStep.includes('Presets'), `expected step 3 to be Presets, saw: ${presetsStep}`);
+    const presetLabels = await page.$$eval('#s-preset option', (options) => options.map((option) => option.textContent?.trim()));
+    assert.deepEqual(presetLabels, ['Both', 'Claude', 'Codex']);
+
     // Apply "Both" baseline and verify phase defaults include registry-backed permissions.
     await pickSetupPreset(page, 'both');
     await page.waitForSelector('[data-pd="col-build:permissions"]');

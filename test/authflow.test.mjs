@@ -4,7 +4,9 @@ import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { authLaunchError, firstUrl, createAuthSessions } from '../engine/authflow.mjs';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { authLaunchError, firstDeviceCode, firstUrl, createAuthSessions } from '../engine/authflow.mjs';
 
 function writeScript(binDir, name, body) {
   fs.mkdirSync(binDir, { recursive: true });
@@ -28,12 +30,11 @@ fi
 exit 1
 `;
 
-// A fake `codex login` that prints the URL on STDERR and blocks (its real self serves a
-// localhost callback); tests cancel it.
+// A fake Codex device login: it prints a browser-independent URL + code, then polls.
 const FAKE_CODEX = `#!/bin/sh
-if [ "$1" = "login" ]; then
-  echo "Starting local login server on http://localhost:1455." 1>&2
-  echo "navigate to https://auth.openai.com/oauth/authorize?client_id=app_x&state=zzz" 1>&2
+if [ "$1" = "login" ] && [ "$2" = "--device-auth" ]; then
+  echo "Open https://auth.openai.com/codex/device" 1>&2
+  echo "Enter this one-time code: TEST-CODE" 1>&2
   sleep 30
 fi
 exit 1
@@ -60,16 +61,53 @@ test('firstUrl extracts the first https URL and ignores noise', () => {
   assert.equal(firstUrl('("https://x.dev/a=1")'), 'https://x.dev/a=1');
 });
 
+test('firstDeviceCode extracts a Codex device code without mistaking other ids', () => {
+  assert.equal(firstDeviceCode('Enter this one-time code:\nABCD-1234'), 'ABCD-1234');
+  assert.equal(firstDeviceCode('version 1.2.3; id 12345678-abcd-1234-abcd-1234567890ab'), null);
+  assert.equal(firstDeviceCode('no device code'), null);
+});
+
+test('codex device session exposes the URL and code as structured state', async () => {
+  let invocation = null;
+  const spawnProcess = (cmd, args) => {
+    invocation = { cmd, args };
+    const proc = new EventEmitter();
+    proc.stdin = new PassThrough();
+    proc.stdout = new PassThrough();
+    proc.stderr = new PassThrough();
+    proc.exitCode = null;
+    proc.kill = () => {
+      if (proc.exitCode === null) {
+        proc.exitCode = 0;
+        queueMicrotask(() => proc.emit('exit', 0));
+      }
+      return true;
+    };
+    queueMicrotask(() => {
+      proc.stderr.write('Open https://auth.openai.com/codex/device\n');
+      proc.stderr.write('Enter this one-time code: ABCD-1234\n');
+    });
+    return proc;
+  };
+  const sessions = createAuthSessions({ spawnProcess, urlWaitMs: 1000 });
+  const started = await sessions.start('codex');
+  assert.deepEqual(invocation, { cmd: 'codex', args: ['login', '--device-auth'] });
+  assert.equal(started.url, 'https://auth.openai.com/codex/device');
+  assert.equal(started.userCode, 'ABCD-1234');
+  assert.equal(sessions.snapshot().pending.codex.userCode, 'ABCD-1234');
+  sessions.cancel('codex');
+  sessions.disposeAll();
+});
+
 test('launch errors turn process codes into actionable setup guidance', async () => {
-  assert.match(authLaunchError('codex', new Error('spawn EPERM')), /operating system blocked Dispatch/i);
-  assert.match(authLaunchError('codex', new Error('spawn EPERM')), /same environment as Dispatch/i);
+  assert.equal(authLaunchError('codex', new Error('spawn EPERM')), 'Codex CLI could not be started');
   assert.doesNotMatch(authLaunchError('codex', new Error('spawn EPERM')), /EPERM/);
-  assert.match(authLaunchError('claude', new Error('spawn ENOENT')), /not installed or is not on PATH/i);
+  assert.equal(authLaunchError('claude', new Error('spawn ENOENT')), 'Claude Code CLI is not installed');
 
   const denied = Object.assign(new Error('spawn EPERM'), { code: 'EPERM' });
   const sessions = createAuthSessions({ spawnProcess: () => { throw denied; } });
-  await assert.rejects(() => sessions.start('codex'), /operating system blocked Dispatch/i);
-  assert.match(sessions.snapshot().errors.codex, /restart Dispatch, then RE-CHECK/i);
+  await assert.rejects(() => sessions.start('codex'), /CLI could not be started/i);
+  assert.equal(sessions.snapshot().errors.codex, 'Codex CLI could not be started');
   sessions.disposeAll();
 });
 
@@ -116,16 +154,19 @@ test('claude session: wrong code exits non-zero and records an error', async () 
   } finally { rmSync(bin, { recursive: true, force: true }); }
 });
 
-test('codex session: captures URL from STDERR, needsCode=false, cancel kills it', async () => {
+test('codex session: captures device URL + code from STDERR, then cancel kills it', async () => {
   const bin = mkdtempSync(path.join(os.tmpdir(), 'authflow-codex-'));
   try {
     writeScript(bin, 'codex', FAKE_CODEX);
     await withPath(bin, async () => {
       const sessions = createAuthSessions({ urlWaitMs: 4000, timeoutMs: 20000 });
       const started = await sessions.start('codex');
-      assert.match(started.url, /^https:\/\/auth\.openai\.com/);
+      assert.equal(started.url, 'https://auth.openai.com/codex/device');
+      assert.equal(started.userCode, 'TEST-CODE');
       assert.equal(started.needsCode, false);
+      assert.equal(started.command, 'codex login --device-auth');
       assert.equal(sessions.snapshot().pending.codex.url, started.url);
+      assert.equal(sessions.snapshot().pending.codex.userCode, 'TEST-CODE');
 
       assert.equal(sessions.cancel('codex'), true);
       assert.deepEqual(sessions.snapshot().pending, {});
@@ -157,7 +198,7 @@ test('start throws a helpful error when the CLI is missing', async () => {
     process.env.PATH = bin;
     try {
       const sessions = createAuthSessions({ urlWaitMs: 2000 });
-      await assert.rejects(() => sessions.start('codex'), /not found|could not run|ENOENT/i);
+      await assert.rejects(() => sessions.start('codex'), /CLI is not installed/i);
       sessions.disposeAll();
     } finally { process.env.PATH = prev; }
   } finally { rmSync(bin, { recursive: true, force: true }); }
@@ -176,7 +217,7 @@ test('session that never prints a URL times out with a run-it-manually message',
     writeScript(bin, 'codex', '#!/bin/sh\nif [ "$1" = "login" ]; then sleep 30; fi\n');
     await withPath(bin, async () => {
       const sessions = createAuthSessions({ urlWaitMs: 800, timeoutMs: 20000 });
-      await assert.rejects(() => sessions.start('codex'), /no login URL|printed no login/i);
+      await assert.rejects(() => sessions.start('codex'), /did not provide a sign-in URL/i);
       assert.deepEqual(sessions.snapshot().pending, {}); // killed, not left dangling
       sessions.disposeAll();
     });

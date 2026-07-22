@@ -1,9 +1,8 @@
 // e2e: Providers → 4C guided stepper + subscription auth flow.
 // Boots with BOTH providers unauthenticated, then drives the real login pipeline against
-// fake CLIs: start browser sign-in → server spawns `claude auth login` / `codex login` →
-// captures the OAuth URL → client exposes it as the pending login link → claude's
-// one-time code is pasted back → the pill flips to AUTHENTICATED without a page reload.
-// window.open is stubbed for the initial blank popup so no real network navigation happens.
+// fake CLIs: start sign-in → server spawns the provider command → client exposes the
+// persistent browser link (plus Codex's device code) → Claude's one-time code is pasted
+// back → the pill flips to READY without a page reload.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -14,25 +13,15 @@ import { startDispatchServer } from './helpers.mjs';
 const SHOTS = path.join(os.tmpdir(), 'dispatch-e2e-shots');
 
 async function openProvidersTab(page) {
+  await page.waitForFunction(async () => {
+    const state = await fetch('/api/state').then((r) => r.json());
+    return state.setup?.probePending === false;
+  });
   await page.waitForSelector('#btn-settings');
   await page.$eval('#btn-settings', (el) => el.click());
   await page.waitForSelector('.tabs [data-tab="providers"]');
   await page.$eval('.tabs [data-tab="providers"]', (el) => el.click());
   await page.waitForSelector('.s-pane[data-pane="providers"].active .stepper');
-}
-
-// Records every window.open (URL arg or later `.location =` assignment) without navigating.
-async function stubWindowOpen(page) {
-  await page.evaluateOnNewDocument(() => {
-    window.__opened = [];
-    window.open = (url) => {
-      const rec = { url: url || null };
-      window.__opened.push(rec);
-      const o = { close() {} };
-      Object.defineProperty(o, 'location', { configurable: true, get() { return rec.url; }, set(v) { rec.url = String(v); } });
-      return o;
-    };
-  });
 }
 
 const authHref = (page, type) => page.$eval(`[data-auth-open="${type}"]`, (el) => el.href);
@@ -49,7 +38,6 @@ async function dumpFailureState(page, harness, pageErrors) {
   } catch (e) { console.error('[diag] setup/status unreachable:', e.message); }
   try {
     console.error('[diag] toast:', JSON.stringify(await page.$eval('#toast', (el) => el.textContent).catch(() => '(none)')));
-    console.error('[diag] opened urls:', JSON.stringify(await page.evaluate(() => (window.__opened || []).map((o) => o.url))));
     const html = await page.$eval('#s-stepper', (el) => el.innerHTML).catch(() => '(no stepper)');
     console.error('[diag] stepper buttons:', JSON.stringify((html.match(/data-(auth|auth-open|auth-cancel|auth-code|probe)="[a-z]+"/g) || [])));
     console.error('[diag] pills:', JSON.stringify((html.match(/setup-pill (ok|warn)">[^<]+/g) || [])));
@@ -65,8 +53,6 @@ async function dumpFailureState(page, harness, pageErrors) {
   const pageErrors = [];
   page.on('pageerror', (e) => pageErrors.push(String(e.message).slice(0, 200)));
   page.on('console', (m) => { if (m.type() === 'error') pageErrors.push(`console: ${String(m.text()).slice(0, 200)}`); });
-  await stubWindowOpen(page);
-
   try {
     // ---- render: both providers unauthenticated, Step 2 active -----------------------
     await page.setViewport({ width: 1100, height: 900 });
@@ -84,14 +70,29 @@ async function dumpFailureState(page, harness, pageErrors) {
       button: el.querySelector('[data-auth="claude"]')?.textContent || '',
       manualCommand: el.querySelector('.step-auth-manual code')?.textContent || '',
     }));
-    assert.ok(idleAuth.text.includes('Dispatch runs claude auth login'), idleAuth.text);
-    assert.ok(idleAuth.button.includes('START BROWSER SIGN-IN'), idleAuth.button);
+    assert.ok(idleAuth.text.includes('Sign in to Claude Code'), idleAuth.text);
+    assert.ok(idleAuth.button.includes('SIGN IN'), idleAuth.button);
     assert.equal(idleAuth.manualCommand.trim(), 'claude auth login');
     const completeDisabled = await page.$eval('#s-setup-complete', (el) => el.disabled);
     assert.equal(completeDisabled, true, 'MARK SETUP COMPLETE gated while unauthenticated');
 
-    // An enabled but unrunnable CLI is blocked setup work, not an auth-success shortcut.
+    // Startup/manual probing is a real state, not a flash of false "CLI missing" copy.
     await page.evaluate(() => {
+      S.data.setup.probePending = true;
+      updateStepperUI();
+    });
+    const checking = await page.$eval('[data-provider-auth="codex"]', (el) => ({
+      text: el.textContent || '',
+      actions: el.querySelectorAll('button:not([disabled]), a').length,
+    }));
+    assert.ok(checking.text.includes('CHECKING'), checking.text);
+    assert.ok(checking.text.includes('Checking this computer for Codex'), checking.text);
+    assert.equal(checking.actions, 0, 'checking state should not offer a conflicting action');
+
+    // An enabled but unrunnable WindowsApps copy resolves to the standalone CLI recipe.
+    await page.evaluate(() => {
+      S.data.setup.probePending = false;
+      S.data.setup.platform = 'win32';
       S.data.setup.providers.claude.authenticated = true;
       S.data.setup.providers.codex.installed = false;
       S.data.setup.providers.codex.authenticated = false;
@@ -102,9 +103,13 @@ async function dumpFailureState(page, harness, pageErrors) {
       text: el.textContent || '',
       hasSignIn: Boolean(el.querySelector('[data-auth="codex"]')),
       detailsOpen: el.querySelector('.step-auth-technical')?.open,
+      installCommand: el.querySelector('.step-auth-setup code')?.textContent || '',
+      primary: el.querySelector('[data-copy-command]')?.textContent || '',
     }));
-    assert.ok(unavailable.text.includes('CLI UNAVAILABLE'), unavailable.text);
-    assert.ok(unavailable.text.includes('operating system blocked it from running'), unavailable.text);
+    assert.ok(unavailable.text.includes('SETUP NEEDED'), unavailable.text);
+    assert.ok(unavailable.text.includes('Codex Desktop and the Codex CLI are separate installs'), unavailable.text);
+    assert.equal(unavailable.installCommand.trim(), 'irm https://chatgpt.com/codex/install.ps1 | iex');
+    assert.ok(unavailable.primary.includes('COPY INSTALL COMMAND'), unavailable.primary);
     assert.equal(unavailable.hasSignIn, false, 'unrunnable CLI must not offer browser sign-in');
     assert.equal(unavailable.detailsOpen, false, 'raw process error should stay collapsed');
     assert.equal(await page.$eval('#s-setup-complete', (el) => el.disabled), true, 'unavailable enabled provider must block setup completion');
@@ -113,6 +118,31 @@ async function dumpFailureState(page, harness, pageErrors) {
     assert.ok(!blockedStepClasses[1].includes('done'), 'authentication step must not skip an unavailable CLI');
     const presetsLocked = await page.$eval('.step-title[data-step="3"]', (node) => node.parentElement?.classList.contains('step-locked'));
     assert.equal(presetsLocked, true, 'presets step should remain locked');
+
+    // A missing CLI uses the same clear recipe without claiming Desktop was detected.
+    await page.evaluate(() => {
+      S.data.setup.providers.codex.error = 'spawn codex ENOENT';
+      updateStepperUI();
+    });
+    const missingText = await page.$eval('[data-provider-auth="codex"]', (el) => el.textContent || '');
+    assert.ok(missingText.includes('Install the Codex command-line tool before signing in'), missingText);
+    assert.ok(!missingText.includes('Codex Desktop and the Codex CLI are separate installs'), missingText);
+
+    // An installed CLI whose login exits gets a retry action; diagnostics stay collapsed.
+    await page.evaluate(() => {
+      S.data.setup.providers.codex.installed = true;
+      S.data.setup.providers.codex.error = null;
+      S.data.setup.authErrors.codex = 'codex login --device-auth exited with code 1 — device auth disabled';
+      updateStepperUI();
+    });
+    const failed = await page.$eval('[data-provider-auth="codex"]', (el) => ({
+      text: el.textContent || '',
+      retry: el.querySelector('[data-auth="codex"]')?.textContent || '',
+      detailsOpen: el.querySelector('.step-auth-technical')?.open,
+    }));
+    assert.ok(failed.text.includes('SIGN-IN FAILED'), failed.text);
+    assert.ok(failed.retry.includes('TRY AGAIN'), failed.retry);
+    assert.equal(failed.detailsOpen, false, 'failed CLI output should stay collapsed');
 
     // Restore the server-backed fake provider state before exercising real auth sessions.
     await page.reload({ waitUntil: 'domcontentloaded' });
@@ -137,18 +167,25 @@ async function dumpFailureState(page, harness, pageErrors) {
       return row && row.querySelector('.setup-pill.ok');
     }, { timeout: 12000 });
 
-    // ---- codex: start login, then CANCEL back to idle --------------------------------
+    // ---- codex: remote-safe device login, then CANCEL back to idle -------------------
     await page.$eval('.step-auth [data-auth="codex"]', (el) => el.click());
     await page.waitForSelector('[data-auth-cancel="codex"]');
     assert.ok(await page.$('[data-auth-open="codex"]'), 'OPEN SIGN-IN PAGE missing for codex');
-    assert.equal(await page.$('[data-auth-code-input="codex"]'), null, 'codex must NOT show a code input (localhost-callback flow)');
+    assert.equal(await page.$('[data-auth-code-input="codex"]'), null, 'Codex code belongs on the provider page, not in Dispatch');
     const codexPendingHelp = await page.$eval('[data-provider-auth="codex"] .step-auth-progress-copy', (el) => el.textContent || '');
     assert.ok(codexPendingHelp.includes('updates automatically'), codexPendingHelp);
     const codexHref = await authHref(page, 'codex');
-    assert.ok(/^https:\/\/auth\.openai\.com/.test(codexHref), `expected codex auth link, saw: ${JSON.stringify(codexHref)}`);
+    assert.equal(codexHref, 'https://auth.openai.com/codex/device');
+    const codexDevice = await page.$eval('[data-provider-auth="codex"]', (el) => ({
+      code: el.querySelector('.step-auth-device-code code')?.textContent || '',
+      action: el.querySelector('[data-auth-open="codex"]')?.textContent || '',
+    }));
+    assert.equal(codexDevice.code.trim(), 'E2E0-CODE');
+    assert.ok(codexDevice.action.includes('COPY CODE & OPEN SIGN-IN'), codexDevice.action);
 
     await page.$eval('[data-auth-cancel="codex"]', (el) => el.click());
     await page.waitForSelector('.step-auth [data-auth="codex"]'); // back to idle browser sign-in
+    assert.equal(await page.$eval('[data-provider-auth="codex"] .step-auth-manual code', (el) => el.textContent.trim()), 'codex login --device-auth');
 
     await fs.mkdir(SHOTS, { recursive: true }).catch(() => {});
     await page.screenshot({ path: path.join(SHOTS, 'providers-stepper-authflow.png') });

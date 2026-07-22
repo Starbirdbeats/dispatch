@@ -698,13 +698,13 @@ function providerCommands(type) {
   }
   return [
     'codex --version',
-    'codex login',
+    'codex login --device-auth',
   ];
 }
 
 /* ---------- Providers → 4C guided stepper (Enable → Authenticate → Assign) ----------
    Pure view layer over setupInfo(). Re-emits the same ids the settings handlers bind to
-   (#s-<type>-enabled, #s-preset, #s-preset-apply, #s-setup-complete, #s-probe, data-probe),
+   (#s-<type>-enabled, #s-preset, #s-preset-apply, #s-setup-complete, data-probe),
    so no wiring changes are needed beyond the new data-auth launch button. */
 
 // Derive the three-step state from the existing setup payload.
@@ -715,7 +715,7 @@ function providerStepState() {
   const enable = enabledTypes.length > 0;
   // Step 2 — every enabled provider must be runnable and authenticated. An enabled CLI
   // that is missing or blocked is setup work, not a provider we can silently skip.
-  const auth = enable && enabledTypes.length > 0 && enabledTypes.every((t) => {
+  const auth = !info.probePending && enable && enabledTypes.length > 0 && enabledTypes.every((t) => {
     const provider = info.providers?.[t];
     return Boolean(provider?.installed && provider?.authenticated);
   });
@@ -723,6 +723,44 @@ function providerStepState() {
   const assign = Boolean(info.completedAt);
   const doneCount = [enable, auth, assign].filter(Boolean).length;
   return { enable, auth, assign, doneCount, enabledTypes };
+}
+
+function providerInstallPlan(type) {
+  const windows = setupInfo().platform === 'win32';
+  if (type === 'claude') {
+    return {
+      shell: windows ? 'PowerShell' : 'a terminal',
+      command: 'npm install -g @anthropic-ai/claude-code',
+      guide: 'https://docs.anthropic.com/en/docs/claude-code/getting-started',
+    };
+  }
+  return {
+    shell: windows ? 'PowerShell' : 'a terminal',
+    command: windows
+      ? 'irm https://chatgpt.com/codex/install.ps1 | iex'
+      : 'curl -fsSL https://chatgpt.com/codex/install.sh | sh',
+    guide: 'https://learn.chatgpt.com/docs/codex/cli',
+  };
+}
+
+function stepAuthTechnical(raw) {
+  const detail = String(raw || '').trim();
+  return detail ? `<details class="step-auth-technical">
+    <summary>TECHNICAL DETAILS</summary>
+    <code>${esc(detail)}</code>
+  </details>` : '';
+}
+
+function stepAuthManual(type, command) {
+  return `<details class="step-auth-manual">
+    <summary>USE A TERMINAL INSTEAD</summary>
+    <div class="step-auth-cmd">
+      <code>${esc(command)}</code>
+      <button class="btn" data-copy-command="${esc(command)}">COPY COMMAND</button>
+      <button class="btn" data-probe="${type}">CHECK AGAIN</button>
+    </div>
+    <div class="hint">Run the command on the Dispatch computer. When it finishes, select CHECK AGAIN.</div>
+  </details>`;
 }
 
 // Enable toggle for Step 1 — keeps the #s-<type>-enabled id the #s-save handler reads.
@@ -734,9 +772,8 @@ function stepEnableToggle(type) {
   </label>`;
 }
 
-// One provider row inside Step 2. Four states: unavailable, authenticated, sign-in in
-// progress (open-URL / paste-code controls, driven by setup.authPending from the
-// server's in-memory login sessions), or idle (guided browser sign-in + terminal fallback).
+// Every provider state has one sentence and one primary action. Raw command output and
+// alternate paths stay behind progressive disclosure.
 function stepAuthRow(type) {
   const info = setupInfo();
   const st = info.providers?.[type] || {};
@@ -745,32 +782,49 @@ function stepAuthRow(type) {
   const authed = Boolean(st.authenticated);
   const pending = !authed ? info.authPending?.[type] : null;
   const lastError = !authed && !pending ? info.authErrors?.[type] : null;
-  const cmd = providerCommands(type)[1] || ''; // the subscription login command
+  const cmd = providerCommands(type)[1] || '';
+
+  if (info.probePending) {
+    return `<div class="step-auth checking" data-provider-auth="${type}" aria-busy="true">
+      <div class="step-auth-head">
+        <span class="step-dot"></span>
+        <span class="step-auth-name">${label}</span>
+        <span class="setup-pill">⋯ CHECKING</span>
+      </div>
+      <div class="step-auth-message"><strong>Checking this computer for ${esc(displayLabel)}…</strong></div>
+    </div>`;
+  }
 
   if (!st.installed) {
     const rawError = String(st.error || lastError || '').trim();
     const blocked = /\b(?:EPERM|EACCES)\b|access is denied|permission denied/i.test(rawError);
-    const problem = blocked
-      ? `Dispatch found ${esc(displayLabel)}, but the operating system blocked it from running.`
-      : `${esc(displayLabel)} is not available in the same environment as Dispatch.`;
-    const recovery = blocked
-      ? `Install a standalone CLI in the same environment as Dispatch. On Windows, run both in WSL or make a runnable CLI available on PATH. Restart Dispatch, then select RE-CHECK.`
-      : `Install the CLI and make <code>${esc(type)}</code> available on PATH. Restart Dispatch, then select RE-CHECK.`;
-    return `<div class="step-auth blocked" data-provider-auth="${type}">
+    const plan = providerInstallPlan(type);
+    const intro = blocked && type === 'codex' && info.platform === 'win32'
+      ? 'Codex Desktop and the Codex CLI are separate installs. Dispatch needs the CLI.'
+      : `Install the ${esc(displayLabel)} command-line tool before signing in.`;
+    return `<div class="step-auth todo" data-provider-auth="${type}">
       <div class="step-auth-head">
-        <span class="step-dot tone-bad"></span>
+        <span class="step-dot tone-warn"></span>
         <span class="step-auth-name">${label}</span>
-        <span class="setup-pill bad">! CLI UNAVAILABLE</span>
-        <button class="btn" data-probe="${type}">↻ RE-CHECK</button>
+        <span class="setup-pill warn">SETUP NEEDED</span>
       </div>
-      <div class="step-auth-unavailable">
-        <strong>${problem}</strong>
-        <span>${recovery}</span>
+      <div class="step-auth-setup">
+        <strong>${intro}</strong>
+        <ol>
+          <li>Open ${plan.shell}.</li>
+          <li>Copy and run this install command.</li>
+        </ol>
+        <div class="step-auth-cmd">
+          <code>${esc(plan.command)}</code>
+          <button class="btn btn-accent" data-copy-command="${esc(plan.command)}">COPY INSTALL COMMAND</button>
+        </div>
+        <div class="step-auth-setup-actions">
+          <a href="${plan.guide}" target="_blank" rel="noopener noreferrer">VIEW INSTALL GUIDE ↗</a>
+          <button class="btn" data-probe="${type}">CHECK AGAIN</button>
+        </div>
+        <div class="hint">When installation finishes, select CHECK AGAIN. Restart Dispatch only if it still is not found.</div>
       </div>
-      ${rawError ? `<details class="step-auth-technical">
-        <summary>TECHNICAL DETAILS</summary>
-        <code>${esc(rawError)}</code>
-      </details>` : ''}
+      ${stepAuthTechnical(rawError)}
     </div>`;
   }
 
@@ -779,38 +833,58 @@ function stepAuthRow(type) {
       <div class="step-auth-head">
         <span class="step-dot tone-ok"></span>
         <span class="step-auth-name">${label}</span>
-        <span class="setup-pill ok">✓ AUTHENTICATED</span>
-        <button class="btn" data-probe="${type}">↻ RE-CHECK</button>
+        <span class="setup-pill ok">✓ READY</span>
+        <button class="btn" data-probe="${type}">CHECK AGAIN</button>
       </div>
+      <div class="step-auth-message"><strong>Signed in and ready to use.</strong></div>
     </div>`;
   }
 
   if (pending) {
-    const pendingHelp = pending.needsCode
-      ? `<strong>Complete sign-in in the browser.</strong>
-        <span>Then copy the one-time code from the Claude sign-in page and return here.</span>`
-      : `<strong>Complete sign-in in the browser.</strong>
-        <span>Keep Dispatch open — this status updates automatically when you finish.</span>`;
+    const ready = Boolean(pending.url && (type !== 'codex' || pending.userCode));
+    const pendingHelp = type === 'claude'
+      ? `<strong>Finish signing in on the provider page.</strong><span>Then paste the one-time code it gives you below.</span>`
+      : `<strong>Paste this code on the Codex sign-in page.</strong><span>Dispatch updates automatically when you finish.</span>`;
     return `<div class="step-auth todo" data-provider-auth="${type}">
       <div class="step-auth-head">
         <span class="step-dot tone-warn"></span>
         <span class="step-auth-name">${label}</span>
-        <span class="setup-pill warn">⋯ SIGN-IN IN PROGRESS</span>
-        <button class="btn" data-auth-cancel="${type}">✕ CANCEL</button>
+        <span class="setup-pill warn">${ready ? 'FINISH IN BROWSER' : '⋯ OPENING SIGN-IN'}</span>
+        <button class="btn" data-auth-cancel="${type}">CANCEL</button>
       </div>
       <div class="step-auth-progress">
-        <div class="step-auth-progress-copy">${pendingHelp}</div>
-        ${pending.url
-          ? `<a class="btn btn-accent" href="${esc(pending.url)}" target="_blank" rel="noopener noreferrer" data-auth-open="${type}">OPEN SIGN-IN PAGE ↗</a>`
-          : `<button class="btn btn-accent" disabled>PREPARING SIGN-IN PAGE…</button>`}
+        <div class="step-auth-progress-copy">${ready ? pendingHelp : `<strong>Preparing secure sign-in…</strong><span>This normally takes a few seconds.</span>`}</div>
+        ${ready
+          ? `<a class="btn btn-accent" href="${esc(pending.url)}" target="_blank" rel="noopener noreferrer" data-auth-open="${type}">${type === 'codex' ? 'COPY CODE &amp; OPEN SIGN-IN →' : 'OPEN SIGN-IN PAGE →'}</a>`
+          : `<button class="btn btn-accent" disabled>PLEASE WAIT…</button>`}
       </div>
+      ${type === 'codex' && pending.userCode ? `<div class="step-auth-device-code"><span>YOUR CODE</span><code>${esc(pending.userCode)}</code></div>` : ''}
       ${pending.needsCode ? `<div class="step-auth-code-row">
         <label class="step-auth-code-label">
           <span>ONE-TIME CODE</span>
           <input class="step-code" data-auth-code-input="${type}" placeholder="Paste the code from the sign-in page" autocomplete="off" spellcheck="false">
         </label>
-        <button class="btn btn-accent" data-auth-code="${type}">SUBMIT CODE →</button>
+        <button class="btn btn-accent" data-auth-code="${type}">VERIFY CODE →</button>
       </div>` : ''}
+    </div>`;
+  }
+
+  if (lastError) {
+    return `<div class="step-auth failed" data-provider-auth="${type}">
+      <div class="step-auth-head">
+        <span class="step-dot tone-bad"></span>
+        <span class="step-auth-name">${label}</span>
+        <span class="setup-pill bad">SIGN-IN FAILED</span>
+      </div>
+      <div class="step-auth-start">
+        <div class="step-auth-start-copy">
+          <strong>Sign-in did not finish.</strong>
+          <span>Try again. If it fails twice, use the terminal option below.</span>
+        </div>
+        <button class="btn btn-accent" data-auth="${type}">TRY AGAIN →</button>
+      </div>
+      ${stepAuthManual(type, cmd)}
+      ${stepAuthTechnical(lastError)}
     </div>`;
   }
 
@@ -818,25 +892,16 @@ function stepAuthRow(type) {
     <div class="step-auth-head">
       <span class="step-dot tone-warn"></span>
       <span class="step-auth-name">${label}</span>
-      <span class="setup-pill warn">! SIGN-IN REQUIRED</span>
-      <button class="btn" data-probe="${type}">↻ RE-CHECK</button>
+      <span class="setup-pill warn">SIGN-IN NEEDED</span>
     </div>
     <div class="step-auth-start">
       <div class="step-auth-start-copy">
-        <strong>Sign in through your browser.</strong>
-        <span>Dispatch runs <code>${esc(cmd)}</code> on this machine and checks the CLI when you finish.</span>
+        <strong>Sign in to ${esc(displayLabel)}.</strong>
+        <span>Dispatch will prepare a secure browser sign-in.</span>
       </div>
-      <button class="btn btn-accent" data-auth="${type}">START BROWSER SIGN-IN →</button>
+      <button class="btn btn-accent" data-auth="${type}">SIGN IN →</button>
     </div>
-    <details class="step-auth-manual">
-      <summary>USE A TERMINAL INSTEAD</summary>
-      <div class="step-auth-cmd">
-        <code>${esc(cmd)}</code>
-        <button class="btn" data-copy="${type}">COPY COMMAND</button>
-      </div>
-      <div class="hint">Run this on the Dispatch machine, complete sign-in, then select RE-CHECK.</div>
-    </details>
-    ${lastError ? `<div class="hint bad">${esc(lastError)} — start browser sign-in again, or use the terminal option above.</div>` : ''}
+    ${stepAuthManual(type, cmd)}
   </div>`;
 }
 
@@ -877,7 +942,6 @@ function setupStepperHTML(s) {
       <div class="step-title" data-step="2">02 · Authenticate ${step2.active ? '<span class="step-flag">IN PROGRESS</span>' : ''}</div>
       <div class="step-sub">${authedCount} of ${st.enabledTypes.length} authenticated</div>
       ${st.enabledTypes.map(stepAuthRow).join('')}
-      <div class="hint"><button class="btn" id="s-probe" style="padding:2px 6px">[ re-probe CLIs ]</button></div>
     </div>
 
     <!-- STEP 3 — PRESETS -->
@@ -907,11 +971,14 @@ function setupStepperHTML(s) {
 function stepperFingerprint() {
   const info = setupInfo();
   return JSON.stringify([
+    info.platform,
+    info.probePending,
+    info.probedAt,
     PROVIDER_ORDER.map((t) => {
       const p = info.providers?.[t] || {};
       return [p.enabled, p.installed, p.authenticated, p.authDetail, p.error];
     }),
-    Object.keys(info.authPending || {}),
+    info.authPending || {},
     info.authErrors || {},
     info.completedAt,
   ]);
@@ -965,10 +1032,7 @@ function wireStepperHandlers() {
   syncAuthPolling();
   for (const type of PROVIDER_ORDER) {
     const probeBtn = document.querySelector(`[data-probe="${type}"]`);
-    const copyBtn = document.querySelector(`[data-copy="${type}"]`);
-    const firstCmd = providerCommands(type)[1] || '';
-    // Both providers' RE-CHECK (and the settings [ RE-CHECK CLIS ]) hit /api/probe, which
-    // probes everything at once — so they share one key and lock together.
+    // A provider's CHECK AGAIN refreshes both cards so their status stays consistent.
     guardClick(probeBtn, '[ CHECKING… ]', async () => {
       try {
         await api('/api/probe', 'POST', {});
@@ -977,52 +1041,44 @@ function wireStepperHandlers() {
         toast('CLI STATUS REFRESHED');
       } catch (e) { alertErr(e); }
     }, 'probe');
-    copyBtn?.addEventListener('click', async () => {
+  }
+  for (const copyBtn of document.querySelectorAll('[data-copy-command]')) {
+    copyBtn.addEventListener('click', async () => {
+      const command = copyBtn.dataset.copyCommand || '';
       try {
-        await navigator.clipboard?.writeText(firstCmd || '');
+        await navigator.clipboard?.writeText(command);
         toast('copied to clipboard');
       } catch {
-        prompt('copy this command', firstCmd || '');
+        prompt('copy this command', command);
       }
     });
   }
 
-  // START BROWSER SIGN-IN → : start the subscription login on the host, open its URL here.
-  // The blank tab is opened synchronously (inside the click) so popup blockers allow it,
-  // then pointed at the auth URL once the server hands it back.
+  // SIGN IN starts the CLI session first. The next state presents a persistent real link,
+  // avoiding popup blockers and making Codex's device code visible before the page opens.
   for (const btn of document.querySelectorAll('[data-auth]')) {
     const type = btn.dataset.auth;
     guardClick(btn, '[ STARTING… ]', async () => {
-      // window.open must run synchronously inside the gesture or popup blockers swallow it —
-      // guardClick invokes fn synchronously up to its first await, so this is still in-gesture.
-      const popup = window.open('', '_blank');
       try {
         const r = await api('/api/setup/auth', 'POST', { type });
-        if (popup && r.url) popup.location = r.url;
-        else if (popup) popup.close();
         await loadState();
         updateStepperUI();
-        if (!popup && r.url) toast('popup blocked — use OPEN SIGN-IN PAGE ↗ to open the provider tab', true);
-        else toast(r.needsCode ? 'login tab opened — sign in, then paste the code below' : `login tab opened — finish the sign-in in the browser on ${r.host}`);
+        toast(r.userCode ? 'sign-in ready — copy the code and open the sign-in page' : 'sign-in ready — open the provider page');
       } catch (e) {
-        if (popup) popup.close();
         await loadState().catch(() => {});
         updateStepperUI();
         alertErr(e);
       }
     }, `auth:${type}`);
   }
-  // OPEN LOGIN PAGE ↗ : a real <a target="_blank"> so the browser opens the tab natively.
-  // window.open() gets silently swallowed in mobile / in-app / popup-blocked browsers (the
-  // "nothing happens" bug); a genuine anchor click is honored where window.open isn't. The
-  // href already carries the URL — this handler only copies it as a backup (best-effort;
-  // navigator.clipboard is absent over plain http) and never preventDefaults the open.
+  // Codex device auth needs the displayed code pasted into the provider page. A single
+  // real link click copies that code and opens the page; Claude needs only the page.
   for (const link of document.querySelectorAll('a[data-auth-open]')) {
     link.addEventListener('click', () => {
-      const url = setupInfo().authPending?.[link.dataset.authOpen]?.url;
-      if (!url) return;
-      const copied = navigator.clipboard?.writeText(url);
-      if (copied) copied.then(() => toast('opening login page — link copied as a backup')).catch(() => {});
+      const pending = setupInfo().authPending?.[link.dataset.authOpen];
+      if (!pending?.userCode) return;
+      const copied = navigator.clipboard?.writeText(pending.userCode);
+      if (copied) copied.then(() => toast('device code copied — paste it on the sign-in page')).catch(() => {});
     });
   }
   // SUBMIT CODE → : forward the one-time code to the CLI's stdin (claude flow).
@@ -1068,7 +1124,6 @@ function wireStepperHandlers() {
       toast('SETUP MARKED COMPLETE');
     } catch (e) { alertErr(e); }
   }, 'setup-complete');
-  if ($('#s-probe')) guardClick($('#s-probe'), '[ CHECKING… ]', () => api('/api/probe', 'POST', {}).catch(alertErr), 'probe');
 }
 
 function usageStripHTML() {

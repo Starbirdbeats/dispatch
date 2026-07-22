@@ -6,7 +6,7 @@
   "scripts": {
     "test": "node --test",
     "start": "node server.mjs",
-    "test:e2e": "node scripts/e2e/setup-ui.mjs && node scripts/e2e/providers-stepper.mjs && node scripts/e2e/url-routing.mjs && node scripts/e2e/board-responsive.mjs && node scripts/e2e/transcript-formatting.mjs && node scripts/e2e/archive-delete.mjs && node scripts/e2e/usage-refresh.mjs && node scripts/e2e/wake-now.mjs && node scripts/e2e/atomic-buttons.mjs && node scripts/e2e/update-resolve.mjs",
+    "test:e2e": "node scripts/e2e/setup-ui.mjs && node scripts/e2e/providers-ux-states.mjs && node scripts/e2e/providers-stepper.mjs && node scripts/e2e/url-routing.mjs && node scripts/e2e/board-responsive.mjs && node scripts/e2e/transcript-formatting.mjs && node scripts/e2e/archive-delete.mjs && node scripts/e2e/usage-refresh.mjs && node scripts/e2e/wake-now.mjs && node scripts/e2e/atomic-buttons.mjs && node scripts/e2e/update-resolve.mjs",
     "screenshots": "node scripts/e2e/capture-readme-screenshots.mjs"
   },
   "keywords": [],

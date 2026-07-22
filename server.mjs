@@ -52,9 +52,11 @@ let health = {
   claude: { ok: false, installed: false, authenticated: false, version: null, authDetail: '', error: null },
   codex: { ok: false, installed: false, authenticated: false, version: null, authDetail: '', error: null },
 };
+let providerProbePending = true;
+let providerProbedAt = null;
+let providerProbeInFlight = null;
 let updateStatus = { behind: 0, ahead: 0, branch: null, error: null, checkedAt: null };
 let updateCheckInFlight = false;
-probe().then((h) => { health = h; broadcast({ type: 'state-changed' }); });
 
 // Keep setup status consistent across state refreshes and settings screens.
 function setupStatus() {
@@ -78,6 +80,9 @@ function setupStatus() {
   return {
     providers,
     enabledTypes: enabledProviders(settings),
+    platform: process.platform,
+    probePending: providerProbePending,
+    probedAt: providerProbedAt,
     completedAt: settings.setup?.completedAt || null,
     lastPreset: settings.setup?.lastPreset || 'manual',
     authPending: auth.pending,
@@ -197,6 +202,30 @@ function broadcast(msg) {
   const data = JSON.stringify(msg);
   for (const c of wss.clients) if (c.readyState === 1) c.send(data);
 }
+
+// One shared provider probe prevents startup/re-check/auth-completion probes from
+// racing and gives the UI a real CHECKING state instead of briefly claiming that
+// both CLIs are missing while the first probe is still running.
+function refreshProviderHealth({ includeUsage = false } = {}) {
+  if (providerProbeInFlight) return providerProbeInFlight;
+  providerProbePending = true;
+  broadcast({ type: 'state-changed' });
+  providerProbeInFlight = (async () => {
+    const tasks = [probe()];
+    if (includeUsage) tasks.push(probeClaudeUsage(), probeCodexUsage());
+    const [nextHealth] = await Promise.all(tasks);
+    health = nextHealth;
+    providerProbedAt = new Date().toISOString();
+    return health;
+  })().finally(() => {
+    providerProbePending = false;
+    providerProbeInFlight = null;
+    broadcast({ type: 'state-changed' });
+  });
+  return providerProbeInFlight;
+}
+
+refreshProviderHealth().catch(() => { /* provider errors are captured in the health payload */ });
 
 const runner = new Runner(store, broadcast);
 const git = createGitRunner(__dirname);
@@ -682,10 +711,7 @@ app.get('/api/state', (_req, res) => {
 
 app.post('/api/probe', async (_req, res) => {
   refreshProviderPlans();
-  const [nextHealth] = await Promise.all([probe(), probeClaudeUsage(), probeCodexUsage()]);
-  health = nextHealth;
-  broadcast({ type: 'state-changed' });
-  res.json(health);
+  res.json(await refreshProviderHealth({ includeUsage: true }));
 });
 
 // On-demand usage re-probe (clicking a provider in the usage strip). Scoped to one
@@ -763,8 +789,7 @@ const authSessions = createAuthSessions({
     // Flip auth state fast: re-probe the CLIs and broadcast immediately so the pill
     // updates. Usage meters (network calls) refresh out-of-band — the auth flip must not
     // wait on them.
-    try { health = await probe(); } catch { /* keep prior health; pending row still clears */ }
-    broadcast({ type: 'state-changed' });
+    try { await refreshProviderHealth(); } catch { /* keep prior health; pending row still clears */ }
     refreshProviderPlans();
     Promise.all([probeClaudeUsage(), probeCodexUsage()])
       .then(() => broadcast({ type: 'state-changed' }))

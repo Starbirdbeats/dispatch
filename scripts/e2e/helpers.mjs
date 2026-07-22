@@ -97,12 +97,11 @@ if [ "$1" = "login" ] && [ "$2" = "status" ]; then
   exit 0
 fi
 
-# Subscription login: print the auth URL to STDERR (as real codex-cli does) then block on
-# the localhost callback. e2e drives the pending → cancel path; a marker file lets a test
-# simulate success out-of-band.
-if [ "$1" = "login" ]; then
-  echo "Starting local login server on http://localhost:1455." 1>&2
-  echo "navigate to https://auth.openai.com/oauth/authorize?client_id=fake-e2e&state=e2e" 1>&2
+# Subscription device login: print the remote-safe URL and one-time code, then poll.
+# e2e drives the pending → cancel path.
+if [ "$1" = "login" ] && [ "$2" = "--device-auth" ]; then
+  echo "Open https://auth.openai.com/codex/device" 1>&2
+  echo "Enter this one-time code: E2E0-CODE" 1>&2
   sleep 120
   exit 0
 fi

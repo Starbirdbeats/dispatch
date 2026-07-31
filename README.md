@@ -46,6 +46,8 @@ Then edit:
 Optional:
 
 - `DISPATCH_PUBLIC_URL` (for Telegram links)
+- `DISPATCH_GRAFT=0` to disable automatic code indexing
+- `DISPATCH_GRAFT_TIMEOUT_SEC` to change the 120-second indexing limit
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
 
 `.env` is not committed and is loaded from the app’s working directory.
@@ -109,6 +111,30 @@ through the CLI/keyring even when Dispatch cannot read an OAuth token for Anthro
 usage APIs; in that case the usage meters show unavailable rather than treating Claude as
 logged out. Set `CLAUDE_CODE_OAUTH_TOKEN` only if you intentionally want Dispatch to use a
 readable Claude OAuth token for usage/model enrichment.
+
+## Automatic Graft indexing
+
+Dispatch automatically builds a [Graft](https://github.com/nanonets/graft) structural code
+graph before each agent phase. Claude and Codex receive the graph as an ephemeral MCP server,
+so they can orient themselves, find code, inspect compact file APIs, and trace dependencies
+without repeatedly reading whole files. Graft refreshes incrementally, including against
+uncommitted edits.
+
+No setup, API key, or network call is required. Dispatch uses only Graft's deterministic
+tree-sitter layer—never its LLM-backed deep build—and uses the lockfile-installed package
+rather than `npx` or a global binary. Current structural coverage is JavaScript/TypeScript,
+Python, and Go. Other repositories continue through the normal agent tools.
+
+Each graph lives under `DISPATCH_DATA/tickets/<ticket-id>/graft`, separate from the ticket's
+Git worktree. Dispatch does not run `graft init` and does not add `graft/`, `.gitignore`,
+agent instructions, hooks, or MCP settings to the target repo or user profile. The cache
+persists across Planning, Build, and Review, is preserved by maintenance pruning, and is
+removed with its ticket. If `DISPATCH_DATA` is nested inside the repository being worked on,
+Dispatch skips Graft for that ticket rather than allowing generated files to touch the repo.
+
+Index failures and timeouts are fail-open: diagnostics are written into the run journal and
+the provider starts normally. Set `DISPATCH_GRAFT=0` to opt out, or
+`DISPATCH_GRAFT_TIMEOUT_SEC` to change the default 120-second preflight limit.
 
 ## Data and secrets
 
@@ -217,6 +243,7 @@ ticket modal (and updates the URL), and station `CFG` opens the phase config.
 - `store.mjs` — board, ticket, and settings persistence
 - `registry.mjs` — model registry and CLI probing
 - `engine/runner.mjs` — queueing and run lifecycle
+- `engine/graft.mjs` — isolated per-ticket code indexing + MCP runtime
 - `engine/claude.mjs` — Claude execution adapter
 - `engine/codex.mjs` — Codex execution adapter
 - `public/` — browser app (no build step)

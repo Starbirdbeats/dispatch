@@ -4,8 +4,9 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { CLAUDE_CONTEXT_WINDOW } from './limits.mjs';
+import { GRAFT_MCP_TOOLS } from './graft.mjs';
 
-export function buildInvocation({ prompt, harness, sessionId, dataDir }) {
+export function buildInvocation({ prompt, harness, sessionId, dataDir, graft = null }) {
   // project,local only: user-level settings would fire Marcello's global hooks
   // (Telegram stop-notifications etc.) on every dispatch run.
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--setting-sources', 'project,local'];
@@ -17,10 +18,20 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir }) {
   } else if (harness.permissions) {
     args.push('--permission-mode', harness.permissions);
   }
-  const allowedTools = buildAllowedTools(harness, dataDir);
+  const allowedTools = buildAllowedTools(harness, dataDir, graft);
   if (allowedTools) args.push('--allowedTools', allowedTools);
   if (harness.chrome) args.push('--chrome');
   args.push('--add-dir', dataDir);
+  if (graft?.enabled) {
+    args.push('--mcp-config', JSON.stringify({
+      mcpServers: {
+        graft: {
+          command: graft.mcp.command,
+          args: graft.mcp.args,
+        },
+      },
+    }));
+  }
 
   let newSessionId = null;
   if (sessionId) {
@@ -33,8 +44,11 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir }) {
   return { cmd: 'claude', args, newSessionId };
 }
 
-function buildAllowedTools(harness, dataDir) {
+function buildAllowedTools(harness, dataDir, graft) {
   const dataPattern = dataDir ? absoluteClaudePathPattern(dataDir) : null;
+  const graftTools = graft?.enabled
+    ? GRAFT_MCP_TOOLS.map((tool) => `mcp__graft__${tool}`)
+    : [];
   if (harness.readOnly && dataPattern) {
     return [
       'Read',
@@ -43,6 +57,7 @@ function buildAllowedTools(harness, dataDir) {
       'LS',
       `Write(${dataPattern}/**)`,
       `Edit(${dataPattern}/**)`,
+      ...graftTools,
     ].join(' ');
   }
   const configured = harness.allowedTools?.trim();
@@ -52,6 +67,12 @@ function buildAllowedTools(harness, dataDir) {
   // update can never happen.
   if (harness.permissions === 'manual' && dataPattern) {
     rules.push(`Write(${dataPattern}/**)`, `Edit(${dataPattern}/**)`);
+  }
+  // --allowedTools is only emitted for an unrestricted invocation when the
+  // user already configured a list. This avoids accidentally turning Graft on
+  // into a global tool restriction.
+  if (graftTools.length && (configured || harness.permissions === 'manual')) {
+    rules.push(...graftTools);
   }
   return rules.join(' ').trim();
 }

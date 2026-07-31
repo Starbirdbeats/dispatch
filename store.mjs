@@ -226,7 +226,7 @@ function insertSectionBefore(doc, beforeHeading, newBlock) {
 
 export class Store {
   // Files/dirs Dispatch itself owns inside a ticket dir. Anything else is agent scratch.
-  static KNOWN_TICKET_ENTRIES = new Set(['ticket.json', 'DOSSIER.md', 'last-message.txt', 'transcripts', 'runs', 'attachments']);
+  static KNOWN_TICKET_ENTRIES = new Set(['ticket.json', 'DOSSIER.md', 'last-message.txt', 'transcripts', 'runs', 'attachments', 'graft']);
   static WORKTREE_PRUNE_NAMES = new Set(['node_modules', 'target', '.next', '.turbo', 'dist', 'build', 'coverage']);
 
   constructor() {
@@ -279,6 +279,9 @@ export class Store {
   ticketDir(id) { return path.join(TICKETS_DIR, id); }
   // Per-ticket git worktrees live here (one dir per ticket id), outside every repo.
   worktreesRoot() { return path.join(DATA_DIR, 'worktrees'); }
+  // Graft is a generated, per-ticket code graph. Keeping it outside the worktree
+  // avoids dirtying customer repos and keeps concurrent ticket branches isolated.
+  graftDir(id) { return path.join(this.ticketDir(id), 'graft'); }
   dossierPath(id) { return path.join(this.ticketDir(id), 'DOSSIER.md'); }
   transcriptsDir(id) { return path.join(this.ticketDir(id), 'transcripts'); }
   runDir(id, runId) {

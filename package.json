@@ -17,6 +17,7 @@
     "puppeteer": "^24.15.0"
   },
   "dependencies": {
+    "@nanonets/graft": "^0.8.2",
     "express": "^5.2.1",
     "ws": "^8.21.0"
   }

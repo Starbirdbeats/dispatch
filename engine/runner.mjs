@@ -11,6 +11,7 @@ import { telegramConfig, sendTelegram, renderMessage } from './notify.mjs';
 import { applyCodexRateLimits, USAGE } from './usage.mjs';
 import { contextSnapshot } from './limits.mjs';
 import { BranchPrepError, isGitWorkTree, prepareTicketBranch } from './branching.mjs';
+import { applyGraftEnv, buildGraftRuntime } from './graft.mjs';
 import { REGISTRY } from '../registry.mjs';
 import { DATA_DIR } from '../store.mjs';
 
@@ -72,14 +73,14 @@ export function sharedCargoTarget() {
   return process.env.CARGO_TARGET_DIR || path.join(DATA_DIR, 'cargo-target');
 }
 
-function runEnv() {
+export function runEnv(graft = null) {
+  const env = { ...process.env };
   const dir = sharedCargoTarget();
   try {
     fs.mkdirSync(dir, { recursive: true });
-    return { ...process.env, CARGO_TARGET_DIR: dir };
-  } catch {
-    return process.env;
-  }
+    env.CARGO_TARGET_DIR = dir;
+  } catch { /* a missing Cargo cache must not block unrelated runs */ }
+  return applyGraftEnv(env, graft);
 }
 
 function tailFile(file, n = 800) {
@@ -485,6 +486,11 @@ export class Runner {
     }
 
     const dataDir = store.ticketDir(ticketId);
+    const graft = buildGraftRuntime({
+      workDir,
+      dataDir,
+      graphDir: typeof store.graftDir === 'function' ? store.graftDir(ticketId) : undefined,
+    });
     let sessionId = ticket.sessions[harness.type];
     // Never resume a session minted in a different directory: claude can't find it from a
     // new cwd, and either harness would carry stale absolute paths from the old checkout
@@ -505,9 +511,10 @@ export class Runner {
       recentActivity,
       resume: Boolean(sessionId),
       workDir,
+      graft,
     });
 
-    const inv = adapter.buildInvocation({ prompt, harness, sessionId, dataDir, workspace: workDir, gitDir });
+    const inv = adapter.buildInvocation({ prompt, harness, sessionId, dataDir, workspace: workDir, gitDir, graft });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const runId = `${stamp}-${column.name.toLowerCase()}`;
     const runDir = store.runDir(ticketId, runId);
@@ -521,7 +528,7 @@ export class Runner {
     if (!fs.existsSync(wrapper)) throw new Error(`wrapper missing: ${wrapper}`);
     const proc = spawn(wrapper, [runDir, '--', inv.cmd, ...inv.args], {
       cwd: inv.cwd || workDir,
-      env: runEnv(),
+      env: runEnv(graft),
       detached: true,
       stdio: 'ignore',
     });
@@ -541,6 +548,7 @@ export class Runner {
       harness: { type: harness.type, model: harness.model, effort: harness.effort },
       branchName: ticket.branchName || null,
       workDir,
+      graft: graft ? { enabled: true, graphDir: graft.graphDir, workDir: graft.root } : { enabled: false },
       cmd: inv.cmd,
       args: inv.args.map(truncateArg),
       pid: proc.pid,

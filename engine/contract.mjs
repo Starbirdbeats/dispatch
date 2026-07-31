@@ -1,7 +1,7 @@
 // contract.mjs — the hand-off contract between Dispatch and any harness.
 // Composes the per-run prompt and parses the structured control block agents must emit.
 
-export function composePrompt({ ticket, column, harness, dossierPath, recentActivity, resume, workDir }) {
+export function composePrompt({ ticket, column, harness, dossierPath, recentActivity, resume, workDir, graft = null }) {
   const lines = [];
 
   lines.push(`# Dispatch run — ticket "${ticket.title}" — phase "${column.name}"`);
@@ -56,6 +56,12 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
     lines.push('This phase runs in a read-only sandbox: you can read the whole disk, but the ONLY writable location is the ticket data dir (where the dossier lives). Do not attempt to edit workspace files or commit — later phases do that. The dossier update in the hand-off contract below still applies and WILL succeed; do it directly. Codex runs may have their cwd set to the ticket data dir instead of the workspace; use the absolute workspace path above when reading the repo. If a dossier write is unexpectedly denied anyway, do not retry — put the entry body in "work_log" (and "plan" if this phase produced or updated the plan) in your control block and Dispatch will write it for you.');
   }
 
+  if (graft?.enabled) {
+    lines.push('\n## Graft repo index');
+    lines.push('Dispatch maintains a structural Graft index for this exact ticket worktree. Before broad grep or full-file reads, use the Graft MCP tools: repo-map for orientation, find-code for relevant code, file-API for a compact surface, call-trace for dependencies/blast radius, and find-all for exhaustive matches. Graft queries refresh against uncommitted edits.');
+    lines.push(`If MCP is unavailable, inspect ${pathForPrompt(graft.graphDir, 'INDEX.md')} and its linked cards when present. An unavailable, empty, unsupported-language, or no-hit graph is never a blocker—fall back to the normal repository tools and continue the task.`);
+  }
+
   lines.push('\n## Tooling notes');
   lines.push('- Puppeteer is available for browser automation (`npm install puppeteer` in a scratch dir) if you need to scrape, test UI, or drive a headless browser.');
   lines.push(`- SCRATCH SPACE: the ticket data dir (${dossierPath.replace(/\/DOSSIER\.md$/, '')}) is for the dossier and Dispatch's own files only. Do NOT create git worktrees, clones, node_modules, or build output there — use a temp dir (\`mktemp -d\`) or work inside your workspace. Scratch left in the data dir gets pruned.`);
@@ -84,6 +90,11 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
   lines.push('- "flag_human": you are blocked on something only the human can decide.');
 
   return lines.join('\n');
+}
+
+function pathForPrompt(dir, name) {
+  const slash = String(dir || '').endsWith('/') ? '' : '/';
+  return `\`${dir}${slash}${name}\``;
 }
 
 // Find the last json control block in the agent's final message.

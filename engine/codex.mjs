@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { CODEX_CONTEXT_WINDOW } from './limits.mjs';
 
-export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace, gitDir }) {
+export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace, gitDir, graft = null }) {
   const lastMsgFile = path.join(dataDir, 'last-message.txt');
   const args = ['exec'];
   const resume = Boolean(sessionId);
@@ -37,6 +37,10 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
     args.push('--sandbox', sandbox, '-C', readOnly ? dataDir : workspace);
     if (!readOnly) args.push('--add-dir', dataDir);
     args.push('-c', `sandbox_workspace_write.writable_roots=${roots}`);
+  }
+  if (graft?.enabled) {
+    args.push('-c', `mcp_servers.graft.command=${JSON.stringify(graft.mcp.command)}`);
+    args.push('-c', `mcp_servers.graft.args=${JSON.stringify(graft.mcp.args)}`);
   }
   args.push(prompt);
   // `exec resume` has no -C flag and workspace-write makes the process cwd writable,

@@ -7,6 +7,23 @@ function valueAfter(args, flag) {
   return idx === -1 ? null : args[idx + 1];
 }
 
+function configValues(args) {
+  const values = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-c') values.push(args[i + 1]);
+  }
+  return values;
+}
+
+const GRAFT = {
+  enabled: true,
+  graphDir: '/tmp/dispatch ticket/graft',
+  mcp: {
+    command: '/opt/dispatch node/bin/node',
+    args: ['/opt/dispatch/graft cli.js', '--dir', '/tmp/dispatch ticket/graft', 'mcp', '/tmp/work space'],
+  },
+};
+
 test('read-only Codex invocation can write ticket data but not the workspace root', () => {
   const { args } = buildInvocation({
     prompt: 'prompt',
@@ -141,4 +158,43 @@ test('worktree Codex invocation gets the repo’s shared git dir as the writable
   // In a worktree, workspace/.git is a file — commits need the shared git dir writable.
   assert.ok(args.includes('sandbox_workspace_write.writable_roots=["/tmp/dispatch-ticket","/repos/project/.git"]'));
   assert.ok(!args.some((a) => a.includes('/data/worktrees/t-abc/.git')));
+});
+
+test('Codex invocation registers Graft MCP with safely serialized paths', () => {
+  const { args } = buildInvocation({
+    prompt: 'prompt',
+    dataDir: '/tmp/dispatch ticket',
+    workspace: '/tmp/work space',
+    sessionId: null,
+    graft: GRAFT,
+    harness: {
+      type: 'codex',
+      permissions: 'workspace-write',
+    },
+  });
+
+  const configs = configValues(args);
+  assert.ok(configs.includes(`mcp_servers.graft.command=${JSON.stringify(GRAFT.mcp.command)}`));
+  assert.ok(configs.includes(`mcp_servers.graft.args=${JSON.stringify(GRAFT.mcp.args)}`));
+  assert.ok(configs.includes('sandbox_workspace_write.writable_roots=["/tmp/dispatch ticket","/tmp/work space/.git"]'));
+});
+
+test('resumed read-only Codex run keeps its sandbox while registering Graft MCP', () => {
+  const { args } = buildInvocation({
+    prompt: 'prompt',
+    dataDir: '/tmp/dispatch ticket',
+    workspace: '/tmp/work space',
+    sessionId: 'session-id',
+    graft: GRAFT,
+    harness: {
+      type: 'codex',
+      permissions: 'read-only',
+    },
+  });
+
+  const configs = configValues(args);
+  assert.ok(configs.includes(`mcp_servers.graft.command=${JSON.stringify(GRAFT.mcp.command)}`));
+  assert.ok(configs.includes(`mcp_servers.graft.args=${JSON.stringify(GRAFT.mcp.args)}`));
+  assert.ok(configs.includes('sandbox_workspace_write.writable_roots=["/tmp/dispatch ticket"]'));
+  assert.ok(!configs.some((value) => value.includes('/tmp/work space/.git')));
 });

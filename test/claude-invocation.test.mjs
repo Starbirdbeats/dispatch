@@ -7,6 +7,15 @@ function allowedToolsArg(args) {
   return idx === -1 ? null : args[idx + 1];
 }
 
+const GRAFT = {
+  enabled: true,
+  graphDir: '/tmp/dispatch ticket/graft',
+  mcp: {
+    command: '/opt/dispatch node/bin/node',
+    args: ['/opt/dispatch/graft cli.js', '--dir', '/tmp/dispatch ticket/graft', 'mcp', '/tmp/work space'],
+  },
+};
+
 test('read-only Claude invocation allows dossier writes in the ticket data dir only', () => {
   const { args } = buildInvocation({
     prompt: 'prompt',
@@ -72,6 +81,56 @@ test('non-read-only Claude invocation leaves allowedTools behavior unchanged', (
     harness: { type: 'claude', permissions: 'acceptEdits' },
   });
   assert.equal(allowedToolsArg(unset.args), null);
+});
+
+test('Claude invocation registers the ticket Graft MCP and allows it in restricted runs', () => {
+  const { args } = buildInvocation({
+    prompt: 'prompt',
+    dataDir: '/tmp/dispatch ticket',
+    sessionId: 'session-id',
+    graft: GRAFT,
+    harness: {
+      type: 'claude',
+      permissions: 'manual',
+      allowedTools: 'Bash(git *) Read',
+    },
+  });
+
+  const mcpIndex = args.indexOf('--mcp-config');
+  assert.notEqual(mcpIndex, -1);
+  assert.deepEqual(JSON.parse(args[mcpIndex + 1]), {
+    mcpServers: {
+      graft: {
+        command: GRAFT.mcp.command,
+        args: GRAFT.mcp.args,
+      },
+    },
+  });
+  const allowed = allowedToolsArg(args);
+  assert.match(allowed, /Bash\(git \*\)/);
+  for (const tool of [
+    'graft_find_code',
+    'graft_file_api',
+    'graft_trace_calls',
+    'graft_find_all',
+    'graft_repo_map',
+    'graft_check_freshness',
+  ]) {
+    assert.match(allowed, new RegExp(`mcp__graft__${tool}`));
+  }
+});
+
+test('Graft MCP does not turn an unrestricted Claude run into an allowlist', () => {
+  const { args } = buildInvocation({
+    prompt: 'prompt',
+    dataDir: '/tmp/dispatch-ticket',
+    sessionId: null,
+    graft: GRAFT,
+    harness: { type: 'claude', permissions: 'acceptEdits' },
+  });
+
+  assert.equal(allowedToolsArg(args), null);
+  assert.notEqual(args.indexOf('--mcp-config'), -1);
 });
 
 test('Claude tool events preserve full structured input for transcript rendering', () => {

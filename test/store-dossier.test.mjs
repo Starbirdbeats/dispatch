@@ -95,3 +95,31 @@ test('store prunes disposable build caches from isolated worktrees only', async 
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test('store preserves the owned Graft cache during pruning and removes it with the ticket', async () => {
+  const { store, dataDir } = await tempStore();
+  try {
+    const ticket = store.createTicket({
+      title: 'Graft cache lifecycle',
+      description: '',
+      workspace: dataDir,
+      attachments: [],
+    });
+    const graphFile = path.join(store.graftDir(ticket.id), '.graph', 'wiring.json');
+    const scratch = path.join(store.ticketDir(ticket.id), 'accidental-clone');
+    fs.mkdirSync(path.dirname(graphFile), { recursive: true });
+    fs.mkdirSync(scratch, { recursive: true });
+    fs.writeFileSync(graphFile, '{}\n');
+    fs.writeFileSync(path.join(scratch, 'junk'), 'remove');
+
+    const { removed } = store.pruneTicketData(ticket.id);
+    assert.ok(removed.includes('accidental-clone'));
+    assert.equal(fs.existsSync(graphFile), true);
+
+    const ticketDir = store.ticketDir(ticket.id);
+    store.deleteTicket(ticket.id);
+    assert.equal(fs.existsSync(ticketDir), false);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

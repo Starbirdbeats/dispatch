@@ -46,6 +46,20 @@ write_exit() {
   mv "$RUN_DIR/exit.json.tmp" "$RUN_DIR/exit.json"
 }
 
+# Reclaim inactive build caches before an agent can launch a disk-heavy build. The
+# guard refuses the run when the safety reserve cannot be restored, preventing a slow
+# build from running all the way into ENOSPC.
+DISK_GUARD="${DISK_GUARD:-$HOME/bin/build-disk-guard.sh}"
+if [[ -x "$DISK_GUARD" ]]; then
+  "$DISK_GUARD" >>"$RUN_DIR/disk-guard.log" 2>&1
+  CODE=$?
+  if [[ "$CODE" -ne 0 ]]; then
+    printf 'dispatch-run.sh: disk preflight failed; see %s\n' "$RUN_DIR/disk-guard.log" >>"$RUN_DIR/stderr.log"
+    write_exit "$CODE"
+    exit "$CODE"
+  fi
+fi
+
 # Build/refresh the ticket-local structural graph before the provider starts.
 # This is deliberately fail-open: Graft is an optimization, never a reason to
 # strand an otherwise valid Claude/Codex run.

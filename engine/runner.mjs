@@ -63,24 +63,58 @@ function truncateArg(a) {
   return a.length > 500 ? a.slice(0, 500) + '…' : a;
 }
 
-// Every ticket runs in its own worktree, so a per-worktree Cargo target dir means each
-// ticket recompiles the whole dependency graph from scratch (~40GB and tens of minutes on
-// a big Rust workspace) — several at once will exhaust both cores and disk. One shared
-// cache makes the first run cold and every later run warm, and keeps a single copy on
-// disk. Cargo locks the dir, so concurrent Rust runs queue instead of racing — far cheaper
-// than N cold builds. An explicit CARGO_TARGET_DIR in the environment still wins.
-export function sharedCargoTarget() {
-  return process.env.CARGO_TARGET_DIR || path.join(DATA_DIR, 'cargo-target');
+// Cargo's target directory contains large, branch-specific linked test binaries and is
+// locked for the duration of a build. Keep it private to each ticket so concurrent
+// worktrees neither serialize on one lock nor grow one uncollectable cache. sccache is the
+// bounded, shared layer for reusable compiler output. An explicit CARGO_TARGET_DIR still
+// wins for operators who deliberately provide one.
+export function cargoTargetForTicket(ticketId, env = process.env, dataDir = DATA_DIR) {
+  if (env.CARGO_TARGET_DIR) return env.CARGO_TARGET_DIR;
+  const key = String(ticketId || 'unknown')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/^\.+/, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 120) || 'unknown';
+  return path.join(dataDir, 'cargo-targets', key);
 }
 
-export function runEnv(graft = null) {
-  const env = { ...process.env };
-  const dir = sharedCargoTarget();
+function executableOnPath(name, env) {
+  for (const dir of String(env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, name);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch { /* keep searching */ }
+  }
+  return null;
+}
+
+export function runEnv(ticketId, graft = null, env = process.env, dataDir = DATA_DIR) {
+  const dir = cargoTargetForTicket(ticketId, env, dataDir);
+  let targetReady = true;
   try {
     fs.mkdirSync(dir, { recursive: true });
-    env.CARGO_TARGET_DIR = dir;
-  } catch { /* a missing Cargo cache must not block unrelated runs */ }
-  return applyGraftEnv(env, graft);
+  } catch {
+    // A missing Cargo cache must not block an unrelated frontend/docs run. Rust
+    // commands will still fail honestly if their explicit target is unavailable.
+    targetReady = false;
+  }
+
+  const result = {
+    CARGO_INCREMENTAL: '0',
+    CARGO_PROFILE_DEV_DEBUG: '0',
+    CARGO_PROFILE_TEST_DEBUG: '0',
+    SCCACHE_CACHE_SIZE: '15G',
+    SCCACHE_DIR: path.join(env.HOME || path.dirname(dataDir), '.cache', 'sccache'),
+    ...env,
+  };
+  if (targetReady) result.CARGO_TARGET_DIR = dir;
+  if (!result.RUSTC_WRAPPER) {
+    const sccache = executableOnPath('sccache', result);
+    if (sccache) result.RUSTC_WRAPPER = sccache;
+  }
+  return applyGraftEnv(result, graft);
 }
 
 function tailFile(file, n = 800) {
@@ -528,7 +562,7 @@ export class Runner {
     if (!fs.existsSync(wrapper)) throw new Error(`wrapper missing: ${wrapper}`);
     const proc = spawn(wrapper, [runDir, '--', inv.cmd, ...inv.args], {
       cwd: inv.cwd || workDir,
-      env: runEnv(graft),
+      env: runEnv(ticketId, graft),
       detached: true,
       stdio: 'ignore',
     });

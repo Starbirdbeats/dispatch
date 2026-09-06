@@ -1,3 +1,37 @@
+// Configuration catalogue checked 2026-09-06. Availability must be checked again
+// against the authenticated provider before real execution is connected.
+// Claude: code.claude.com/docs/en/{model-config,fast-mode}
+// Codex: local model metadata and developers.openai.com/codex/speed
+const standardEfforts = ['low','medium','high','xhigh'];
+export const agentModels = {
+  Claude: [
+    {id:'claude-fable-5',label:'Fable 5',efforts:[...standardEfforts,'max'],fast:false},
+    {id:'claude-opus-5',label:'Opus 5',efforts:[...standardEfforts,'max'],fast:true},
+    {id:'claude-opus-4-8',label:'Opus 4.8',efforts:[...standardEfforts,'max'],fast:true},
+    {id:'claude-sonnet-5',label:'Sonnet 5',efforts:[...standardEfforts,'max'],fast:false},
+    {id:'claude-haiku-4-5-20251001',label:'Haiku 4.5',efforts:[],fast:false},
+  ],
+  Codex: [
+    {id:'gpt-6-astra',label:'GPT-6 Astra',efforts:[...standardEfforts,'max','ultra'],fast:true},
+    {id:'gpt-5.6-sol',label:'GPT-5.6 Sol',efforts:[...standardEfforts,'max','ultra'],fast:true},
+    {id:'gpt-5.6-terra',label:'GPT-5.6 Terra',efforts:[...standardEfforts,'max','ultra'],fast:true},
+    {id:'gpt-5.6-luna',label:'GPT-5.6 Luna',efforts:[...standardEfforts,'max'],fast:true},
+    {id:'gpt-5.5',label:'GPT-5.5',efforts:standardEfforts,fast:true},
+    {id:'gpt-5.4-mini',label:'GPT-5.4 Mini',efforts:standardEfforts,fast:false},
+    {id:'gpt-5.3-codex-spark',label:'Codex Spark',efforts:standardEfforts,fast:false},
+  ],
+  Human: [],
+};
+export function normalizeAgent(stage) {
+  const models = agentModels[stage.agent] || [];
+  const model = models.find(m=>m.id===stage.model);
+  return {...stage,model:model?.id||'',effort:model?.efforts.includes(stage.effort)?stage.effort:'',fastMode:Boolean(model?.fast&&stage.fastMode)};
+}
+export function agentSummary(stage) {
+  if(stage.agent==='Human')return 'Human';
+  const model=agentModels[stage.agent]?.find(m=>m.id===stage.model);
+  return [stage.agent,model?.label||'Default model',stage.effort||'Default effort',stage.fastMode?'Fast':'Standard'].join(' · ');
+}
 export const templates = [
   { id: 'ship', name: 'Ship a feature', category: 'Engineering', description: 'Turn a brief into a reviewed, tested change.', stages: ['Plan', 'Build', 'Review', 'Approve'], prompts: ['Read the brief and inputs. Write a scoped plan with acceptance criteria.', 'Implement the accepted plan. Run the relevant tests and record the results.', 'Review the changes independently against the acceptance criteria. Return specific findings.', 'Review the collected evidence and approve the result.'], gates: ['An actionable plan covers every acceptance criterion.', 'Implementation is complete and the relevant tests pass.', 'No unresolved high or medium findings remain.', 'A human approves the final result.'] },
   { id: 'research', name: 'Research a question', category: 'Research', description: 'Gather sources, challenge findings, deliver an answer.', stages: ['Scope', 'Research', 'Fact-check', 'Deliver'], prompts: ['Define the question, required sources, and boundaries.', 'Collect primary sources. Record links and distinguish facts from inference.', 'Verify the claims against their sources. Identify contradictions and gaps.', 'Present a concise answer with citations and limitations.'], gates: ['The research question and boundaries are explicit.', 'Every major finding has a traceable source.', 'Claims are supported and contradictions are addressed.', 'The answer addresses the original question with evidence.'] },
@@ -15,6 +49,7 @@ export function makeStages(templateId, human = true, limit = 3) {
   const template = templates.find(t => t.id === templateId) || templates[0];
   const stages = template.stages.map((name, i) => ({ id: uid(), name, prompt: template.prompts[i], gate: template.gates[i], checker: 'review', agent: i % 2 ? 'Codex' : 'Claude', maxAttempts: limit, failTarget: '', status: 'pending', attempts: 0, evidence: [] }));
   stages.forEach((s, i) => { s.failTarget = stages[Math.max(0, i - 1)].id; });
+  stages.forEach(s=>Object.assign(s,normalizeAgent(s)));
   stages.at(-1).checker = human ? 'human' : 'review';
   return stages;
 }
@@ -33,6 +68,9 @@ export function validateTicket(t) {
   if (!t.stages.length) errors.push('Add at least one stage.');
   const ids = new Set(t.stages.map(s => s.id));
   for (const s of t.stages) {
+    if(!agentModels[s.agent]) errors.push(`${s.name}: choose a supported agent.`);
+    const normalized=normalizeAgent(s);
+    if((s.model||'')!==normalized.model||(s.effort||'')!==normalized.effort||Boolean(s.fastMode)!==normalized.fastMode)errors.push(`${s.name}: model, effort, or fast mode is not supported for this agent.`);
     if (!s.name.trim() || !s.prompt.trim() || !s.gate.trim()) errors.push(`${s.name || 'Unnamed stage'} needs a name, instructions, and a pass condition.`);
     if (!Number.isInteger(s.maxAttempts) || s.maxAttempts < 1 || s.maxAttempts > 20) errors.push(`${s.name}: set an attempt limit between 1 and 20.`);
     if (!ids.has(s.failTarget) || t.stages.findIndex(x => x.id === s.failTarget) > t.stages.indexOf(s)) errors.push(`${s.name}: choose this stage or an earlier stage as the failure destination.`);

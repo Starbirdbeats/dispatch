@@ -14,6 +14,7 @@ To test from a phone on the same network, set `DISPATCH_V2_HOST` to the Mac's LA
 - Add, rename, and reorder board columns. Custom columns organise drafts.
 - Guided ticket creation using four editable workflow templates.
 - Sequential stage editor with prompts, agent choices, gates, retry routes, and attempt limits.
+- Per-stage model, model-specific reasoning effort, and supported fast-mode choices. Older drafts use provider defaults. Changing providers/models clears incompatible options; Human has no model controls. The catalogue is a configuration snapshot, not an authenticated availability check. Fast mode is off by default and remains simulated along with execution.
 - Test execution: simulated passes, injected failures, bounded retries, pause/resume, human approvals, evidence, and event history.
 - Local browser persistence, with active runs paused when the page reopens.
 - Mobile vertical graph and stage inspector; desktop horizontal graph and inspector sidebar.

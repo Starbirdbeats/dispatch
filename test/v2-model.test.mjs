@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createTicket, initialData, transition, validateTicket } from '../public/v2/model.mjs';
+import { createTicket, initialData, transition, validateTicket, normalizeAgent, agentSummary } from '../public/v2/model.mjs';
 const ticket=options=>createTicket({title:'Test workflow',goal:'Deliver a verified result',template:'blank',...options});
 test('human gate cannot complete without an explicit approval',()=>{
  let t=transition(ticket(),'start');
@@ -42,4 +42,24 @@ test('invalid gates and forward failure routes prevent starting',()=>{
 });
 test('new state preserves separate board and graph concepts',()=>{
  const d=initialData();assert.equal(d.columns.length,4);assert.equal(d.tickets[0].columnId,'backlog');assert.ok(d.tickets[0].stages.length>1);
+});
+test('agent settings survive execution without mutating the selection',()=>{
+ let t=ticket();Object.assign(t.stages[0],{model:'gpt-5.6-sol',agent:'Codex',effort:'ultra',fastMode:true});
+ t=transition(t,'start');t=transition(t,'tick');
+ assert.equal(t.stages[0].model,'gpt-5.6-sol');assert.equal(t.stages[0].effort,'ultra');assert.equal(t.stages[0].fastMode,true);
+ assert.match(agentSummary(t.stages[0]),/ultra · Fast/);
+});
+test('model and provider changes clear incompatible effort and fast settings',()=>{
+ const old={agent:'Claude',model:'claude-haiku-4-5-20251001',effort:'max',fastMode:true};
+ const small=normalizeAgent(old);assert.equal(small.effort,'');assert.equal(small.fastMode,false);
+ const switched=normalizeAgent({...old,agent:'Codex'});assert.equal(switched.model,'');assert.equal(switched.fastMode,false);
+ const human=normalizeAgent({...old,agent:'Human'});assert.equal(human.model,'');assert.equal(human.effort,'');assert.equal(human.fastMode,false);
+});
+test('unsupported model combinations block a run',()=>{
+ const t=ticket();Object.assign(t.stages[0],{agent:'Codex',model:'gpt-5.6-luna',effort:'ultra',fastMode:true});
+ assert.throws(()=>transition(t,'start'),/not supported/);
+});
+test('old drafts migrate to provider defaults without changing their prompts',()=>{
+ const old={agent:'Claude',prompt:'Preserve this',gate:'Preserve evidence'};const s=normalizeAgent(old);
+ assert.equal(s.model,'');assert.equal(s.effort,'');assert.equal(s.fastMode,false);assert.equal(s.prompt,old.prompt);
 });

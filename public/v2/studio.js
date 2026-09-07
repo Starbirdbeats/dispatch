@@ -1,4 +1,5 @@
 import { templates, uid, initialData, createTicket, validateTicket, transition, agentModels, normalizeAgent, agentSummary } from './model.mjs';
+import { tutorialStep } from './tutorial.mjs';
 const KEY='dispatch-studio-v2';
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -19,7 +20,7 @@ function go(route){location.hash=route;}
 function route(){
   const parts=location.hash.slice(1).split('/');view=parts[0]||'board';ticketId=parts[1]||null;error='';
   if(view==='ticket') {const t=data.tickets.find(x=>x.id===ticketId);if(!t){view='board';toast('That ticket is not on this device.');}else{mode=t.state==='draft'?'build':'execute';selected=t.stages.find(s=>s.status!=='passed')?.id||t.stages[0]?.id;}}
-  if(view==='new'&&!wizard)wizard={step:0,template:'ship',title:'',goal:'',inputs:'',human:true,limit:3};
+  if(view==='new'&&!wizard)wizard=data.tutorial?.wizard||{step:0,template:'ship',title:'',goal:'',inputs:'',human:true,limit:3};
   if(!['board','ticket','new','templates','guide','columns'].includes(view))view='board';
   render();window.scrollTo(0,0);
 }
@@ -30,7 +31,27 @@ function navButton(id,label,i){return `<button data-nav="${id}" class="${view===
 function render(){
   const isTicket=view==='ticket';
   $('#app').innerHTML=`<header class="topbar"><a class="brand" href="#board" aria-label="Dispatch tickets"><span class="brand-mark">↗</span><span class="wordmark">dispatch</span><span class="version">V2</span></a><nav class="desktop-nav" aria-label="Main navigation"><button data-nav="board" class="${view==='board'?'active':''}">Tickets</button><button data-nav="templates" class="${view==='templates'?'active':''}">Templates</button><button data-nav="guide" class="${view==='guide'?'active':''}">Field guide</button></nav><span class="pill green"><span class="dot"></span>Workflow studio</span></header><div class="test-banner"><span><strong>Test mode</strong> · No agents or commands run</span><span class="device-label">Saved in this browser</span></div><main class="page ${isTicket?'workspace-page':''}" id="main">${storageError?`<div class="error" role="alert">${esc(storageError)}</div>`:''}${body()}</main><nav class="bottom-nav" aria-label="Main navigation">${navButton('board','Tickets','board')}${navButton('templates','Templates','graph')}<button data-new class="create">${icon('plus')}<span>New ticket</span></button>${navButton('guide','Guide','book')}</nav>`;
+  renderTutorial();
   wire();
+}
+function renderTutorial(){
+  if(data.tutorial&&!data.tutorial.ticketId&&wizard){data.tutorial.wizard={...wizard};save();}
+  if(view==='guide'){
+    $('.page-head').insertAdjacentHTML('afterend','<section class="tutorial-intro"><h2>Build your first loop</h2><p>A hands-on walkthrough with a practice ticket. Learn prompts, gates, retries and human approval. No agents run.</p><button class="btn primary" data-tutorial-start>Start guided tutorial</button></section>');
+    $('[data-tutorial-start]').onclick=()=>{
+      if(data.tutorial?.ticketId){go('ticket/'+data.tutorial.ticketId);return;}
+      data.tutorial={ticketId:null};
+      wizard={step:0,template:'blank',title:'Practice: build my first loop',goal:'Produce a short welcome message and check that it tells a new user what to do next.',inputs:'Use plain language. This is a test-mode practice ticket.',human:true,limit:3};
+      save();go('new');
+    };
+  }
+  const tour=data.tutorial;
+  if(!tour||!((view==='new'&&!tour.ticketId)||(view==='ticket'&&ticketId===tour.ticketId)))return;
+  const step=tutorialStep(tour,wizard,tkt());if(!step)return;
+  $('#main').insertAdjacentHTML('afterbegin',`<section class="tutorial-coach" aria-label="Guided tutorial"><div class="row between"><span class="eyebrow">Guided tutorial · ${step.index+1} of 7</span><button data-tutorial-exit>${step.done?'Finish tutorial':'Exit tutorial'}</button></div><h2>${esc(step.title)}</h2><p>${esc(step.text)}</p><button class="btn" data-tutorial-focus>${step.done?'See completed ticket':'Show me where'}</button></section>`);
+  $('[data-tutorial-focus]').onclick=()=>{if(step.done){data.tutorial=null;save();go('board');return;}const target=$(step.target);target?.scrollIntoView({block:'start'});const input=target?.querySelector('input:not([type="hidden"]),button,select');input?.focus({preventScroll:true});};
+  $('[data-tutorial-exit]').onclick=()=>{captureWizard();if(!saveStage(false))return;data.tutorial=null;save();render();toast('Tutorial closed. Your ticket and changes are kept.');};
+  $(step.target)?.classList.add('tutorial-target');
 }
 function body(){if(view==='ticket')return workspace();if(view==='new')return newTicket();if(view==='templates')return templatePage();if(view==='guide')return guide();if(view==='columns')return columnsPage();return board();}
 function pageHead(title,sub,action=''){return `<div class="page-head"><div><div class="eyebrow">Your work, in motion</div><h1>${title}</h1><p>${sub}</p></div>${action}</div>`;}
@@ -78,7 +99,7 @@ function wire(){
   document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;render();});
   const searchInput=$('#search');if(searchInput)searchInput.oninput=e=>{const pos=e.target.selectionStart;search=e.target.value;render();$('#search').focus();$('#search').setSelectionRange(pos,pos);};
   document.querySelectorAll('[data-choose]').forEach(b=>{b.type='button';b.onclick=()=>{wizard.template=b.dataset.choose;render();};});
-  const wf=$('#wizard-form');if(wf){wf.onsubmit=e=>{e.preventDefault();captureWizard();if(wizard.step<2){wizard.step++;render();window.scrollTo(0,0);}else{const t=createTicket(wizard);t.number=Math.max(0,...data.tickets.map(x=>x.number||0))+1;data.tickets.unshift(t);save();wizard=null;go('ticket/'+t.id);toast('Ticket created. Your graph is ready to shape.');}};wf.oninput=captureWizard;}
+  const wf=$('#wizard-form');if(wf){wf.onsubmit=e=>{e.preventDefault();captureWizard();if(wizard.step<2){wizard.step++;render();window.scrollTo(0,0);}else{if(data.tutorial&&!data.tutorial.ticketId&&(!wizard.human||wizard.limit<3)){error='For this tutorial, enable human approval and allow at least 3 attempts. You can exit the tutorial to use other settings.';render();return;}const t=createTicket(wizard);t.number=Math.max(0,...data.tickets.map(x=>x.number||0))+1;data.tickets.unshift(t);if(data.tutorial&&!data.tutorial.ticketId)data.tutorial.ticketId=t.id;save();wizard=null;go('ticket/'+t.id);toast('Ticket created. Your graph is ready to shape.');}};wf.oninput=captureWizard;}
   const back=$('[data-wizard-back]');if(back)back.onclick=()=>{captureWizard();if(wizard.step){wizard.step--;render();}else go('board');};
   document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{if(mode==='build'&&!saveStage(false))return;mode=b.dataset.mode;render();});
   document.querySelectorAll('[data-stage]').forEach(b=>b.onclick=()=>{if(mode==='build'&&!saveStage(false))return;selected=b.dataset.stage;render();if(innerWidth<1000)$('#inspector')?.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});});
@@ -96,5 +117,5 @@ function repairRoutes(t){t.stages.forEach((s,i)=>{const target=t.stages.findInde
 window.addEventListener('hashchange',route);
 window.addEventListener('beforeunload',()=>{captureWizard();saveStage(false);save();});
 window.addEventListener('storage',e=>{if(e.key===KEY)toast('This board changed in another tab. Refresh to load those changes.');});
-autoTimer=setInterval(()=>{let changed=false;for(let i=0;i<data.tickets.length;i++){if(data.tickets[i].state!=='running')continue;try{data.tickets[i]=transition(data.tickets[i],'tick');changed=true;}catch(e){toast(e.message);}}if(changed){save();if(view==='board'||(view==='ticket'&&mode==='execute'))render();}},4500);
+autoTimer=setInterval(()=>{let changed=false;for(let i=0;i<data.tickets.length;i++){if(data.tickets[i].state!=='running'||data.tutorial?.ticketId===data.tickets[i].id)continue;try{data.tickets[i]=transition(data.tickets[i],'tick');changed=true;}catch(e){toast(e.message);}}if(changed){save();if(view==='board'||(view==='ticket'&&mode==='execute'))render();}},4500);
 save();route();

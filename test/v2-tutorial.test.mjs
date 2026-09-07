@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {tutorialStep} from '../public/v2/tutorial.mjs';
+import {createTicket,transition} from '../public/v2/model.mjs';
+test('tutorial follows creation, retry, human approval and completion',()=>{
+  const tour={ticketId:null};
+  for(let step=0;step<3;step++)assert.equal(tutorialStep(tour,{step},null).index,step);
+  let t=createTicket({title:'Practice',goal:'A checked result',template:'blank'});
+  tour.ticketId=t.id;
+  assert.equal(tutorialStep(tour,null,t).index,3);
+  t=transition(t,'start');t=transition(t,'tick');
+  assert.equal(tutorialStep(tour,null,t).index,4);
+  t=transition(t,'fail');
+  assert.equal(tutorialStep(tour,null,t).index,5);
+  for(let i=0;i<4;i++)t=transition(t,'tick');
+  assert.equal(t.state,'waiting');
+  t=transition(t,'approve');
+  assert.equal(tutorialStep(tour,null,t).done,true);
+  assert.equal(tutorialStep(null,null,t),null);
+});

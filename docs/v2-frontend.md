@@ -32,3 +32,11 @@ Browser verification on 2026-09-06 passed at 320px, 390px, 768px, and 1440px vie
 ## Design intent
 
 Use the board to supervise outcomes and each ticket's graph to define execution. Gates show the required proof and failure route. Keep all core interactions available on phones without drag-and-drop or hover. The existing Dispatch paper palette is retained with cleaner surfaces and larger type.
+# Guided tutorial and identity
+
+The v2 favicon and header use the approved graph-and-loop D mark as a crisp SVG.
+Open Guide and choose Start guided tutorial. Seven contextual steps follow the
+real creation wizard, stage editor, simulated failure routing, and human gate.
+Tutorial tickets advance manually, remain in the browser, and can be resumed
+from Guide. Exit keeps the ticket; completed tutorials can be replayed with a new
+practice ticket. This does not connect real providers or change the v1 frontend.

@@ -278,6 +278,10 @@ async function loadState() {
 function connectWS() {
   const socketProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${socketProtocol}//${location.host}/ws`);
+  ws.onopen = () => {
+    loadState().catch(console.error);
+    S.transcript?.refresh?.(S.transcript.history ? S.transcript.file : '');
+  };
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'state-changed') loadState().catch(console.error);
@@ -306,8 +310,14 @@ function connectWS() {
       if (S.live[msg.ticketId].length > 800) S.live[msg.ticketId].shift();
       const view = S.transcript?.ticketId === msg.ticketId ? S.transcript : null;
       if (view) {
+        if (view.history && msg.event.runId && `${msg.event.runId}.jsonl` !== view.file) return;
+        if (msg.event.runId && view.file && `${msg.event.runId}.jsonl` !== view.file) {
+          const ticket = S.data.tickets.find((t) => t.id === msg.ticketId);
+          if (ticket) renderTranscript($('#tab-body'), ticket, { build: view.build });
+          return;
+        }
         view.liveEvents.push(msg.event);
-        appendTranscriptLine(msg.event);
+        transcriptRenderCurrent();
       }
     }
   };
@@ -383,7 +393,7 @@ function diagnose(t, c) {
     const started = t.currentRun?.startedAt ? Date.parse(t.currentRun.startedAt) : null;
     return { kind: 'running', tone: 'live', label: 'RUNNING', stuck: false,
       headline: `${t.currentRun?.harness || 'agent'} is working in ${c.name}`,
-      detail: started ? `Live for ${fmtDur(Date.now() - started)}. Watch the Transcript tab.` : 'Live. Watch the Transcript tab.',
+      detail: started ? `Live for ${fmtDur(Date.now() - started)}. Open Build for agent progress and the orchestrator transcript.` : 'Live. Open Build for agent progress.',
       startedAt: started };
   }
   if (queued) return { kind: 'queued', tone: 'ok', label: 'QUEUED', stuck: false, headline: 'Waiting for a run slot', detail: 'Another run is using the concurrency slot; this starts next. Force start to skip the queue.' };
@@ -1319,6 +1329,7 @@ function render() {
     else updateTicketModalHead();
     // the diagnosis banner is informational — safe to refresh on every state change
     if (lt && $('#diag-banner')) renderDiagBanner(lt);
+    if (S.transcript?.build) transcriptRenderCurrent();
   }
   // Settings modal never fully re-renders on state changes (it holds unsaved edits), but
   // the provider stepper must flip live when a login completes — patch just that region.
@@ -1597,7 +1608,7 @@ function chipEl(t, c) {
   el.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/ticket', t.id); el.classList.add('dragging'); });
   el.addEventListener('dragend', () => el.classList.remove('dragging'));
   wireTicketActionButtons(el);
-  el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
+  el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: t.status === 'running' ? 'build' : 'overview' });
   return el;
 }
 
@@ -1651,7 +1662,7 @@ function trackRowEl(t) {
     ${isRun && startMs ? `<div class="track-elapsed" data-tplus="${startMs}">T+00:00</div>` : '<div class="track-elapsed none">—</div>'}
     ${ticketActionButtonsHTML(t, 'track-actions')}`;
   wireTicketActionButtons(row);
-  row.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
+  row.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: t.status === 'running' ? 'build' : 'overview' });
   return row;
 }
 
@@ -1751,7 +1762,7 @@ function mcardEl(t, c) {
     ${last ? `<div class="mc-last">▸ ${esc(last.text)}</div>` : ''}
     <div class="mc-foot">${foot}<span class="tap">tap to open ▸</span></div>`;
   wireTicketActionButtons(el);
-  el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: 'overview' });
+  el.onclick = () => pushModal({ type: 'ticket', id: t.id, tab: t.status === 'running' ? 'build' : 'overview' });
   return el;
 }
 
@@ -2314,7 +2325,9 @@ function transcriptRenderCurrent() {
   if (!view || !box || view.ticketId !== S.modal?.id) return;
   const pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
   const prevTop = box.scrollTop;
-  const events = [...(view.baseEvents || []), ...(view.liveEvents || [])].filter(transcriptVisible);
+  const allEvents = mergedTranscriptEvents(view);
+  if (view.build) renderBuildAgents(view, allEvents);
+  const events = allEvents.filter(transcriptVisible).filter((ev) => !view.build || ((!ev.agentId || ev.agentId === 'orchestrator') && ev.kind !== 'thinking'));
   box.innerHTML = '';
   if (events.length) {
     for (const ev of events) appendTranscriptLine(ev, { box, force: true, preserveScroll: false });
@@ -2454,7 +2467,7 @@ function transcriptBodyHTML(text, jsonValue) {
 }
 
 /* ---- ticket modal ---- */
-const TICKET_TABS = ['overview', 'activity', 'transcript', 'dossier'];
+const TICKET_TABS = ['overview', 'build', 'activity', 'transcript', 'dossier'];
 
 function renderTicketModal() {
   const t = S.data.tickets.find((x) => x.id === S.modal.id);
@@ -2489,9 +2502,11 @@ function renderTicketModal() {
   renderDiagBanner(t);
 
   const body = $('#tab-body');
+  if (tab !== 'transcript' && tab !== 'build') S.transcript = null;
   if (tab === 'overview') renderOverview(body, t);
   if (tab === 'activity') renderActivity(body, t);
   if (tab === 'transcript') renderTranscript(body, t);
+  if (tab === 'build') renderTranscript(body, t, { build: true });
   if (tab === 'dossier') renderDossier(t);
 }
 
@@ -3044,23 +3059,72 @@ function renderWakePanel(t) {
   guardClick($('#wake-cancel'), '[ CANCELLING… ]', () => api(`/api/tickets/${t.id}/cancel-wake`, 'POST', {}).then(() => toast('WAKE CANCELLED')).catch(alertErr), `wake:${t.id}`);
 }
 
-function renderTranscript(body, t) {
+function mergedTranscriptEvents(view) {
+  const seen = new Set();
+  return [...(view.baseEvents || []), ...(view.liveEvents || [])].filter((ev) => {
+    if (ev.runId && view.file && `${ev.runId}.jsonl` !== view.file) return false;
+    if (!ev.id) return true;
+    if (seen.has(ev.id)) return false;
+    seen.add(ev.id); return true;
+  });
+}
+
+function renderBuildAgents(view, events) {
+  const box = $('#build-agents');
+  if (!box) return;
+  const agents = new Map((view.agents || []).map((a) => [a.agentId, { ...a, history: [...a.history] }]));
+  for (const ev of events) {
+    if (ev.kind !== 'agent') continue;
+    const a = agents.get(ev.agentId) || { agentId: ev.agentId, history: [] };
+    if (ev.id && a.history.some((e) => e.id === ev.id)) continue;
+    if (ev.at && a.at && ev.at < a.at) continue;
+    const finished = ['completed', 'failed', 'closed', 'interrupted'].includes(a.status);
+    for (const key of ['task', 'status', 'nativeId']) {
+      if (key === 'status' && finished && !ev.restart && ['pending', 'running', 'closed'].includes(ev.status)) continue;
+      if (ev[key]) a[key] = ev[key];
+    }
+    a.text = ev.text; a.at = ev.at;
+    a.history.push(ev); if (a.history.length > 80) a.history.shift();
+    agents.set(ev.agentId, a);
+  }
+  const workers = [...agents.values()].filter((a) => a.agentId !== 'orchestrator');
+  const ticket = S.data.tickets.find((t) => t.id === view.ticketId);
+  const active = ticket?.activeRun?.runId && `${ticket.activeRun.runId}.jsonl` === view.file;
+  const sub = view.meta?.harness?.subagents || {};
+  const openDetails = new Set([...box.querySelectorAll('details[open]')].map((d) => d.dataset.agent));
+  const done = workers.filter((a) => a.status === 'completed').length;
+  box.innerHTML = `<div class="section-head">SUBAGENTS <span>${done}/${workers.length} completed</span></div>
+    <div class="hint">${esc(sub.model || 'Inherit orchestrator model')} · ${esc(sub.effort || 'inherit effort')} · configured defaults</div>
+    ${workers.length ? workers.map((a) => `<article class="build-agent">
+      <div class="build-agent-head"><strong>${esc(a.agentId)}</strong><span class="agent-status status-${esc(a.status || 'unknown')}">${esc(!active && ['running', 'pending'].includes(a.status) ? 'run ended · no completion report' : a.status || 'unknown')}</span></div>
+      <div class="build-task">${esc(a.task || 'Assignment not reported yet')}</div>
+      <div class="build-update">${esc(a.text || 'Waiting for an update')}</div>
+      <div class="hint">${a.at ? esc(new Date(a.at).toLocaleTimeString()) : 'No timestamp recorded'}</div>
+      <details data-agent="${esc(a.agentId)}" ${openDetails.has(a.agentId) ? 'open' : ''}><summary>Progress &amp; decisions</summary>
+      ${a.history.map((e) => `<div class="agent-history"><time>${e.at ? esc(new Date(e.at).toLocaleTimeString()) : ''}</time><span>${e.decision ? `<strong>Decision</strong> ${esc(e.decision)}` : esc(e.text)}<small>${esc(e.source === 'reported' ? 'reported by agent' : 'provider event')}</small></span></div>`).join('')}
+      </details></article>`).join('') : '<div class="build-empty">No subagents spawned yet. Their assignments and updates will appear here as work is delegated.</div>'}`;
+}
+
+function renderTranscript(body, t, { build = false } = {}) {
   const showTools = transcriptShowTools();
   body.innerHTML = `
+    ${build ? '<div class="build-layout"><section class="build-orchestrator"><div class="section-head">ORCHESTRATOR <span id="build-model"></span></div>' : ''}
     <div class="transcript-shell">
       <div class="transcript-bar">
+        <select id="tr-run" aria-label="Run history"><option value="">Latest run</option></select>
         <label class="check-row inline transcript-toggle"><input type="checkbox" id="tr-tools" ${showTools ? 'checked' : ''}><span>show tool events</span></label>
         <div class="hint" id="tr-hint">loading transcript…</div>
       </div>
       <div class="transcript" id="transcript"></div>
-    </div>`;
+    </div>${build ? '</section><aside id="build-agents" aria-label="Subagent progress"></aside></div>' : ''}`;
 
   setTranscriptView({
     ticketId: t.id,
+    build,
     file: '',
     loaded: false,
     baseEvents: [],
-    liveEvents: [...(S.live[t.id] || [])],
+    liveEvents: [],
   });
 
   $('#tr-tools').onchange = (e) => {
@@ -3069,15 +3133,29 @@ function renderTranscript(body, t) {
   };
   transcriptRenderCurrent();
 
-  fetch(`/api/tickets/${t.id}/transcript`).then((r) => r.json()).then(({ file, lines }) => {
-    const current = transcriptCurrentView(t.id);
-    if (!current) return;
-    current.file = file || '';
-    current.baseEvents = (lines || []).map(transcriptRecord).filter(Boolean);
-    current.loaded = true;
-    $('#tr-hint').textContent = file ? `FILE: ${file}` : 'NO RUNS YET';
-    transcriptRenderCurrent();
-  });
+  const view = S.transcript;
+  const refresh = async (file = '') => {
+    const request = view.request = (view.request || 0) + 1;
+    try {
+      const result = await api(`/api/tickets/${t.id}/transcript${file ? `?file=${encodeURIComponent(file)}` : ''}`);
+      if (S.transcript !== view || request !== view.request) return;
+      view.file = result.file || '';
+      view.baseEvents = (result.lines || []).map(transcriptRecord).filter(Boolean);
+      view.agents = result.agents || [];
+      view.meta = result.meta;
+      view.loaded = true;
+      view.liveEvents = view.liveEvents.filter((e) => !e.runId || `${e.runId}.jsonl` === view.file);
+      $('#tr-run').innerHTML = (result.files || []).slice().reverse().map((f) => `<option value="${esc(f)}" ${f === view.file ? 'selected' : ''}>${esc(f.replace('.jsonl', ''))}</option>`).join('') || '<option>No runs yet</option>';
+      $('#tr-hint').textContent = view.file ? 'Latest 500 entries + live updates' : 'NO RUNS YET';
+      if ($('#build-model')) $('#build-model').textContent = `${view.meta?.harness?.model || 'default model'} · ${view.meta?.harness?.effort || 'default effort'}`;
+      transcriptRenderCurrent();
+    } catch (error) {
+      if (S.transcript === view) $('#tr-hint').textContent = `Unable to load transcript: ${error.message}`;
+    }
+  };
+  view.refresh = refresh;
+  $('#tr-run').onchange = (e) => { view.liveEvents = []; view.history = true; refresh(e.target.value); };
+  refresh();
 }
 
 function appendTranscriptLine(ev, { box = $('#transcript'), preserveScroll = true, force = false } = {}) {
@@ -3087,7 +3165,7 @@ function appendTranscriptLine(ev, { box = $('#transcript'), preserveScroll = tru
   const body = transcriptBodyHTML(ev.text, ev.json);
   const div = document.createElement('div');
   div.className = `ln k-${kind}${body.hasJson ? ' has-json' : ''}`;
-  div.innerHTML = `<span class="tag">${esc(kind)}</span><span class="msg">${body.html}</span>`;
+  div.innerHTML = `<span class="tag">${ev.at ? `<time title="${esc(ev.at)}">${esc(new Date(ev.at).toLocaleTimeString())}</time>` : ''}${esc(kind)}${ev.agentId ? `<small>${esc(ev.agentId)}</small>` : ''}</span><span class="msg">${ev.decision ? `<strong>Decision: ${esc(ev.decision)}</strong><br>` : ''}${body.html}${ev.steps ? `<ul>${ev.steps.map((s) => `<li>${s.completed ? '✓ ' : ''}${esc(s.text)}</li>`).join('')}</ul>` : ''}</span>`;
   box.appendChild(div);
   if (pinned) box.scrollTop = box.scrollHeight;
   return true;
@@ -3110,10 +3188,18 @@ function renderColumnModal(draftOverride) {
       <select id="c-role">${['intake', 'agent', 'human-gate', 'terminal'].map((r) => `<option ${r === (draftOverride?._role ?? c.role) ? 'selected' : ''}>${r}</option>`).join('')}</select>
       <label class="f">HARNESS</label>
       <select id="c-type">${providerTypeOptions(type, { includeHuman: true, disabledOk: false, showWarnings: true })}</select>${phaseTypeWarning}
-      <label class="f">MODEL</label>
+      <label class="f">ORCHESTRATOR MODEL</label>
       <div class="model-cell"><select id="c-model" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('model', type, h.model || '', '—')}</select>${refreshBtn()}</div>
-      <label class="f">EFFORT</label>
+      <label class="f">ORCHESTRATOR EFFORT</label>
       <select id="c-effort" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', type, h.effort || '', '— (CLI default)', h.model)}</select>
+      <div class="build-config">
+        <div class="section-head">SUBAGENTS</div>
+        <div class="hint">Defaults for workers spawned by this orchestrator. Uses the same provider. Changes apply to the next run.</div>
+        <label class="f" for="c-sub-model">MODEL</label>
+        <select id="c-sub-model" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('model', type, rawH.subagents?.model || '', 'Inherit orchestrator')}</select>
+        <label class="f" for="c-sub-effort">EFFORT</label>
+        <select id="c-sub-effort" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', type, rawH.subagents?.effort || '', 'Inherit orchestrator', rawH.subagents?.model || h.model)}</select>
+      </div>
       <label class="f">PERMISSIONS</label>
       <select id="c-perms" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('permissions', type, h.permissions || '', '— (harness default)')}</select>
       <label class="f">ALLOWED TOOLS (claude only, e.g. "Bash(git *) Read Glob")</label>
@@ -3136,6 +3222,7 @@ function renderColumnModal(draftOverride) {
     type: $('#c-type').value,
     model: $('#c-model').value === '__custom' ? '' : $('#c-model').value,
     effort: $('#c-effort').value,
+    subagents: { model: $('#c-sub-model').value, effort: $('#c-sub-effort').value },
     permissions: $('#c-perms').value,
     allowedTools: $('#c-tools').value.trim(),
     chrome: Boolean($('#c-chrome').value),
@@ -3150,9 +3237,14 @@ function renderColumnModal(draftOverride) {
   $('#c-type').onchange = () => {
     const d = collectDraft();
     Object.assign(d, normalizeHarnessChoice({ type: d.type }, {}));
+    d.subagents = {};
     renderColumnModal(d);
   };
   $('#c-model').onchange = () => { if (handleCustomModel($('#c-model'))) renderColumnModal(collectDraft()); }; // model change re-filters efforts
+  $('#c-sub-model').onchange = () => {
+    if (!handleCustomModel($('#c-sub-model'))) return;
+    $('#c-sub-effort').innerHTML = harnessOptions('effort', type, '', 'Inherit orchestrator', $('#c-sub-model').value || $('#c-model').value);
+  };
 
   guardClick($('#c-save'), '[ SAVING… ]', () => api(`/api/columns/${c.id}`, 'PATCH', {
     name: $('#c-name').value.trim(),
@@ -3164,6 +3256,7 @@ function renderColumnModal(draftOverride) {
       type: $('#c-type').value,
       model: $('#c-model').value.trim(),
       effort: $('#c-effort').value.trim(),
+      subagents: { model: $('#c-sub-model').value.trim(), effort: $('#c-sub-effort').value.trim() },
       permissions: $('#c-perms').value.trim(),
       network: Boolean($('#c-net').value),
       allowedTools: $('#c-tools').value.trim(),
@@ -3809,13 +3902,17 @@ function renderSettingsModal() {
       <hr class="sep">
       <div class="section-head">PHASE DEFAULTS <span>(harness, model, effort &amp; permissions per column)</span></div>
       <div class="overrides-wrap"><div class="overrides-grid phase-defaults-grid">
-        <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">MODEL</div><div class="h">EFFORT</div><div class="h">PERMS</div>
+        <div class="h">PHASE</div><div class="h">HARNESS</div><div class="h">ORCHESTRATOR MODEL</div><div class="h">EFFORT</div><div class="h">PERMS</div>
         ${agentCols.map((c) => `
           <div>${esc(c.name)}</div>
           <div><select data-pd="${c.id}:type">${providerTypeOptions(c.harness.type, { includeHuman: true, disabledOk: false, showWarnings: true })}</select></div>
           <div class="model-cell"><select data-pd="${c.id}:model" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('model', c.harness.type, c.harness.model || '', '—')}</select>${refreshBtn()}</div>
           <div><select data-pd="${c.id}:effort" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', c.harness.type, c.harness.effort || '', '— (CLI default)', c.harness.model)}</select></div>
-          <div><select data-pd="${c.id}:permissions" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('permissions', c.harness.type, registryPermission(c.harness.type, c.harness.permissions || ''), '— (provider default)')}</select></div>`).join('')}
+          <div><select data-pd="${c.id}:permissions" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('permissions', c.harness.type, registryPermission(c.harness.type, c.harness.permissions || ''), '— (provider default)')}</select></div>
+          <div class="phase-subagents"><span>${esc(c.name)} subagents</span>
+            <label>Model <select aria-label="${esc(c.name)} subagent model" data-pd="${c.id}:subModel" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('model', c.harness.type, c.harness.subagents?.model || '', 'Inherit orchestrator')}</select></label>
+            <label>Effort <select aria-label="${esc(c.name)} subagent effort" data-pd="${c.id}:subEffort" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', c.harness.type, c.harness.subagents?.effort || '', 'Inherit orchestrator', c.harness.subagents?.model || c.harness.model)}</select></label>
+          </div>`).join('')}
       </div></div>
       <div class="hint">any phase can run any provider — presets in step 3 are just shortcuts. Network &amp; tools live in each column's CFG panel.</div>
       <div class="hint" id="s-models-meta">${['claude', 'codex'].map((ty) => {
@@ -3927,6 +4024,10 @@ function renderSettingsModal() {
     const eff = document.querySelector(`[data-pd="${colId}:effort"]`);
     const perms = document.querySelector(`[data-pd="${colId}:permissions"]`);
     const human = type === 'human';
+    for (const [key, kind] of [['subModel', 'model'], ['subEffort', 'effort']]) {
+      const el = document.querySelector(`[data-pd="${colId}:${key}"]`);
+      if (el) { el.disabled = human; el.innerHTML = harnessOptions(kind, type, '', 'Inherit orchestrator'); }
+    }
     if (model) {
       model.innerHTML = human ? '<option value="">—</option>' : harnessOptions('model', type, '', '—');
       model.disabled = human;
@@ -3968,6 +4069,16 @@ function renderSettingsModal() {
     const colId = sel.dataset.pd.split(':')[0];
     const eff = document.querySelector(`[data-pd="${colId}:effort"]`);
     if (eff) eff.innerHTML = harnessOptions('effort', rowType(colId), eff.value, '— (CLI default)', sel.value);
+    const subModel = document.querySelector(`[data-pd="${colId}:subModel"]`);
+    const subEffort = document.querySelector(`[data-pd="${colId}:subEffort"]`);
+    if (subEffort && !subModel?.value) subEffort.innerHTML = harnessOptions('effort', rowType(colId), '', 'Inherit orchestrator', sel.value);
+  };
+  for (const sel of document.querySelectorAll('[data-pd$=":subModel"]')) sel.onchange = () => {
+    if (!handleCustomModel(sel)) return;
+    const colId = sel.dataset.pd.split(':')[0];
+    const eff = document.querySelector(`[data-pd="${colId}:subEffort"]`);
+    const model = sel.value || document.querySelector(`[data-pd="${colId}:model"]`)?.value;
+    if (eff) eff.innerHTML = harnessOptions('effort', rowType(colId), '', 'Inherit orchestrator', model);
   };
 
   // Appearance — device-local, applies live and persists immediately (no server round-trip).
@@ -4014,8 +4125,8 @@ function renderSettingsModal() {
         const d = phaseDefaults[c.id] || {};
         const typeChanged = d.type && d.type !== c.harness.type;
         const permissionsChanged = 'permissions' in d && d.permissions !== (c.harness.permissions || '');
-        if (!typeChanged && !d.model && !d.effort && !permissionsChanged) return null;
         const harness = { ...c.harness };
+        if ('subModel' in d) harness.subagents = { model: d.subModel, effort: d.subEffort || '' };
         if (typeChanged) {
           // Provider swap: take model/effort/permissions from the refilled selects verbatim — empty
           // means CLI default; the previous values belonged to the other provider.
@@ -4024,8 +4135,8 @@ function renderSettingsModal() {
           harness.effort = d.effort || '';
           harness.permissions = d.permissions || '';
         } else {
-          if (d.model) harness.model = d.model;
-          if (d.effort) harness.effort = d.effort;
+          if ('model' in d) harness.model = d.model;
+          if ('effort' in d) harness.effort = d.effort;
           if (permissionsChanged) harness.permissions = d.permissions || '';
         }
         return api(`/api/columns/${c.id}`, 'PATCH', { harness });

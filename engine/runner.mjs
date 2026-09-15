@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import * as claude from './claude.mjs';
 import * as codex from './codex.mjs';
 import { composePrompt, parseControlBlock } from './contract.mjs';
+import { normalizeProgress } from './build-progress.mjs';
 import { telegramConfig, sendTelegram, renderMessage } from './notify.mjs';
 import { applyCodexRateLimits, USAGE } from './usage.mjs';
 import { contextSnapshot } from './limits.mjs';
@@ -221,7 +222,13 @@ export class Runner {
   // comment composer to steer who picks the ticket up next).
   harnessFor(ticket, column) {
     const h = { ...this.store.effectiveHarness(ticket, column), ...(ticket.oneShotHarness || {}) };
+    if (h.type !== column.harness?.type && !ticket.oneShotHarness?.subagents && !ticket.overrides?.[column.id]?.subagents) h.subagents = {};
     normalizeModelAndEffort(h);
+    if (h.subagents) {
+      const worker = { type: h.type, model: h.subagents.model || h.model, effort: h.subagents.effort || h.effort };
+      normalizeModelAndEffort(worker);
+      h.subagents = { model: worker.model, effort: worker.effort };
+    }
     const validPerms = VALID_PERMISSIONS[h.type] || [];
     if (validPerms.length && !validPerms.includes(h.permissions)) {
       h.permissions = DEFAULT_PERMISSIONS[h.type];
@@ -539,6 +546,11 @@ export class Runner {
       .filter((a) => a.ts > sinceLastRun && (a.kind === 'comment' || a.kind === 'handoff'))
       .slice(-10);
 
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const runId = `${stamp}-${column.name.toLowerCase()}`;
+    const runDir = store.runDir(ticketId, runId);
+    const build = column.id === 'build' || /build/i.test(column.name) || Boolean(harness.subagents);
+    if (build && !harness.subagents) harness.subagents = {};
     const prompt = composePrompt({
       ticket, column, harness,
       dossierPath: store.dossierPath(ticketId),
@@ -546,12 +558,10 @@ export class Runner {
       resume: Boolean(sessionId),
       workDir,
       graft,
+      progressFile: build ? path.join(runDir, 'progress.jsonl') : null,
     });
 
     const inv = adapter.buildInvocation({ prompt, harness, sessionId, dataDir, workspace: workDir, gitDir, graft });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const runId = `${stamp}-${column.name.toLowerCase()}`;
-    const runDir = store.runDir(ticketId, runId);
     const transcriptFile = path.join(store.transcriptsDir(ticketId), `${runId}.jsonl`);
     fs.mkdirSync(path.dirname(transcriptFile), { recursive: true });
     fs.writeFileSync(transcriptFile, JSON.stringify({ meta: { cmd: inv.cmd, args: inv.args.map(truncateArg), harness, column: column.name } }) + '\n');
@@ -742,6 +752,7 @@ export class Runner {
       if (!ticket || !ar || !entry) { this._closeEntry(ticketId); return; }
 
       this._drainJournal(ticketId, entry);
+      this._drainProgress(ticketId, entry);
       if (exists(path.join(entry.runDir, 'exit.json'))) { this._finalize(ticketId); return; }
       if (!this._runAlive(ar)) { this._handleDeadRun(ticketId); return; }
       if (!ar.killIntent && Date.now() > new Date(ar.deadlineAt).getTime()) {
@@ -795,17 +806,48 @@ export class Runner {
   }
 
   _consumeLine(ticketId, entry, line, publish) {
+    entry.eventSequence = (entry.eventSequence || 0) + 1;
     let events = entry.adapter.parseLine(line, entry.state);
     if (!events) {
       if (publish) entry.transcript.write(JSON.stringify({ raw: line.slice(0, 2000) }) + '\n');
       return;
     }
     if (!Array.isArray(events)) events = [events];
-    for (const ev of events) {
+    for (const [index, raw] of events.entries()) {
       if (!publish) continue;
+      const ev = { ...raw, id: `${entry.runId}:${entry.eventSequence}:${index}`, runId: entry.runId, at: nowIso() };
       entry.transcript.write(JSON.stringify({ ev }) + '\n');
       this.broadcast({ type: 'run-event', ticketId, column: entry.columnName, event: ev });
     }
+  }
+
+  _drainProgress(ticketId, entry) {
+    const file = path.join(entry.runDir, 'progress.jsonl');
+    if (!exists(file)) return;
+    const offsetFile = path.join(entry.runDir, 'progress-offset');
+    entry.progressOffset ??= exists(offsetFile) ? readOffset(offsetFile) : 0;
+    const size = fs.statSync(file).size;
+    if (size <= entry.progressOffset) return;
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(Math.min(size - entry.progressOffset, 256 * 1024));
+      const n = fs.readSync(fd, buf, 0, buf.length, entry.progressOffset);
+      let start = 0;
+      for (let end = buf.indexOf(10); end >= 0 && end < n; end = buf.indexOf(10, start)) {
+        const offset = entry.progressOffset + end + 1;
+        let report; try { report = JSON.parse(buf.subarray(start, end).toString('utf8')); } catch { /* malformed report */ }
+        const normalized = normalizeProgress(report);
+        if (normalized) {
+          const ev = { ...normalized, id: `${entry.runId}:progress:${offset}`, runId: entry.runId, at: nowIso() };
+          entry.transcript.write(JSON.stringify({ ev }) + '\n');
+          this.broadcast({ type: 'run-event', ticketId, column: entry.columnName, event: ev });
+        }
+        start = end + 1;
+      }
+      // Discard an oversized malformed line instead of stalling the reader forever.
+      entry.progressOffset += start || (n === 256 * 1024 ? n : 0);
+      atomicWrite(offsetFile, String(entry.progressOffset));
+    } finally { fs.closeSync(fd); }
   }
 
   _flushLiveTelemetry(ticketId, entry) {

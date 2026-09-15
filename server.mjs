@@ -22,6 +22,7 @@ import { applyUpdateWithStrategy, assessMainDivergence, checkUpdateStatus, creat
 import { inspectWorkspaceResolution, inspectWorkspaceStatus, resolveWorkspace } from './engine/workspace-resolution.mjs';
 import { removeTicketWorktree } from './engine/branching.mjs';
 import { systemCapacity } from './engine/capacity.mjs';
+import { readBuildTranscript } from './engine/build-progress.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENV_FILE = path.resolve(process.env.DISPATCH_ENV_FILE || path.join(__dirname, '.env'));
@@ -118,6 +119,14 @@ function normalizeHarnessPayload(payload) {
   if (!payload || typeof payload !== 'object') return null;
   if (payload.type && !VALID_HARNESSES.has(payload.type)) {
     throw new Error(`invalid harness type: ${payload.type}`);
+  }
+  if (payload.subagents != null) {
+    const sub = payload.subagents;
+    if (typeof sub !== 'object' || Array.isArray(sub)) throw new Error('subagents must be an object');
+    for (const key of ['model', 'effort']) {
+      if (sub[key] != null && (typeof sub[key] !== 'string' || !/^[a-zA-Z0-9._:/-]{0,160}$/.test(sub[key]))) throw new Error(`invalid subagent ${key}`);
+    }
+    payload = { ...payload, subagents: { model: sub.model || '', effort: sub.effort || '' } };
   }
   return payload;
 }
@@ -1244,14 +1253,14 @@ app.get('/api/tickets/:id/dossier', (req, res) => {
   res.type('text/plain').send(store.readDossier(req.params.id));
 });
 
-app.get('/api/tickets/:id/transcript', (req, res) => {
+app.get('/api/tickets/:id/transcript', async (req, res) => {
   const dir = store.transcriptsDir(req.params.id);
   try {
-    const files = fs.readdirSync(dir).sort();
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort();
     const file = req.query.file ? path.basename(String(req.query.file)) : files[files.length - 1];
     if (!file) return res.json({ files: [], lines: [] });
-    const lines = fs.readFileSync(path.join(dir, file), 'utf8').split('\n').filter(Boolean).slice(-500);
-    res.json({ files, file, lines });
+    const snapshot = await readBuildTranscript(path.join(dir, file));
+    res.json({ files, file, ...snapshot });
   } catch {
     res.json({ files: [], lines: [] });
   }
@@ -1362,6 +1371,7 @@ function inUseModels() {
   const inUse = { claude: new Set(), codex: new Set() };
   for (const c of store.board.columns) {
     if (c.harness?.model && inUse[c.harness.type]) inUse[c.harness.type].add(c.harness.model);
+    if (c.harness?.subagents?.model && inUse[c.harness.type]) inUse[c.harness.type].add(c.harness.subagents.model);
   }
   for (const t of store.tickets.values()) {
     for (const [colId, o] of Object.entries(t.overrides || {})) {

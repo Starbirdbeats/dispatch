@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { CLAUDE_CONTEXT_WINDOW } from './limits.mjs';
 import { GRAFT_MCP_TOOLS } from './graft.mjs';
+import { claudeAgentEvents } from './build-progress.mjs';
 
 export function buildInvocation({ prompt, harness, sessionId, dataDir, graft = null }) {
   // project,local only: user-level settings would fire Marcello's global hooks
@@ -12,6 +13,14 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, graft = n
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--setting-sources', 'project,local'];
   if (harness.model) args.push('--model', harness.model);
   if (harness.effort) args.push('--effort', harness.effort);
+  if (harness.subagents) {
+    args.push('--agents', JSON.stringify({ 'dispatch-worker': {
+      description: 'Execute a bounded Dispatch build assignment. Use this agent for all delegated build tasks.',
+      prompt: 'Complete only your assigned task. Preserve other agents work. Follow the Dispatch progress reporting instructions in your assignment. Report milestones, blockers and decisions as concise public summaries, never private reasoning.',
+      model: harness.subagents.model || 'inherit',
+      ...(harness.subagents.effort ? { effort: harness.subagents.effort } : {}),
+    } }));
+  }
 
   if (harness.permissions === 'bypassPermissions') {
     args.push('--dangerously-skip-permissions');
@@ -86,6 +95,10 @@ function absoluteClaudePathPattern(dir) {
 export function parseLine(line, state) {
   let obj;
   try { obj = JSON.parse(line); } catch { return null; }
+
+  const delegated = claudeAgentEvents(obj, state);
+  // Child messages must never replace the orchestrator's final handoff or usage.
+  if (obj.parent_tool_use_id || delegated) return delegated;
 
   if (obj.session_id) state.sessionId = obj.session_id;
 

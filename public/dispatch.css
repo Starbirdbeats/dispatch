@@ -1652,3 +1652,31 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
   .stepper-foot { flex-direction: column; align-items: stretch; }
   .stepper-foot .btn { height: 46px; }
 }
+/* Build coordination uses the existing v1 palette and typography. */
+.build-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 20px; }
+.build-orchestrator, #build-agents { min-width: 0; }
+.build-layout .transcript { height: 60vh; min-height: 260px; }
+.build-layout .transcript-bar { flex-wrap: wrap; }
+.build-layout .transcript-bar select { max-width: 100%; min-width: 0; }
+.build-agent { border: 1px solid var(--line); margin-top: 12px; padding: 12px; overflow-wrap: anywhere; font-size: 12px; line-height: 1.55; }
+.build-agent-head { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: baseline; }
+.agent-status { font-size: 10px; text-transform: uppercase; color: var(--fg-faint); }
+.status-running { color: var(--amber); }
+.status-completed { color: var(--green); }
+.status-failed, .status-blocked { color: var(--red, #c43b30); }
+.build-task { white-space: pre-wrap; margin: 10px 0; font-weight: 600; max-height: 150px; overflow: auto; }
+.build-update { white-space: pre-wrap; max-height: 200px; overflow: auto; margin-bottom: 8px; }
+.build-agent details { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }
+.build-agent summary { cursor: pointer; }
+.agent-history { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; }
+.agent-history time, .agent-history small { color: var(--fg-faint); font-size: 10px; }
+.agent-history small, .ln .tag time, .ln .tag small { display: block; }
+.build-empty { padding: 24px 0; color: var(--fg-faint); line-height: 1.6; }
+.build-config { margin-top: 18px; padding: 14px; border: 1px solid var(--line); }
+.phase-subagents { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 2fr 1fr; align-items: end; gap: 12px; border-bottom: 1px solid var(--line); padding: 6px 0 16px; margin-bottom: 10px; }
+.phase-subagents label { display: grid; gap: 4px; font-size: 10px; color: var(--fg-faint); }
+@media (max-width: 760px) {
+  .build-layout { grid-template-columns: minmax(0, 1fr); }
+  .build-layout .transcript { height: 40vh; }
+  .phase-subagents { grid-template-columns: minmax(0, 1fr); }
+}

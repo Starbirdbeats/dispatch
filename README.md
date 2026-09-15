@@ -262,3 +262,22 @@ ticket modal (and updates the URL), and station `CFG` opens the phase config.
 - Use the SETUP section to enable only providers you can authenticate.
 - For reproducible public deploys, keep `publish` and branch history clean.
 - If you need a different default phase layout, update `store.mjs` (`DEFAULT_BOARD`) or edit `board.json` in `DISPATCH_DATA`.
+# Build coordination
+
+In **Build → CFG**, choose the orchestrator model and effort, then the subagent
+model and effort. These controls are also in **Settings → Providers**. Workers
+use the orchestrator's provider and permissions; blank worker selections inherit
+the orchestrator settings. Changes apply to the next run, not an active run.
+
+Opening a running ticket shows the **Build** tab: the orchestrator transcript,
+worker assignments and statuses, and expandable progress and decision histories.
+Native provider lifecycle events are distinguished from agent-reported milestones.
+Dispatch asks each worker to report public summaries to its run-local progress
+journal. Updates depend on what the provider and worker report; silence is not
+estimated percentage completion. Old runs cannot retroactively gain this telemetry.
+
+Run history survives reloads and service restarts. The UI shows the latest 500
+transcript entries and up to 80 recent updates per worker; full transcripts remain
+in the ticket's data directory. Codex requires a CLI supporting
+`agents.default_subagent_model` and `agents.default_subagent_reasoning_effort`.
+Claude workers use the session-local `dispatch-worker` agent definition.

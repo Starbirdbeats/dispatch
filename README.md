@@ -41,6 +41,7 @@ Then edit:
 
 - `DISPATCH_DATA` (defaults to `~/dispatch-data`)
 - `DISPATCH_PORT` (defaults to `4400`)
+- `DISPATCH_HOST` (defaults to `0.0.0.0`; use `127.0.0.1` behind a local reverse proxy)
 - `DISPATCH_ENV_FILE` (defaults to `.env`)
 
 Optional:

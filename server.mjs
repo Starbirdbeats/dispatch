@@ -42,6 +42,7 @@ const { telegramConfig, sendTelegram, detectChats } = notify;
 const { USAGE, extractCodexRateLimitsSnapshot, loadUsageCache, setProviderUsage, setProviderPlan, usageAuthGapFallback } = usage;
 const { REGISTRY, loadCodexDefaults, loadModelsCache, refreshModels, registryAgeMs, probe, readClaudeOAuthToken, isClaudeOAuthTokenUnavailable } = registry;
 const PORT = Number(process.env.DISPATCH_PORT || 4400);
+const HOST = process.env.DISPATCH_HOST || '0.0.0.0';
 
 const BOOT_ID = crypto.randomUUID(); // stale open tabs self-reload when this changes
 const store = new Store();
@@ -1413,11 +1414,11 @@ app.post('/api/maintenance/prune', async (_req, res) => {
 let listenRetries = 20;
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE' && listenRetries-- > 0) {
-    setTimeout(() => server.listen(PORT, '0.0.0.0'), 500);
+    setTimeout(() => server.listen(PORT, HOST), 500);
     return;
   }
   throw err;
 });
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Dispatch listening on http://0.0.0.0:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`Dispatch listening on http://${HOST}:${PORT}`);
 });

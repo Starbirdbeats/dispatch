@@ -1673,7 +1673,7 @@ a.att-name:hover { color: var(--red); text-decoration: underline; }
 .agent-history small, .ln .tag time, .ln .tag small { display: block; }
 .build-empty { padding: 24px 0; color: var(--fg-faint); line-height: 1.6; }
 .build-config { margin-top: 18px; padding: 14px; border: 1px solid var(--line); }
-.phase-subagents { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 2fr 1fr; align-items: end; gap: 12px; border-bottom: 1px solid var(--line); padding: 6px 0 16px; margin-bottom: 10px; }
+.phase-subagents { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr); align-items: end; gap: 12px; border-bottom: 1px solid var(--line); padding: 6px 0 16px; margin-bottom: 10px; }
 .phase-subagents label { display: grid; gap: 4px; font-size: 10px; color: var(--fg-faint); }
 @media (max-width: 760px) {
   .build-layout { grid-template-columns: minmax(0, 1fr); }

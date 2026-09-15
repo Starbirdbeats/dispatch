@@ -3080,7 +3080,7 @@ function renderBuildAgents(view, events) {
     if (ev.id && a.history.some((e) => e.id === ev.id)) continue;
     if (ev.at && a.at && ev.at < a.at) continue;
     const finished = ['completed', 'failed', 'closed', 'interrupted'].includes(a.status);
-    for (const key of ['task', 'status', 'nativeId']) {
+    for (const key of ['task', 'status', 'nativeId', 'harness', 'model', 'effort']) {
       if (key === 'status' && finished && !ev.restart && ['pending', 'running', 'closed'].includes(ev.status)) continue;
       if (ev[key]) a[key] = ev[key];
     }
@@ -3095,10 +3095,11 @@ function renderBuildAgents(view, events) {
   const openDetails = new Set([...box.querySelectorAll('details[open]')].map((d) => d.dataset.agent));
   const done = workers.filter((a) => a.status === 'completed').length;
   box.innerHTML = `<div class="section-head">SUBAGENTS <span>${done}/${workers.length} completed</span></div>
-    <div class="hint">${esc(sub.model || 'Inherit orchestrator model')} · ${esc(sub.effort || 'inherit effort')} · configured defaults</div>
+    <div class="hint">${esc(sub.type || view.meta?.harness?.type || 'Default harness')} · ${esc(sub.model || 'Default model')} · ${esc(sub.effort || 'default effort')} · configured defaults</div>
     ${workers.length ? workers.map((a) => `<article class="build-agent">
       <div class="build-agent-head"><strong>${esc(a.agentId)}</strong><span class="agent-status status-${esc(a.status || 'unknown')}">${esc(!active && ['running', 'pending'].includes(a.status) ? 'run ended · no completion report' : a.status || 'unknown')}</span></div>
       <div class="build-task">${esc(a.task || 'Assignment not reported yet')}</div>
+      ${a.harness ? `<div class="hint">${esc(a.harness)} · ${esc(a.model || 'CLI default')} · ${esc(a.effort || 'default effort')}</div>` : ''}
       <div class="build-update">${esc(a.text || 'Waiting for an update')}</div>
       <div class="hint">${a.at ? esc(new Date(a.at).toLocaleTimeString()) : 'No timestamp recorded'}</div>
       <details data-agent="${esc(a.agentId)}" ${openDetails.has(a.agentId) ? 'open' : ''}><summary>Progress &amp; decisions</summary>
@@ -3179,6 +3180,8 @@ function renderColumnModal(draftOverride) {
   const rawH = draftOverride || c.harness;
   const type = rawH.type || 'human';
   const h = type === 'human' ? rawH : normalizeHarnessChoice(rawH, {});
+  const subType = rawH.subagents?.type || type;
+  const subDefault = subType === type ? 'Inherit orchestrator' : 'CLI default';
   const phaseTypeWarning = h.type !== 'human' && !isProviderEnabled(h.type)
     ? '<div class="setup-pill warn" style="margin:6px 0">PROVIDER disabled in setup</div>'
     : '';
@@ -3195,11 +3198,13 @@ function renderColumnModal(draftOverride) {
       <select id="c-effort" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', type, h.effort || '', '— (CLI default)', h.model)}</select>
       <div class="build-config">
         <div class="section-head">SUBAGENTS</div>
-        <div class="hint">Defaults for workers spawned by this orchestrator. Uses the same provider. Changes apply to the next run.</div>
+        <div class="hint">Choose the worker harness independently. Workers can exchange messages and delegate across the configured harnesses. Changes apply to the next run.</div>
+        <label class="f" for="c-sub-type">HARNESS</label>
+        <select id="c-sub-type"><option value="">Inherit orchestrator</option>${providerTypeOptions(rawH.subagents?.type || '', { includeHuman: false, disabledOk: false, showWarnings: true })}</select>
         <label class="f" for="c-sub-model">MODEL</label>
-        <select id="c-sub-model" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('model', type, rawH.subagents?.model || '', 'Inherit orchestrator')}</select>
+        <select id="c-sub-model" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('model', subType, rawH.subagents?.model || '', subDefault)}</select>
         <label class="f" for="c-sub-effort">EFFORT</label>
-        <select id="c-sub-effort" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', type, rawH.subagents?.effort || '', 'Inherit orchestrator', rawH.subagents?.model || h.model)}</select>
+        <select id="c-sub-effort" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', subType, rawH.subagents?.effort || '', subDefault, rawH.subagents?.model || (subType === type ? h.model : ''))}</select>
       </div>
       <label class="f">PERMISSIONS</label>
       <select id="c-perms" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('permissions', type, h.permissions || '', '— (harness default)')}</select>
@@ -3227,7 +3232,7 @@ function renderColumnModal(draftOverride) {
     type: $('#c-type').value,
     model: $('#c-model').value === '__custom' ? '' : $('#c-model').value,
     effort: $('#c-effort').value,
-    subagents: { model: $('#c-sub-model').value, effort: $('#c-sub-effort').value },
+    subagents: { type: $('#c-sub-type').value, model: $('#c-sub-model').value, effort: $('#c-sub-effort').value },
     permissions: $('#c-perms').value,
     allowedTools: $('#c-tools').value.trim(),
     chrome: Boolean($('#c-chrome').value),
@@ -3242,13 +3247,18 @@ function renderColumnModal(draftOverride) {
   $('#c-type').onchange = () => {
     const d = collectDraft();
     Object.assign(d, normalizeHarnessChoice({ type: d.type }, {}));
-    d.subagents = {};
+    if (!d.subagents.type) d.subagents = {};
     renderColumnModal(d);
   };
   $('#c-model').onchange = () => { if (handleCustomModel($('#c-model'))) renderColumnModal(collectDraft()); }; // model change re-filters efforts
+  $('#c-sub-type').onchange = () => {
+    const d = collectDraft();
+    d.subagents = { type: d.subagents.type, model: '', effort: '' };
+    renderColumnModal(d);
+  };
   $('#c-sub-model').onchange = () => {
     if (!handleCustomModel($('#c-sub-model'))) return;
-    $('#c-sub-effort').innerHTML = harnessOptions('effort', type, '', 'Inherit orchestrator', $('#c-sub-model').value || $('#c-model').value);
+    $('#c-sub-effort').innerHTML = harnessOptions('effort', subType, '', subDefault, $('#c-sub-model').value || (subType === type ? $('#c-model').value : ''));
   };
 
   guardClick($('#c-save'), '[ SAVING… ]', () => api(`/api/columns/${c.id}`, 'PATCH', {
@@ -3261,7 +3271,7 @@ function renderColumnModal(draftOverride) {
       type: $('#c-type').value,
       model: $('#c-model').value.trim(),
       effort: $('#c-effort').value.trim(),
-      subagents: { model: $('#c-sub-model').value.trim(), effort: $('#c-sub-effort').value.trim() },
+      subagents: { type: $('#c-sub-type').value, model: $('#c-sub-model').value.trim(), effort: $('#c-sub-effort').value.trim() },
       permissions: $('#c-perms').value.trim(),
       network: Boolean($('#c-net').value),
       allowedTools: $('#c-tools').value.trim(),
@@ -3915,8 +3925,9 @@ function renderSettingsModal() {
           <div><select data-pd="${c.id}:effort" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', c.harness.type, c.harness.effort || '', '— (CLI default)', c.harness.model)}</select></div>
           <div><select data-pd="${c.id}:permissions" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('permissions', c.harness.type, registryPermission(c.harness.type, c.harness.permissions || ''), '— (provider default)')}</select></div>
           <div class="phase-subagents"><span>${esc(c.name)} subagents</span>
-            <label>Model <select aria-label="${esc(c.name)} subagent model" data-pd="${c.id}:subModel" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('model', c.harness.type, c.harness.subagents?.model || '', 'Inherit orchestrator')}</select></label>
-            <label>Effort <select aria-label="${esc(c.name)} subagent effort" data-pd="${c.id}:subEffort" ${c.harness.type === 'human' ? 'disabled' : ''}>${harnessOptions('effort', c.harness.type, c.harness.subagents?.effort || '', 'Inherit orchestrator', c.harness.subagents?.model || c.harness.model)}</select></label>
+            <label>Harness <select aria-label="${esc(c.name)} subagent harness" data-pd="${c.id}:subType"><option value="">Inherit orchestrator</option>${providerTypeOptions(c.harness.subagents?.type || '', { includeHuman: false, disabledOk: false, showWarnings: true })}</select></label>
+            <label>Model <select aria-label="${esc(c.name)} subagent model" data-pd="${c.id}:subModel">${harnessOptions('model', c.harness.subagents?.type || c.harness.type, c.harness.subagents?.model || '', 'Default')}</select></label>
+            <label>Effort <select aria-label="${esc(c.name)} subagent effort" data-pd="${c.id}:subEffort">${harnessOptions('effort', c.harness.subagents?.type || c.harness.type, c.harness.subagents?.effort || '', 'Default', c.harness.subagents?.model || (c.harness.subagents?.type && c.harness.subagents.type !== c.harness.type ? '' : c.harness.model))}</select></label>
           </div>`).join('')}
       </div></div>
       <div class="hint">any phase can run any provider — presets in step 3 are just shortcuts. Network &amp; tools live in each column's CFG panel.</div>
@@ -4031,7 +4042,7 @@ function renderSettingsModal() {
     const human = type === 'human';
     for (const [key, kind] of [['subModel', 'model'], ['subEffort', 'effort']]) {
       const el = document.querySelector(`[data-pd="${colId}:${key}"]`);
-      if (el) { el.disabled = human; el.innerHTML = harnessOptions(kind, type, '', 'Inherit orchestrator'); }
+      if (el && !document.querySelector(`[data-pd="${colId}:subType"]`)?.value) { el.disabled = human; el.innerHTML = harnessOptions(kind, type, '', 'Inherit orchestrator'); }
     }
     if (model) {
       model.innerHTML = human ? '<option value="">—</option>' : harnessOptions('model', type, '', '—');
@@ -4076,14 +4087,23 @@ function renderSettingsModal() {
     if (eff) eff.innerHTML = harnessOptions('effort', rowType(colId), eff.value, '— (CLI default)', sel.value);
     const subModel = document.querySelector(`[data-pd="${colId}:subModel"]`);
     const subEffort = document.querySelector(`[data-pd="${colId}:subEffort"]`);
-    if (subEffort && !subModel?.value) subEffort.innerHTML = harnessOptions('effort', rowType(colId), '', 'Inherit orchestrator', sel.value);
+    if (subEffort && !subModel?.value && !document.querySelector(`[data-pd="${colId}:subType"]`)?.value) subEffort.innerHTML = harnessOptions('effort', rowType(colId), '', 'Inherit orchestrator', sel.value);
   };
   for (const sel of document.querySelectorAll('[data-pd$=":subModel"]')) sel.onchange = () => {
     if (!handleCustomModel(sel)) return;
     const colId = sel.dataset.pd.split(':')[0];
     const eff = document.querySelector(`[data-pd="${colId}:subEffort"]`);
-    const model = sel.value || document.querySelector(`[data-pd="${colId}:model"]`)?.value;
-    if (eff) eff.innerHTML = harnessOptions('effort', rowType(colId), '', 'Inherit orchestrator', model);
+    const type = document.querySelector(`[data-pd="${colId}:subType"]`)?.value || rowType(colId);
+    const model = sel.value || (type === rowType(colId) ? document.querySelector(`[data-pd="${colId}:model"]`)?.value : '');
+    if (eff) eff.innerHTML = harnessOptions('effort', type, '', 'Default', model);
+  };
+  for (const sel of document.querySelectorAll('[data-pd$=":subType"]')) sel.onchange = () => {
+    const colId = sel.dataset.pd.split(':')[0];
+    const type = sel.value || rowType(colId);
+    for (const [key, kind] of [['subModel', 'model'], ['subEffort', 'effort']]) {
+      const el = document.querySelector(`[data-pd="${colId}:${key}"]`);
+      if (el) { el.disabled = type === 'human'; el.innerHTML = harnessOptions(kind, type, '', 'Default'); }
+    }
   };
 
   // Appearance — device-local, applies live and persists immediately (no server round-trip).
@@ -4131,7 +4151,7 @@ function renderSettingsModal() {
         const typeChanged = d.type && d.type !== c.harness.type;
         const permissionsChanged = 'permissions' in d && d.permissions !== (c.harness.permissions || '');
         const harness = { ...c.harness };
-        if ('subModel' in d) harness.subagents = { model: d.subModel, effort: d.subEffort || '' };
+        if ('subModel' in d) harness.subagents = { type: d.subType || '', model: d.subModel, effort: d.subEffort || '' };
         if (typeChanged) {
           // Provider swap: take model/effort/permissions from the refilled selects verbatim — empty
           // means CLI default; the previous values belonged to the other provider.

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { CODEX_CONTEXT_WINDOW } from './limits.mjs';
 import { codexAgentEvents } from './build-progress.mjs';
 
-export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace, gitDir, graft = null }) {
+export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace, gitDir, graft = null, bridge = null }) {
   const lastMsgFile = path.join(dataDir, 'last-message.txt');
   const args = ['exec'];
   const resume = Boolean(sessionId);
@@ -14,7 +14,11 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
   args.push('--json', '-o', lastMsgFile, '--skip-git-repo-check');
   if (harness.model) args.push('-m', harness.model);
   if (harness.effort) args.push('-c', `model_reasoning_effort="${harness.effort}"`);
-  if (harness.subagents) {
+  if (bridge) {
+    args.push('-c', 'agents.enabled=false');
+    args.push('-c', `mcp_servers.dispatch_agents.command=${JSON.stringify(bridge.mcp.command)}`);
+    args.push('-c', `mcp_servers.dispatch_agents.args=${JSON.stringify(bridge.mcp.args)}`);
+  } else if (harness.subagents) {
     args.push('-c', 'agents.enabled=true');
     if (harness.subagents.model) args.push('-c', `agents.default_subagent_model=${JSON.stringify(harness.subagents.model)}`);
     if (harness.subagents.effort) args.push('-c', `agents.default_subagent_reasoning_effort=${JSON.stringify(harness.subagents.effort)}`);

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import * as claude from './claude.mjs';
 import * as codex from './codex.mjs';
 import { composePrompt, parseControlBlock } from './contract.mjs';
+import { createAgentBridge } from './agent-bridge-config.mjs';
 import { normalizeProgress } from './build-progress.mjs';
 import { telegramConfig, sendTelegram, renderMessage } from './notify.mjs';
 import { applyCodexRateLimits, USAGE } from './usage.mjs';
@@ -222,12 +223,13 @@ export class Runner {
   // comment composer to steer who picks the ticket up next).
   harnessFor(ticket, column) {
     const h = { ...this.store.effectiveHarness(ticket, column), ...(ticket.oneShotHarness || {}) };
-    if (h.type !== column.harness?.type && !ticket.oneShotHarness?.subagents && !ticket.overrides?.[column.id]?.subagents) h.subagents = {};
+    if (h.type !== column.harness?.type && !h.subagents?.type && !ticket.oneShotHarness?.subagents && !ticket.overrides?.[column.id]?.subagents) h.subagents = {};
     normalizeModelAndEffort(h);
     if (h.subagents) {
-      const worker = { type: h.type, model: h.subagents.model || h.model, effort: h.subagents.effort || h.effort };
+      const type = h.subagents.type || h.type;
+      const worker = { type, model: h.subagents.model || (type === h.type ? h.model : ''), effort: h.subagents.effort || (type === h.type ? h.effort : '') };
       normalizeModelAndEffort(worker);
-      h.subagents = { model: worker.model, effort: worker.effort };
+      h.subagents = { type: h.subagents.type || '', model: worker.model, effort: worker.effort };
     }
     const validPerms = VALID_PERMISSIONS[h.type] || [];
     if (validPerms.length && !validPerms.includes(h.permissions)) {
@@ -248,6 +250,11 @@ export class Runner {
     if (!column) return false;
     const harness = this.harnessFor(ticket, column);
     if (harness.type === 'human') return false;
+    if (harness.subagents?.type && !this.store.providerEnabled(harness.subagents.type)) {
+      this._parkDisabledProvider(ticket, harness.subagents.type);
+      this.broadcast({ type: 'state-changed' });
+      return false;
+    }
     if (!this.store.providerEnabled(harness.type)) {
       this._parkDisabledProvider(ticket, harness.type);
       this.broadcast({ type: 'state-changed' });
@@ -494,6 +501,11 @@ export class Runner {
       this._closeEntry(ticketId);
       return;
     }
+    if (harness.subagents?.type && !store.providerEnabled(harness.subagents.type)) {
+      this._parkDisabledProvider(ticket, harness.subagents.type);
+      this._closeEntry(ticketId);
+      return;
+    }
     if (ticket.oneShotHarness) { delete ticket.oneShotHarness; store.saveTicket(ticketId); }
     const adapter = ADAPTERS[harness.type];
     if (!adapter) throw new Error(`unknown harness ${harness.type}`);
@@ -551,6 +563,8 @@ export class Runner {
     const runDir = store.runDir(ticketId, runId);
     const build = column.id === 'build' || /build/i.test(column.name) || Boolean(harness.subagents);
     if (build && !harness.subagents) harness.subagents = {};
+    const bridge = createAgentBridge({ runDir, workspace: workDir, gitDir, harness,
+      enabledProviders: ['claude', 'codex'].filter((type) => store.providerEnabled(type)) });
     const prompt = composePrompt({
       ticket, column, harness,
       dossierPath: store.dossierPath(ticketId),
@@ -558,10 +572,11 @@ export class Runner {
       resume: Boolean(sessionId),
       workDir,
       graft,
+      bridge,
       progressFile: build ? path.join(runDir, 'progress.jsonl') : null,
     });
 
-    const inv = adapter.buildInvocation({ prompt, harness, sessionId, dataDir, workspace: workDir, gitDir, graft });
+    const inv = adapter.buildInvocation({ prompt, harness, sessionId, dataDir, workspace: workDir, gitDir, graft, bridge });
     const transcriptFile = path.join(store.transcriptsDir(ticketId), `${runId}.jsonl`);
     fs.mkdirSync(path.dirname(transcriptFile), { recursive: true });
     fs.writeFileSync(transcriptFile, JSON.stringify({ meta: { cmd: inv.cmd, args: inv.args.map(truncateArg), harness, column: column.name } }) + '\n');

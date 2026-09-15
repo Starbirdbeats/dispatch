@@ -123,10 +123,11 @@ function normalizeHarnessPayload(payload) {
   if (payload.subagents != null) {
     const sub = payload.subagents;
     if (typeof sub !== 'object' || Array.isArray(sub)) throw new Error('subagents must be an object');
+    if (sub.type != null && !['', 'claude', 'codex'].includes(sub.type)) throw new Error('invalid subagent harness');
     for (const key of ['model', 'effort']) {
       if (sub[key] != null && (typeof sub[key] !== 'string' || !/^[a-zA-Z0-9._:/-]{0,160}$/.test(sub[key]))) throw new Error(`invalid subagent ${key}`);
     }
-    payload = { ...payload, subagents: { model: sub.model || '', effort: sub.effort || '' } };
+    payload = { ...payload, subagents: { type: sub.type || '', model: sub.model || '', effort: sub.effort || '' } };
   }
   return payload;
 }
@@ -1371,7 +1372,8 @@ function inUseModels() {
   const inUse = { claude: new Set(), codex: new Set() };
   for (const c of store.board.columns) {
     if (c.harness?.model && inUse[c.harness.type]) inUse[c.harness.type].add(c.harness.model);
-    if (c.harness?.subagents?.model && inUse[c.harness.type]) inUse[c.harness.type].add(c.harness.subagents.model);
+    const workerType = c.harness?.subagents?.type || c.harness?.type;
+    if (c.harness?.subagents?.model && inUse[workerType]) inUse[workerType].add(c.harness.subagents.model);
   }
   for (const t of store.tickets.values()) {
     for (const [colId, o] of Object.entries(t.overrides || {})) {

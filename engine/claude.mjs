@@ -6,13 +6,15 @@ import path from 'node:path';
 import { CLAUDE_CONTEXT_WINDOW } from './limits.mjs';
 import { GRAFT_MCP_TOOLS } from './graft.mjs';
 import { claudeAgentEvents } from './build-progress.mjs';
+import { BRIDGE_TOOLS } from './agent-bridge-config.mjs';
 
-export function buildInvocation({ prompt, harness, sessionId, dataDir, graft = null }) {
+export function buildInvocation({ prompt, harness, sessionId, dataDir, graft = null, bridge = null }) {
   // Keep unrelated user-level hooks out of automated phase runs.
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--setting-sources', 'project,local'];
   if (harness.model) args.push('--model', harness.model);
   if (harness.effort) args.push('--effort', harness.effort);
-  if (harness.subagents) {
+  if (bridge) args.push('--disallowedTools', 'Agent', 'Task');
+  else if (harness.subagents) {
     args.push('--agents', JSON.stringify({ 'dispatch-worker': {
       description: 'Execute a bounded Dispatch build assignment. Use this agent for all delegated build tasks.',
       prompt: 'Complete only your assigned task. Preserve other agents work. Follow the Dispatch progress reporting instructions in your assignment. Report milestones, blockers and decisions as concise public summaries, never private reasoning.',
@@ -26,17 +28,18 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, graft = n
   } else if (harness.permissions) {
     args.push('--permission-mode', harness.permissions);
   }
-  const allowedTools = buildAllowedTools(harness, dataDir, graft);
+  const allowedTools = buildAllowedTools(harness, dataDir, graft, bridge);
   if (allowedTools) args.push('--allowedTools', allowedTools);
   if (harness.chrome) args.push('--chrome');
   args.push('--add-dir', dataDir);
-  if (graft?.enabled) {
+  if (graft?.enabled || bridge) {
     args.push('--mcp-config', JSON.stringify({
       mcpServers: {
-        graft: {
+        ...(bridge ? { dispatch_agents: bridge.mcp } : {}),
+        ...(graft?.enabled ? { graft: {
           command: graft.mcp.command,
           args: graft.mcp.args,
-        },
+        } } : {}),
       },
     }));
   }
@@ -52,11 +55,12 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, graft = n
   return { cmd: 'claude', args, newSessionId };
 }
 
-function buildAllowedTools(harness, dataDir, graft) {
+function buildAllowedTools(harness, dataDir, graft, bridge) {
   const dataPattern = dataDir ? absoluteClaudePathPattern(dataDir) : null;
   const graftTools = graft?.enabled
     ? GRAFT_MCP_TOOLS.map((tool) => `mcp__graft__${tool}`)
     : [];
+  const bridgeTools = bridge ? BRIDGE_TOOLS.map((tool) => `mcp__dispatch_agents__${tool}`) : [];
   if (harness.readOnly && dataPattern) {
     return [
       'Read',
@@ -66,10 +70,12 @@ function buildAllowedTools(harness, dataDir, graft) {
       `Write(${dataPattern}/**)`,
       `Edit(${dataPattern}/**)`,
       ...graftTools,
+      ...bridgeTools,
     ].join(' ');
   }
   const configured = harness.allowedTools?.trim();
   const rules = configured ? [configured] : [];
+  rules.push(...bridgeTools);
   // Headless "manual" runs have no human to approve prompts, so every tool off the
   // allowlist is denied — carve out the ticket data dir or the mandatory dossier
   // update can never happen.

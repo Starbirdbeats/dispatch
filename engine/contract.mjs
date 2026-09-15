@@ -1,7 +1,7 @@
 // contract.mjs — the hand-off contract between Dispatch and any harness.
 // Composes the per-run prompt and parses the structured control block agents must emit.
 
-export function composePrompt({ ticket, column, harness, dossierPath, recentActivity, resume, workDir, graft = null, progressFile = null }) {
+export function composePrompt({ ticket, column, harness, dossierPath, recentActivity, resume, workDir, graft = null, progressFile = null, bridge = null }) {
   const lines = [];
 
   lines.push(`# Dispatch run — ticket "${ticket.title}" — phase "${column.name}"`);
@@ -72,8 +72,9 @@ export function composePrompt({ ticket, column, harness, dossierPath, recentActi
   if (progressFile) {
     lines.push('\n## Build coordination and public progress');
     lines.push('You are the orchestrator. Break the work into concrete tasks. Delegate independent tasks when useful and supported; do not spawn agents for work that is better done directly. Keep ownership clear and integrate and verify their work yourself.');
-    lines.push(`Subagent defaults: model ${harness.subagents?.model || 'inherit orchestrator'}, effort ${harness.subagents?.effort || 'inherit orchestrator'}. Use these selections for delegated work, do not override them with other models or efforts.`);
-    if (harness.type === 'claude') lines.push('Use subagent_type dispatch-worker for delegated build tasks.');
+    lines.push(`Subagent defaults: model ${harness.subagents?.model || (bridge ? 'worker CLI default' : 'inherit orchestrator')}, effort ${harness.subagents?.effort || (bridge ? 'worker CLI default' : 'inherit orchestrator')}. Use these selections for delegated work, do not override them with other models or efforts.`);
+    if (bridge) lines.push(`Use dispatch_spawn to delegate through the ${harness.subagents.type} harness with the configured worker model and effort. Do not use native subagents. Use dispatch_status for progress and incoming messages, dispatch_message to coordinate, and dispatch_wait until every worker finishes before handing off. Workers may communicate and delegate through either configured harness. Model and effort selections are enforced by Dispatch.`);
+    else if (harness.type === 'claude') lines.push('Use subagent_type dispatch-worker for delegated build tasks.');
     lines.push(`Report progress by appending one JSON object per line to ${JSON.stringify(progressFile)}. This file is owned by Dispatch and is allowed in the ticket data directory, including on read-only tickets. Each line has {"agentId":"orchestrator or stable task slug","task":"assignment","status":"pending|running|blocked|completed|failed","text":"brief milestone or current work","decision":"optional decision and brief rationale"}. Append at task start, meaningful milestones, blockers, decisions, and completion. Do not rewrite the file. Do not include secrets or private reasoning; only public work summaries. If writing is denied, report in ordinary commentary and continue.`);
     lines.push('Give each subagent a unique task slug and include [dispatch-agent:SLUG] in its assignment. Pass these progress instructions, the absolute reporting path, and its slug to every subagent. Subagents report using their slug; you use orchestrator. Do not mark completion until verified. Wait for all spawned work before the final handoff.');
   }

@@ -113,6 +113,25 @@ usage APIs; in that case the usage meters show unavailable rather than treating 
 logged out. Set `CLAUDE_CODE_OAUTH_TOKEN` only if you intentionally want Dispatch to use a
 readable Claude OAuth token for usage/model enrichment.
 
+## Cross-harness subagents
+
+Open an agent phase's **CFG**, then choose **Subagents → Harness**, model, and effort.
+The worker harness is independent of the orchestrator: Claude can coordinate Codex
+workers, and Codex can coordinate Claude workers. The same controls are available
+under Settings → Providers. Backlog and Done have no phase configuration control.
+
+When the harnesses differ, Dispatch supplies run-scoped tools for spawning, status,
+messages, and waiting. Workers can communicate with the orchestrator and each other,
+and delegate through either configured harness. Each harness uses its selected model
+and effort. Active workers check messages at milestones; messaging a finished worker
+resumes its session. The Build tab records assignments, updates, results, and the actual
+worker harness/model/effort. Changes apply to the next run, not a running ticket.
+
+Both providers must be enabled and have working CLI access. Read-only runs remain
+read-only across both harnesses. The bridge permits up to four concurrent workers and
+twelve total tasks per run, with a thirty-minute worker timeout. Stopping the run also
+stops its worker processes. Same-harness configurations continue using native subagents.
+
 ## Automatic Graft indexing
 
 Dispatch automatically builds a [Graft](https://github.com/nanonets/graft) structural code

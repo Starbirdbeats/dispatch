@@ -16,6 +16,10 @@ export function normalizeProgress(value) {
   return { kind: 'agent', agentId: value.agentId, source: 'reported', text: text || decision || task,
     ...(task ? { task } : {}), ...(decision ? { decision } : {}),
     ...(statuses.has(value.status) ? { status: value.status } : {}),
+    ...(['claude', 'codex'].includes(value.harness) ? { harness: value.harness } : {}),
+    ...(value.model ? { model: clean(value.model, 160) } : {}),
+    ...(value.effort ? { effort: clean(value.effort, 40) } : {}),
+    ...(value.restart === true ? { restart: true } : {}),
   };
 }
 
@@ -100,7 +104,7 @@ export async function readBuildTranscript(file) {
       const id = ev.agentId;
       const a = agents.get(id) || { agentId: id, history: [] };
       const finished = ['completed', 'failed', 'closed', 'interrupted'].includes(a.status);
-      for (const k of ['task', 'status', 'nativeId']) {
+      for (const k of ['task', 'status', 'nativeId', 'harness', 'model', 'effort']) {
         if (k === 'status' && finished && !ev.restart && ['pending', 'running', 'closed'].includes(ev.status)) continue;
         if (ev[k]) a[k] = ev[k];
       }

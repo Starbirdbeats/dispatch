@@ -8,8 +8,7 @@ import { GRAFT_MCP_TOOLS } from './graft.mjs';
 import { claudeAgentEvents } from './build-progress.mjs';
 
 export function buildInvocation({ prompt, harness, sessionId, dataDir, graft = null }) {
-  // project,local only: user-level settings would fire Marcello's global hooks
-  // (Telegram stop-notifications etc.) on every dispatch run.
+  // Keep unrelated user-level hooks out of automated phase runs.
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--setting-sources', 'project,local'];
   if (harness.model) args.push('--model', harness.model);
   if (harness.effort) args.push('--effort', harness.effort);

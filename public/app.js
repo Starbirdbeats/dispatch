@@ -1569,7 +1569,7 @@ function stationEl(c) {
           <span class="station-count">${String(tickets.length).padStart(2, '0')}</span>
         </span>
       </div>
-      <div class="station-harness"><span class="dot"></span>${esc(stationHarnessLabel(c))}${c.role === 'agent' && !c.autoRun ? ' · MANUAL' : ''}<button class="cfg" data-cfg="${c.id}" title="Configure phase">CFG</button></div>
+      <div class="station-harness"><span class="dot"></span>${esc(stationHarnessLabel(c))}${c.role === 'agent' && !c.autoRun ? ' · MANUAL' : ''}${c.role === 'agent' ? `<button class="cfg" data-cfg="${c.id}" title="Configure phase">CFG</button>` : ''}</div>
       ${disabledType ? '<div class="station-sweep" style="color:var(--red);border-color:var(--red)">PROVIDER DISABLED IN SETUP</div>' : ''}
       ${c.role === 'intake' && S.data.scheduler?.autoDispatch
         ? '<div class="station-sweep">AUTO SWEEP <span data-sweep>T-—:——</span></div>' : ''}
@@ -1585,7 +1585,8 @@ function stationEl(c) {
     drop.onclick = () => openNewTicketModal(c.id);
     body.appendChild(drop);
   }
-  $('.cfg', el).onclick = (e) => { e.stopPropagation(); pushModal({ type: 'column', id: c.id }); };
+  const cfg = $('.cfg', el);
+  if (cfg) cfg.onclick = (e) => { e.stopPropagation(); pushModal({ type: 'column', id: c.id }); };
   // drag & drop a ticket onto a station = move it to that column
   el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('dragover'); });
   el.addEventListener('dragleave', () => el.classList.remove('dragover'));
@@ -3174,7 +3175,7 @@ function appendTranscriptLine(ev, { box = $('#transcript'), preserveScroll = tru
 /* ---- column config modal ---- */
 function renderColumnModal(draftOverride) {
   const c = S.data.board.columns.find((x) => x.id === S.modal.id);
-  if (!c) return closeModal();
+  if (!c || c.role !== 'agent') return closeModal();
   const rawH = draftOverride || c.harness;
   const type = rawH.type || 'human';
   const h = type === 'human' ? rawH : normalizeHarnessChoice(rawH, {});
@@ -3202,12 +3203,16 @@ function renderColumnModal(draftOverride) {
       </div>
       <label class="f">PERMISSIONS</label>
       <select id="c-perms" ${type === 'human' ? 'disabled' : ''}>${harnessOptions('permissions', type, h.permissions || '', '— (harness default)')}</select>
-      <label class="f">ALLOWED TOOLS (claude only, e.g. "Bash(git *) Read Glob")</label>
+      <div ${type !== 'claude' ? 'hidden' : ''}>
+      <label class="f">ALLOWED TOOLS (e.g. "Bash(git *) Read Glob")</label>
       <input id="c-tools" value="${esc(h.allowedTools || '')}">
-      <label class="f">CHROME EXTENSION (claude only)</label>
+      <label class="f">BROWSER INTEGRATION</label>
       <select id="c-chrome"><option value="">off</option><option value="1" ${h.chrome ? 'selected' : ''}>on</option></select>
-      <label class="f">SANDBOX NETWORK ACCESS (codex only — needed for npm, ssh to MSI)</label>
+      </div><div ${type !== 'codex' ? 'hidden' : ''}>
+      <label class="f">SANDBOX NETWORK ACCESS</label>
+      <div class="hint">Allow network requests for dependencies, APIs, and remote services.</div>
       <select id="c-net"><option value="">off</option><option value="1" ${h.network ? 'selected' : ''}>on</option></select>
+      </div>
       <label class="f">AUTO-RUN WHEN A TICKET ARRIVES</label>
       <select id="c-auto"><option value="">off</option><option value="1" ${(draftOverride?._autoRun ?? c.autoRun) ? 'selected' : ''}>on</option></select>
       <label class="f">PHASE PROMPT</label>

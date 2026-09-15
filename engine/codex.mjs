@@ -19,7 +19,7 @@ export function buildInvocation({ prompt, harness, sessionId, dataDir, workspace
     if (harness.subagents.model) args.push('-c', `agents.default_subagent_model=${JSON.stringify(harness.subagents.model)}`);
     if (harness.subagents.effort) args.push('-c', `agents.default_subagent_reasoning_effort=${JSON.stringify(harness.subagents.effort)}`);
   }
-  // workspace-write blocks network by default — opt in per column/ticket (npm, ssh to MSI, etc.)
+  // workspace-write blocks network by default; opt in per column or ticket.
   if (harness.network) args.push('-c', 'sandbox_workspace_write.network_access=true');
 
   // Codex only honours writable_roots under workspace-write — a literal read-only

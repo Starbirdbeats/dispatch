@@ -276,7 +276,8 @@ async function loadState() {
 
 /* ---------- websocket ---------- */
 function connectWS() {
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+  const socketProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${socketProtocol}//${location.host}/ws`);
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'state-changed') loadState().catch(console.error);
